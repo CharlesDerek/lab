@@ -1,0 +1,11 @@
+/target/
+
+# Local configuration and credentials.
+.env
+.env.*
+!.env.example
+
+# Editor and OS noise.
+.DS_Store
+.idea/
+.vscode/
