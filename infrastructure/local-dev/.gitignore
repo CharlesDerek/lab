@@ -1,0 +1,6 @@
+# Keep local service state and generated artifacts out of git.
+data/
+artifacts/
+logs/
+.localstack/
+

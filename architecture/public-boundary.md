@@ -5,6 +5,7 @@ This repo is allowed to contain public-safe architecture, contracts, and local-o
 ## Safe to Commit
 
 - Abstract component names: `control-plane`, `worker-group-a`, `review-queue`.
+- Abstract capability names: `routing`, `automation`, `siem`, `edr`, `logging`, `scheduler`, `worker-capacity`.
 - Local-only defaults: `127.0.0.1`, `localhost`, `test` AWS credentials for LocalStack.
 - Topic names, message envelopes, local resource names, and placeholder policies.
 - Sanitized examples that do not reveal customer data, private prompts, model secrets, rack addresses, serial numbers, or exact deployment topology.
@@ -15,6 +16,7 @@ This repo is allowed to contain public-safe architecture, contracts, and local-o
 - Paperclip API keys, production endpoints, prompt libraries, workflow secrets, or account identifiers.
 - AWS account IDs, access keys, real ARNs, Terraform state, and production IAM policy bindings.
 - Rack hostnames, private IPs, public IPs, MAC addresses, serial numbers, IPMI/BMC details, switch configuration, physical port maps, storage controller details, and remote access procedures.
+- OpenWrt exports, VLAN IDs, firewall rules, Kubernetes kubeconfigs, production manifests, SIEM/EDR console details, detection logic, and private incident records.
 - Logs that contain secrets, private datasets, user data, internal run IDs, or unredacted model transcripts.
 
 ## Recommended Split

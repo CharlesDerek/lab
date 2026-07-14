@@ -1,4 +1,4 @@
-# RFC-001: Scalable Agent System Preparation
+# RFC-001: Athernex Scalable Agent System Preparation
 
 ## Status
 
@@ -6,24 +6,25 @@ Draft for local staging.
 
 ## Goal
 
-Prepare a public-safe foundation for coordinating agent workloads across a future server rack without exposing rack internals. The system should support orchestration, review, failure handling, and generative quality controls before physical components are fully available.
+Prepare a public-safe foundation for coordinating agent and infrastructure workloads across Project Athernex without exposing rack internals. The system should support orchestration, review, failure handling, security gates, and generative quality controls before private rack automation is promoted.
 
 ## Non-Goals
 
 - Publishing private rack topology, addresses, management-plane details, or credentials.
 - Automating power, firmware, IPMI, or storage operations in this public repo.
+- Publishing Kubernetes manifests, OpenWrt configuration, VLAN IDs, SIEM/EDR internals, or production observability endpoints from the private environment.
 - Trusting model output as complete or correct without validation.
 
 ## Component Model
 
 ```text
-producer -> Kafka command topic -> Rust orchestrator -> agent worker
+producer -> Kafka command topic -> Rust orchestrator -> scheduler adapter
                                       |              |
                                       v              v
-                              LocalStack state   Paperclip adapter
+                              LocalStack state   worker capacity
                                       |
                                       v
-                           review / quarantine / audit
+                        review / quarantine / audit / Paperclip adapter
 ```
 
 ### Kafka Topics
@@ -35,6 +36,10 @@ producer -> Kafka command topic -> Rust orchestrator -> agent worker
 | `agent.results` | Completed outputs that passed required checks. |
 | `agent.review` | Outputs that need human or secondary-model review. |
 | `agent.deadletter` | Exhausted retries, malformed messages, unsafe requests, or invariant failures. |
+| `scheduler.capacity` | Sanitized capacity requests and node lifecycle observations. |
+| `power.commands` | Sanitized power-module intents for private REST bridges. |
+| `power.observations` | Sanitized power state transitions captured during lifecycle actions. |
+| `security.findings` | Sanitized SIEM, EDR, validation, or policy findings that affect workflow promotion. |
 | `paperclip.requests` | Sanitized requests bound for the Paperclip adapter. |
 | `paperclip.responses` | Sanitized Paperclip responses returned for orchestration. |
 | `agent.audit` | Immutable run events suitable for later analysis. |

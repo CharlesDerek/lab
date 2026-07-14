@@ -1,11 +1,46 @@
+# Rust
 /target/
+**/*.rs.bk
 
-# Local configuration and credentials.
+# Local environment and secrets
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
 
-# Editor and OS noise.
-.DS_Store
+# Local runtime state
+.paperclip/
+!paperclip/
+!paperclip/**
+.codex/
+.cache/
+tmp/
+temp/
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors and OS metadata
 .idea/
 .vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Infrastructure state
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+kubeconfig*
+*.kubeconfig

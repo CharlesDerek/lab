@@ -8,8 +8,10 @@ The orchestration system should assume that both infrastructure and model behavi
 | --- | --- | --- |
 | Transport | Kafka unavailable, LocalStack unavailable, timeout | Retry with bounded backoff, then dead-letter. |
 | Resource pressure | Too many in-flight runs, memory pressure, disk pressure | Throttle scheduling and emit observation events. |
+| Capacity lifecycle | Worker group unavailable, node not ready, scheduling constraint unsatisfied | Hold or reschedule without exposing private power or cluster procedures. |
 | Validation | Schema mismatch, missing evidence, invalid artifact reference | Reject or send to review. |
 | Safety | Secret leakage, private data in output, unsafe command proposal | Quarantine and require human review. |
+| Security finding | SIEM, EDR, or policy signal attached to a run | Quarantine affected workflow and require review. |
 | Hallucination | Unsupported claim, fabricated tool result, inconsistent reasoning trail | Route to review with evidence requirements. |
 | Adapter | Paperclip endpoint error, invalid response, auth failure | Retry only if transient; otherwise dead-letter. |
 
@@ -18,8 +20,9 @@ The orchestration system should assume that both infrastructure and model behavi
 1. **Schema gate:** all commands and results match versioned envelopes.
 2. **Evidence gate:** claims that depend on files, tools, or external systems include references.
 3. **Safety gate:** outputs are scanned for secrets and private operational details.
-4. **Determinism gate:** orchestration decisions are based on explicit state, not free-form model output.
-5. **Promotion gate:** accepted outputs are copied to durable artifacts and indexed by run metadata.
+4. **Security gate:** SIEM, EDR, and policy findings can block promotion.
+5. **Determinism gate:** orchestration decisions are based on explicit state, not free-form model output.
+6. **Promotion gate:** accepted outputs are copied to durable artifacts and indexed by run metadata.
 
 ## Minimum Event Fields
 
@@ -39,5 +42,6 @@ The orchestration system should assume that both infrastructure and model behavi
 
 - Start with local-only flows using LocalStack and Kafka-compatible services.
 - Use low concurrency until retry and dead-letter behavior is observable.
+- Model dynamic compute capacity through sanitized scheduler events before connecting private node lifecycle automation.
 - Promote one capability at a time into the rack environment.
 - Capture every failed run as a replayable test fixture after redaction.

@@ -1,0 +1,44 @@
+{
+  "title": "Neuroplexis Athernex Lab Maintenance",
+  "description": "Every 6 hours, Neuroplexis reviews /home/charles/Documents/Software/github/lab on the development branch and performs a bounded maintenance pass. The expected implementation path is tools/neuroplexis_lab_maintenance.sh: create a task branch, run up to 5 non-interactive Codex cycles, verify after each cycle, collect evidence, and compact notes for the next cycle. Scope work to public-safe Project Athernex R&D improvements only: orchestration contracts, Kafka broker and power-scheduler modeling, Paperclip integration, Rust control-plane scaffolding, documentation, tests, and repo hygiene. Do not publish secrets, private topology, credentials, private network inventories, BMC/IPMI details, vendor-specific power runbooks, or destructive automation.",
+  "priority": "medium",
+  "status": "active",
+  "concurrencyPolicy": "skip_if_active",
+  "catchUpPolicy": "skip_missed",
+  "env": {
+    "REPO_ROOT": "/home/charles/Documents/Software/github/lab",
+    "BASE_BRANCH": "development",
+    "MAX_CODEX_RUNS": "5",
+    "VERIFY_COMMAND": "make check",
+    "COMPONENT_AREA": "public-safe orchestration, Kafka power scheduling, Paperclip integration, and repo hygiene",
+    "ALLOW_DIRTY_START": "true",
+    "DRY_RUN": "false",
+    "REQUIRE_CODEX_CHANGE": "true",
+    "AUTO_COMMIT": "true",
+    "PUSH_BRANCH": "true",
+    "REMOTE_NAME": "origin",
+    "ALLOWED_REMOTE_REPO": "CharlesDerek/lab",
+    "PRIMARY_REMOTE": "origin",
+    "PRIMARY_ALLOWED_REPO": "CharlesDerek/lab",
+    "DOWNSTREAM_REMOTE": "athernex",
+    "DOWNSTREAM_ALLOWED_REPO": "Athernex/orchestrator",
+    "DOWNSTREAM_BRANCH": "retrospective",
+    "COMMIT_MESSAGE_PREFIX": "chore: neuroplexis maintenance"
+  },
+  "variables": [
+    {
+      "name": "COMPONENT_AREA",
+      "label": "Component area",
+      "type": "textarea",
+      "defaultValue": "public-safe orchestration, Kafka power scheduling, Paperclip integration, and repo hygiene",
+      "required": true
+    },
+    {
+      "name": "MAX_CODEX_RUNS",
+      "label": "Max Codex runs",
+      "type": "number",
+      "defaultValue": 5,
+      "required": true
+    }
+  ]
+}

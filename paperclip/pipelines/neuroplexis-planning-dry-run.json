@@ -1,0 +1,56 @@
+{
+  "name": "neuroplexis-planning-dry-run",
+  "repoRoot": "/home/charles/Documents/Software/github/lab",
+  "baseBranch": "development",
+  "branchPrefix": "routine/neuroplexis-planning-dry-run",
+  "primaryRemoteName": "origin",
+  "primaryAllowedRemoteRepo": "CharlesDerek/lab",
+  "downstreamRemoteName": "athernex",
+  "downstreamAllowedRemoteRepo": "Athernex/orchestrator",
+  "downstreamBranch": "retrospective",
+  "verifyCommand": "make check",
+  "autoCommit": true,
+  "pushBranch": true,
+  "allowDirtyStart": false,
+  "tasks": [
+    {
+      "id": "plan-future-work",
+      "type": "codex",
+      "maxRuns": 1,
+      "prompt": "Create a public-safe future work planning artifact for Project Athernex. Add or update docs/planning/neuroplexis-future-tasks.md with a concise backlog of future tasks for Kafka broker power scheduling, Rust orchestration, Paperclip routine integration, Kubernetes scheduling contracts, tests, and public/private boundary hygiene. Do not add secrets, private topology, credentials, private network inventories, BMC/IPMI details, or destructive power procedures. Make only this planning artifact change."
+    },
+    {
+      "id": "verify-planning-artifact",
+      "type": "verify_artifact",
+      "requiredFiles": [
+        "docs/planning/neuroplexis-future-tasks.md"
+      ],
+      "requiredPatterns": [
+        "Kafka",
+        "Rust",
+        "Paperclip",
+        "Kubernetes",
+        "public/private"
+      ]
+    },
+    {
+      "id": "verify-pushed-repo",
+      "type": "verify_pushed",
+      "remoteName": "origin",
+      "branchMustExistOnRemote": true,
+      "requiredFiles": [
+        "docs/planning/neuroplexis-future-tasks.md"
+      ]
+    },
+    {
+      "id": "verify-downstream-retrospective",
+      "type": "verify_pushed",
+      "remoteName": "athernex",
+      "branchName": "retrospective",
+      "branchMustExistOnRemote": true,
+      "requiredFiles": [
+        "docs/planning/neuroplexis-future-tasks.md"
+      ]
+    }
+  ]
+}

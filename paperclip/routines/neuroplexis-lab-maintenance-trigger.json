@@ -1,0 +1,7 @@
+{
+  "label": "Every 6 hours",
+  "enabled": true,
+  "kind": "schedule",
+  "cronExpression": "0 */6 * * *",
+  "timezone": "America/New_York"
+}
