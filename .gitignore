@@ -44,3 +44,6 @@ Thumbs.db
 .terraform.lock.hcl
 kubeconfig*
 *.kubeconfig
+
+# MRGI local runtime state
+.mrgi

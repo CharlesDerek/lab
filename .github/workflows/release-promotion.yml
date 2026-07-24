@@ -1,0 +1,267 @@
+name: Release Promotion
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version or promotion label, for example v0.1.0-rc.1"
+        required: false
+        type: string
+      publish_release:
+        description: "Publish a GitHub Release for this manual run"
+        required: false
+        default: false
+        type: boolean
+      promote_production:
+        description: "Run the production environment promotion simulation"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: Build Release Evidence
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      CARGO_TERM_COLOR: always
+      TOFU_DIR: infrastructure/opentofu/kubernetes-scheduler-contract
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install OpenTofu
+        uses: opentofu/setup-opentofu@v1
+
+      - name: Install supply-chain tooling
+        run: cargo install cargo-audit cargo-cyclonedx --locked
+
+      - name: Run full validation gate
+        run: make check
+
+      - name: Capture supply-chain evidence
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist/evidence
+          cargo audit > dist/evidence/cargo-audit.txt
+          cargo metadata --locked --format-version 1 > dist/evidence/cargo-metadata.json
+          cargo cyclonedx --format json --override-filename rust-sbom
+          mv core-engines/orchestrator/rust-sbom.json dist/evidence/rust-sbom.cdx.json
+
+      - name: Build orchestrator release binary
+        run: cargo build --workspace --release
+
+      - name: Resolve release version
+        id: version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+          elif [ -n "${INPUT_VERSION}" ]; then
+            version="${INPUT_VERSION}"
+          else
+            version="manual-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::12}"
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Render sanitized OpenTofu plan
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist/evidence
+          tofu -chdir="${TOFU_DIR}" init -backend=false
+          tofu -chdir="${TOFU_DIR}" plan -input=false -no-color > dist/evidence/opentofu-plan.txt
+
+      - name: Assemble evidence bundle
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist/evidence
+          cp target/release/orchestrator dist/orchestrator-linux-x86_64
+
+          {
+            echo "# Athernex Release Promotion Evidence"
+            echo
+            echo "- Version: ${VERSION}"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Ref: ${GITHUB_REF_NAME}"
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Validation gate: \`make check\`"
+            echo "- Build command: \`cargo build --workspace --release\`"
+            echo "- OpenTofu plan: \`evidence/opentofu-plan.txt\`"
+            echo "- Dependency audit: \`evidence/cargo-audit.txt\`"
+            echo "- Rust SBOM: \`evidence/rust-sbom.cdx.json\`"
+            echo
+            echo "## Public Boundary"
+            echo
+            echo "This artifact contains only sanitized control-plane contracts, validation"
+            echo "evidence, and a release build. It does not include private rack topology,"
+            echo "credentials, host addresses, management-plane procedures, or deployment state."
+          } > dist/evidence/promotion-summary.md
+
+          awk '
+            /^## / && seen { exit }
+            /^## Unreleased/ { seen = 1 }
+            seen { print }
+          ' CHANGELOG.md > dist/evidence/changelog-excerpt.md
+
+          tar -czf "dist/athernex-release-evidence-${VERSION}.tar.gz" \
+            -C dist evidence orchestrator-linux-x86_64
+
+          sha256sum \
+            dist/orchestrator-linux-x86_64 \
+            "dist/athernex-release-evidence-${VERSION}.tar.gz" \
+            dist/evidence/cargo-metadata.json \
+            dist/evidence/rust-sbom.cdx.json \
+            > dist/SHA256SUMS
+
+      - name: Upload promotion artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-promotion-${{ steps.version.outputs.version }}
+          path: |
+            dist/orchestrator-linux-x86_64
+            dist/athernex-release-evidence-${{ steps.version.outputs.version }}.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag' || github.event.inputs.publish_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          notes_file="dist/evidence/promotion-summary.md"
+          assets=(
+            "dist/orchestrator-linux-x86_64"
+            "dist/athernex-release-evidence-${VERSION}.tar.gz"
+            "dist/SHA256SUMS"
+          )
+
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            gh release upload "${VERSION}" "${assets[@]}" --clobber
+          else
+            gh release create "${VERSION}" "${assets[@]}" \
+              --title "${VERSION}" \
+              --target "${GITHUB_SHA}" \
+              --notes-file "${notes_file}"
+          fi
+
+  staging:
+    name: Staging Promotion Simulation
+    runs-on: ubuntu-latest
+    needs: promote
+    environment:
+      name: staging
+    steps:
+      - name: Download release evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: release-promotion-${{ needs.promote.outputs.version }}
+          path: dist
+
+      - name: Verify release checksums
+        run: |
+          set -euo pipefail
+
+          cd dist
+          sha256sum --ignore-missing -c SHA256SUMS
+
+      - name: Simulate staging deployment
+        env:
+          VERSION: ${{ needs.promote.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist/deployment
+          {
+            echo "# Staging Promotion Receipt"
+            echo
+            echo "- Environment: staging"
+            echo "- Version: ${VERSION}"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Deployment mode: public-safe simulation"
+            echo "- Action: validated artifact checksums and recorded staging promotion intent"
+          } > dist/deployment/staging-promotion.md
+
+      - name: Upload staging receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-promotion-${{ needs.promote.outputs.version }}
+          path: dist/deployment/staging-promotion.md
+          if-no-files-found: error
+
+  production:
+    name: Production Approval Simulation
+    runs-on: ubuntu-latest
+    needs:
+      - promote
+      - staging
+    if: github.ref_type == 'tag' || github.event.inputs.promote_production == 'true'
+    environment:
+      name: production
+    steps:
+      - name: Download release evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: release-promotion-${{ needs.promote.outputs.version }}
+          path: dist
+
+      - name: Verify release checksums
+        run: |
+          set -euo pipefail
+
+          cd dist
+          sha256sum --ignore-missing -c SHA256SUMS
+
+      - name: Simulate production promotion
+        env:
+          VERSION: ${{ needs.promote.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist/deployment
+          {
+            echo "# Production Promotion Receipt"
+            echo
+            echo "- Environment: production"
+            echo "- Version: ${VERSION}"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Deployment mode: public-safe simulation"
+            echo "- Action: production promotion approved by GitHub Environment gate"
+            echo
+            echo "No private rack, network, power, or cluster operation is performed by this workflow."
+          } > dist/deployment/production-promotion.md
+
+      - name: Upload production receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-promotion-${{ needs.promote.outputs.version }}
+          path: dist/deployment/production-promotion.md
+          if-no-files-found: error
