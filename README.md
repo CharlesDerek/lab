@@ -59,6 +59,21 @@ Start Kafka-compatible messaging and LocalStack:
 make local-up
 ```
 
+Or use the interactive operations menu for common local and deployment actions:
+
+```bash
+make menu
+```
+
+Direct shortcuts are also available:
+
+```bash
+make on       # start local staging services
+make off      # stop local staging services
+make status   # show local staging service status
+make deploy   # run validation, then push origin and downstream
+```
+
 Kafka UI is exposed at `http://127.0.0.1:18080/` to avoid common local port conflicts.
 
 Run the Rust orchestrator preparation stub:
@@ -127,6 +142,12 @@ Manual dual push:
 
 ```bash
 tools/push_downstream.sh
+```
+
+The Makefile deploy target wraps this with validation:
+
+```bash
+make deploy
 ```
 
 Run the local Codex scheduler bridge:

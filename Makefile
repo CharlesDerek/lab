@@ -1,13 +1,57 @@
-.PHONY: local-up local-down local-logs run-orchestrator run-paperclip run-codex-scheduler run-webui fmt check check-rust check-webui check-automation check-opentofu check-workflows check-supply-chain
+.PHONY: menu help on off deploy local-up local-down local-status local-logs run-orchestrator run-paperclip run-codex-scheduler run-webui fmt check check-rust check-webui check-automation check-opentofu check-workflows check-supply-chain
 
 COMPOSE_FILE := infrastructure/local-dev/docker-compose.yml
 TOFU ?= tofu
+
+menu:
+	@printf "\nAthernex lab menu\n"
+	@printf "  1) Turn on local staging services\n"
+	@printf "  2) Turn off local staging services\n"
+	@printf "  3) Show local service status\n"
+	@printf "  4) Follow local service logs\n"
+	@printf "  5) Validate and deploy/push\n"
+	@printf "  6) Run full validation only\n"
+	@printf "  q) Quit\n\n"
+	@printf "Select an option: "; \
+	read choice; \
+	case "$$choice" in \
+		1) $(MAKE) on ;; \
+		2) $(MAKE) off ;; \
+		3) $(MAKE) local-status ;; \
+		4) $(MAKE) local-logs ;; \
+		5) $(MAKE) deploy ;; \
+		6) $(MAKE) check ;; \
+		q|Q) exit 0 ;; \
+		*) echo "Unknown option: $$choice"; exit 2 ;; \
+	esac
+
+help:
+	@printf "Athernex lab targets:\n"
+	@printf "  make menu          Interactive operations menu\n"
+	@printf "  make on            Turn on local Docker staging services\n"
+	@printf "  make off           Turn off local Docker staging services\n"
+	@printf "  make status        Show local Docker staging service status\n"
+	@printf "  make local-logs    Follow local Docker staging service logs\n"
+	@printf "  make check         Run validation suite\n"
+	@printf "  make deploy        Run validation, then guarded dual push\n"
+
+on: local-up
+
+off: local-down
+
+status: local-status
+
+deploy: check
+	tools/push_downstream.sh
 
 local-up:
 	docker compose -f $(COMPOSE_FILE) up -d
 
 local-down:
 	docker compose -f $(COMPOSE_FILE) down
+
+local-status:
+	docker compose -f $(COMPOSE_FILE) ps
 
 local-logs:
 	docker compose -f $(COMPOSE_FILE) logs -f
