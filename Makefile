@@ -1,4 +1,4 @@
-.PHONY: local-up local-down local-logs run-orchestrator run-paperclip run-codex-scheduler fmt check check-rust check-automation check-opentofu check-workflows check-supply-chain
+.PHONY: local-up local-down local-logs run-orchestrator run-paperclip run-codex-scheduler run-webui fmt check check-rust check-webui check-automation check-opentofu check-workflows check-supply-chain
 
 COMPOSE_FILE := infrastructure/local-dev/docker-compose.yml
 TOFU ?= tofu
@@ -21,14 +21,20 @@ run-paperclip:
 run-codex-scheduler:
 	python3 tools/codex_scheduler_bridge.py
 
+run-webui:
+	npm --prefix webui run dev
+
 fmt:
 	cargo fmt --all
 
-check: check-rust check-automation check-workflows check-supply-chain check-opentofu
+check: check-rust check-webui check-automation check-workflows check-supply-chain check-opentofu
 
 check-rust:
 	cargo check --workspace
 	cargo test --workspace
+
+check-webui:
+	npm --prefix webui run build
 
 check-automation:
 	bash -n tools/*.sh paperclip/routines/*.sh

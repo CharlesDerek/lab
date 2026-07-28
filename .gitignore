@@ -29,6 +29,11 @@ __pycache__/
 .venv/
 venv/
 
+# Web UI
+node_modules/
+webui/node_modules/
+webui/dist/
+
 # Editors and OS metadata
 .idea/
 .vscode/

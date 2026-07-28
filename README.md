@@ -106,6 +106,15 @@ make run-paperclip
 
 The official Paperclip dashboard runs on port `3100` by default. This machine is configured for authenticated private-network access, so use `http://127.0.0.1:3100/`, a LAN address, or a Tailscale address allowed by the host firewall.
 
+Run the TypeScript security operations dashboard:
+
+```bash
+npm --prefix webui install
+make run-webui
+```
+
+The Web UI binds to `0.0.0.0` for local lab access and runs at `http://127.0.0.1:5173/`, your LAN address, or your Tailscale address. It is a Bootstrap-backed React and TypeScript dashboard with BEM-style custom CSS. It presents a public-safe monitoring surface for Paperclip AI, the Codex scheduler bridge, Kafka UI, LocalStack, and the Kubernetes scheduler contract. It intentionally renders sanitized resource metadata only: no Paperclip API keys, private prompts, rack topology, host inventories, raw dead-letter payloads, kubeconfigs, or production endpoints.
+
 Git remotes are split by role:
 
 - `origin`: personal R&D source, `git@github.com:CharlesDerek/lab.git`
