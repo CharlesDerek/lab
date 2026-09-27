@@ -22,6 +22,15 @@ pub struct DurableCapacity {
     connection: Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingCommand {
+    pub owner: String,
+    pub resource: String,
+    pub generation: i64,
+    pub expires_ms: i64,
+    pub payload: String,
+}
+
 impl DurableCapacity {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let connection = Connection::open(path)?;
@@ -30,7 +39,8 @@ impl DurableCapacity {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
              CREATE TABLE IF NOT EXISTS resources (name TEXT PRIMARY KEY, slots INTEGER NOT NULL CHECK(slots > 0), generation INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE IF NOT EXISTS leases (owner TEXT NOT NULL, resource TEXT NOT NULL, slots INTEGER NOT NULL, generation INTEGER NOT NULL, created_ms INTEGER NOT NULL, expires_ms INTEGER NOT NULL, active INTEGER NOT NULL, PRIMARY KEY(owner, resource, generation));
-             CREATE INDEX IF NOT EXISTS active_leases ON leases(resource, active, expires_ms);",
+             CREATE INDEX IF NOT EXISTS active_leases ON leases(resource, active, expires_ms);
+             CREATE TABLE IF NOT EXISTS command_outbox (owner TEXT NOT NULL, resource TEXT NOT NULL, generation INTEGER NOT NULL, expires_ms INTEGER NOT NULL, payload TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(owner, resource, generation));",
         )?;
         Ok(Self { connection })
     }
@@ -63,6 +73,30 @@ impl DurableCapacity {
         now_ms: i64,
         ttl_ms: i64,
     ) -> rusqlite::Result<Decision> {
+        self.reserve_inner(owner, resource, slots, now_ms, ttl_ms, false)
+    }
+
+    /// Commit admission and its command intent in the same SQLite transaction.
+    pub fn reserve_for_publication(
+        &mut self,
+        owner: &str,
+        resource: &str,
+        slots: u32,
+        now_ms: i64,
+        ttl_ms: i64,
+    ) -> rusqlite::Result<Decision> {
+        self.reserve_inner(owner, resource, slots, now_ms, ttl_ms, true)
+    }
+
+    fn reserve_inner(
+        &mut self,
+        owner: &str,
+        resource: &str,
+        slots: u32,
+        now_ms: i64,
+        ttl_ms: i64,
+        enqueue: bool,
+    ) -> rusqlite::Result<Decision> {
         if !safe_label(owner)
             || !safe_label(resource)
             || slots == 0
@@ -90,6 +124,9 @@ impl DurableCapacity {
         )?;
         let existing = tx.query_row("SELECT owner, resource, slots, generation, created_ms, expires_ms FROM leases WHERE owner=?1 AND resource=?2 AND active=1", params![owner, resource], parse_lease).optional()?;
         if let Some(lease) = existing {
+            if enqueue && lease.slots == slots {
+                enqueue_command(&tx, &lease)?;
+            }
             let decision = if lease.slots == slots {
                 Decision::Duplicate(lease)
             } else {
@@ -129,8 +166,44 @@ impl DurableCapacity {
             expires_ms: now_ms + ttl_ms,
         };
         tx.execute("INSERT INTO leases(owner,resource,slots,generation,created_ms,expires_ms,active) VALUES (?1,?2,?3,?4,?5,?6,1)", params![owner, resource, slots, next, now_ms, lease.expires_ms])?;
+        if enqueue {
+            enqueue_command(&tx, &lease)?;
+        }
         tx.commit()?;
         Ok(Decision::Granted(lease))
+    }
+
+    pub fn pending_commands(
+        &mut self,
+        resource: &str,
+        now_ms: i64,
+    ) -> rusqlite::Result<Vec<PendingCommand>> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE command_outbox SET delivered=2 WHERE delivered=0 AND expires_ms<=?1",
+            [now_ms],
+        )?;
+        let result = {
+            let mut stmt = tx.prepare("SELECT o.owner,o.resource,o.generation,o.expires_ms,o.payload FROM command_outbox o JOIN leases l ON l.owner=o.owner AND l.resource=o.resource AND l.generation=o.generation WHERE o.delivered=0 AND l.active=1 AND o.resource=?1 ORDER BY o.generation LIMIT 100")?;
+            let rows = stmt.query_map([resource], |r| {
+                Ok(PendingCommand {
+                    owner: r.get(0)?,
+                    resource: r.get(1)?,
+                    generation: r.get(2)?,
+                    expires_ms: r.get(3)?,
+                    payload: r.get(4)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub fn mark_delivered(&mut self, command: &PendingCommand) -> rusqlite::Result<bool> {
+        Ok(self.connection.execute("UPDATE command_outbox SET delivered=1 WHERE owner=?1 AND resource=?2 AND generation=?3 AND delivered=0", params![command.owner,command.resource,command.generation])? == 1)
     }
 
     pub fn release(
@@ -152,6 +225,7 @@ impl DurableCapacity {
                     "UPDATE leases SET active=0 WHERE owner=?1 AND resource=?2 AND generation=?3",
                     params![owner, resource, generation],
                 )?;
+                tx.execute("UPDATE command_outbox SET delivered=2 WHERE owner=?1 AND resource=?2 AND generation=?3 AND delivered=0", params![owner,resource,generation])?;
                 "released"
             }
             None => "already_released",
@@ -167,6 +241,12 @@ impl DurableCapacity {
             .collect();
         result
     }
+}
+
+fn enqueue_command(tx: &rusqlite::Transaction<'_>, lease: &Lease) -> rusqlite::Result<()> {
+    let payload = serde_json::json!({"schema_version":"athernex.capacity.command.v1","owner":lease.owner,"resource":lease.resource,"slots":lease.slots,"fencing_token":lease.generation,"lease_expires_at_epoch_ms":lease.expires_ms}).to_string();
+    tx.execute("INSERT OR IGNORE INTO command_outbox(owner,resource,generation,expires_ms,payload) VALUES (?1,?2,?3,?4,?5)", params![lease.owner,lease.resource,lease.generation,lease.expires_ms,payload])?;
+    Ok(())
 }
 
 fn safe_label(value: &str) -> bool {
@@ -248,5 +328,60 @@ mod tests {
             Decision::Refused("insufficient_capacity")
         );
         assert_eq!(b.active("local", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn outbox_survives_restart_and_replay_without_duplicate_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capacity.db");
+        let mut first = DurableCapacity::open(&path).unwrap();
+        first.configure("local", 1).unwrap();
+        let Decision::Granted(lease) = first
+            .reserve_for_publication("run_1", "local", 1, 100, 1000)
+            .unwrap()
+        else {
+            panic!()
+        };
+        drop(first);
+        let mut recovered = DurableCapacity::open(&path).unwrap();
+        assert!(matches!(
+            recovered
+                .reserve_for_publication("run_1", "local", 1, 150, 1000)
+                .unwrap(),
+            Decision::Duplicate(_)
+        ));
+        let pending = recovered.pending_commands("local", 150).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0]
+            .payload
+            .contains(&format!("\"fencing_token\":{}", lease.generation)));
+        assert!(recovered.mark_delivered(&pending[0]).unwrap());
+        assert!(!recovered.mark_delivered(&pending[0]).unwrap());
+        assert!(recovered.pending_commands("local", 200).unwrap().is_empty());
+    }
+
+    #[test]
+    fn released_or_expired_command_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capacity.db");
+        let mut ledger = DurableCapacity::open(&path).unwrap();
+        ledger.configure("local", 1).unwrap();
+        let Decision::Granted(lease) = ledger
+            .reserve_for_publication("run_1", "local", 1, 100, 100)
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            ledger
+                .release("run_1", "local", lease.generation, 150)
+                .unwrap(),
+            "released"
+        );
+        assert!(ledger.pending_commands("local", 150).unwrap().is_empty());
+        ledger
+            .reserve_for_publication("run_2", "local", 1, 200, 100)
+            .unwrap();
+        assert!(ledger.pending_commands("local", 301).unwrap().is_empty());
     }
 }

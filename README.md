@@ -64,7 +64,18 @@ The no-argument scheduler demonstration uses its in-memory fixture by default;
 set `ATHERNEX_CAPACITY_DB` to run that same publication path through the
 durable ledger. The `capacity` CLI uses the durable ledger directly. Kafka
 publication itself is not an atomic
-transaction with the SQLite commit. The typed Paperclip review adapter is a
+transaction with the SQLite commit. For a recoverable publication workflow,
+`capacity DB RESOURCE CAPACITY enqueue OWNER SLOTS TTL_MS` commits both the
+lease and a versioned command intent in one transaction. `capacity DB RESOURCE
+CAPACITY publish` sends pending commands to Kafka, then marks them delivered.
+`capacity DB RESOURCE CAPACITY pending` shows the queued owner, generation,
+and expiry without exposing the command body.
+Run `publish` on startup and after transient broker failures. Expired or
+released leases are not sent. A crash after Kafka accepts a command but before
+the delivered mark can resend it; the stable key includes the lease generation,
+so consumers must deduplicate and fence stale generations. The no-argument
+scheduler remains a local demonstration and does not dispatch queued commands
+automatically. The typed Paperclip review adapter is a
 public-safe contract and fixture, not a connection to a private Paperclip
 server. It requires explicit approval before any future remote action path.
 The `durable_failure_scenario_holds_unreviewed_work_and_replays_after_restart`

@@ -2,13 +2,18 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::str;
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
+use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaError;
 use rdkafka::message::{Header, Headers, Message, OwnedHeaders};
-use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+use rdkafka::producer::{BaseProducer, BaseRecord, DeliveryResult, Producer, ProducerContext};
 use sha2::{Digest, Sha256};
 mod durable_capacity;
 
@@ -799,7 +804,7 @@ impl CapacityAdmission for DurableAdmission {
         let ttl = i64::try_from(ttl_ms).map_err(|_| ReservationError::InvalidRequest)?;
         let decision = self
             .ledger
-            .reserve(run_id, &self.resource, slots, now, ttl)
+            .reserve_for_publication(run_id, &self.resource, slots, now, ttl)
             .map_err(|_| ReservationError::StorageUnavailable)?;
         match decision {
             Decision::Granted(lease) | Decision::Duplicate(lease) => Ok(CapacityLease {
@@ -993,11 +998,50 @@ fn main() {
     }
 }
 
+#[derive(Clone)]
+struct DeliveryAudit(Arc<AtomicU8>);
+
+impl ClientContext for DeliveryAudit {}
+
+impl ProducerContext for DeliveryAudit {
+    type DeliveryOpaque = ();
+    fn delivery(&self, result: &DeliveryResult<'_>, _: ()) {
+        self.0
+            .store(if result.is_ok() { 1 } else { 2 }, Ordering::SeqCst);
+    }
+}
+
+fn publish_outbox_command(
+    producer: &BaseProducer<DeliveryAudit>,
+    ack: &AtomicU8,
+    command: &durable_capacity::PendingCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ack.store(0, Ordering::SeqCst);
+    let key = format!(
+        "{}:{}:{}",
+        command.owner, command.resource, command.generation
+    );
+    producer
+        .send(
+            BaseRecord::to(KafkaTopic::AgentCommands.as_str())
+                .key(&key)
+                .payload(&command.payload),
+        )
+        .map_err(|(error, _)| format!("command enqueue failed: {error}"))?;
+    producer
+        .flush(Duration::from_secs(6))
+        .map_err(|error| format!("command flush failed: {error}"))?;
+    if ack.load(Ordering::SeqCst) != 1 {
+        return Err("broker did not acknowledge command delivery".into());
+    }
+    Ok(())
+}
+
 fn capacity_command() -> Result<(), Box<dyn std::error::Error>> {
     use durable_capacity::{Decision, DurableCapacity};
     let args = std::env::args().skip(2).collect::<Vec<_>>();
     if args.len() < 4 {
-        return Err("usage: orchestrator capacity DB RESOURCE CAPACITY reserve OWNER REQUESTED_SLOTS TTL_MS | release OWNER GENERATION | status".into());
+        return Err("usage: orchestrator capacity DB RESOURCE CAPACITY reserve|enqueue OWNER REQUESTED_SLOTS TTL_MS | publish | pending | release OWNER GENERATION | status".into());
     }
     let mut ledger = DurableCapacity::open(std::path::Path::new(&args[0]))?;
     let resource = &args[1];
@@ -1023,6 +1067,47 @@ fn capacity_command() -> Result<(), Box<dyn std::error::Error>> {
                     serde_json::json!({"version":1,"decision":"refused","reason":reason,"resource":resource})
                 }
             }
+        }
+        "enqueue" if args.len() == 7 => {
+            let requested_slots: u32 = args[5].parse()?;
+            let ttl_ms: i64 = args[6].parse()?;
+            match ledger.reserve_for_publication(
+                &args[4],
+                resource,
+                requested_slots,
+                now_ms,
+                ttl_ms,
+            )? {
+                Decision::Granted(lease) | Decision::Duplicate(lease) => {
+                    serde_json::json!({"version":1,"decision":"queued","owner":lease.owner,"resource":resource,"generation":lease.generation,"expires_ms":lease.expires_ms})
+                }
+                Decision::Refused(reason) => {
+                    serde_json::json!({"version":1,"decision":"refused","reason":reason,"resource":resource})
+                }
+            }
+        }
+        "publish" if args.len() == 4 => {
+            let commands = ledger.pending_commands(resource, now_ms)?;
+            let ack = Arc::new(AtomicU8::new(0));
+            let bootstrap = OrchestratorConfig::from_env().kafka_bootstrap_servers;
+            let producer: BaseProducer<DeliveryAudit> = ClientConfig::new()
+                .set("bootstrap.servers", &bootstrap)
+                .set("acks", "all")
+                .set("enable.idempotence", "true")
+                .set("message.timeout.ms", "5000")
+                .create_with_context(DeliveryAudit(Arc::clone(&ack)))?;
+            let mut delivered = 0;
+            for command in &commands {
+                publish_outbox_command(&producer, &ack, command)?;
+                if ledger.mark_delivered(command)? {
+                    delivered += 1;
+                }
+            }
+            serde_json::json!({"version":1,"decision":"published","delivered":delivered,"pending_seen":commands.len()})
+        }
+        "pending" if args.len() == 4 => {
+            let commands = ledger.pending_commands(resource, now_ms)?;
+            serde_json::json!({"version":1,"resource":resource,"pending":commands.iter().map(|command| serde_json::json!({"owner":command.owner,"generation":command.generation,"expires_ms":command.expires_ms})).collect::<Vec<_>>()})
         }
         "release" if args.len() == 6 => {
             let generation: i64 = args[5].parse()?;

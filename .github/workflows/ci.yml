@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - retrospective
+      - development
   pull_request:
 
 permissions:
