@@ -36,6 +36,22 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Check bounded encoding experiment
+        run: make research-siem
+
+  webui:
+    name: Legacy Web UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - run: npm --prefix webui ci
+      - run: make check-webui
+
   supply-chain:
     name: Supply Chain
     runs-on: ubuntu-latest
@@ -62,7 +78,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rust-sbom
-          path: core-engines/orchestrator/rust-sbom.json
+          path: |
+            core-engines/orchestrator/rust-sbom.json
+            core-engines/siem/rust-sbom.json
           if-no-files-found: error
 
   automation:

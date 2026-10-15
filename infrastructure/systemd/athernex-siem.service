@@ -1,0 +1,26 @@
+[Unit]
+Description=Athernex Rust SIEM and agent capability gateway
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart="%h/.local/lib/athernex-siem/athernex-siem" --db "%h/.local/share/athernex-siem/siem.sqlite3" --operator-key-file "%h/.config/athernex-siem/operator.key"
+WorkingDirectory=%h/.local/share/athernex-siem
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=64
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

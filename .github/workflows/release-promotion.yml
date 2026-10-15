@@ -51,6 +51,16 @@ jobs:
       - name: Install supply-chain tooling
         run: cargo install cargo-audit cargo-cyclonedx --locked
 
+      - name: Install Node for the legacy dashboard
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Install dashboard dependencies
+        run: npm --prefix webui ci
+
       - name: Run full validation gate
         run: make check
 
@@ -63,8 +73,9 @@ jobs:
           cargo metadata --locked --format-version 1 > dist/evidence/cargo-metadata.json
           cargo cyclonedx --format json --override-filename rust-sbom
           mv core-engines/orchestrator/rust-sbom.json dist/evidence/rust-sbom.cdx.json
+          mv core-engines/siem/rust-sbom.json dist/evidence/siem-sbom.cdx.json
 
-      - name: Build orchestrator release binary
+      - name: Build Rust release binaries
         run: cargo build --workspace --release
 
       - name: Resolve release version
@@ -100,6 +111,7 @@ jobs:
 
           mkdir -p dist/evidence
           cp target/release/orchestrator dist/orchestrator-linux-x86_64
+          cp target/release/athernex-siem dist/athernex-siem-linux-x86_64
 
           {
             echo "# Athernex Release Promotion Evidence"
@@ -113,6 +125,7 @@ jobs:
             echo "- OpenTofu plan: \`evidence/opentofu-plan.txt\`"
             echo "- Dependency audit: \`evidence/cargo-audit.txt\`"
             echo "- Rust SBOM: \`evidence/rust-sbom.cdx.json\`"
+            echo "- SIEM SBOM: \`evidence/siem-sbom.cdx.json\`"
             echo
             echo "## Public Boundary"
             echo
@@ -128,14 +141,19 @@ jobs:
           ' CHANGELOG.md > dist/evidence/changelog-excerpt.md
 
           tar -czf "dist/athernex-release-evidence-${VERSION}.tar.gz" \
-            -C dist evidence orchestrator-linux-x86_64
+            -C dist evidence orchestrator-linux-x86_64 athernex-siem-linux-x86_64
 
-          sha256sum \
-            dist/orchestrator-linux-x86_64 \
-            "dist/athernex-release-evidence-${VERSION}.tar.gz" \
-            dist/evidence/cargo-metadata.json \
-            dist/evidence/rust-sbom.cdx.json \
-            > dist/SHA256SUMS
+          (
+            cd dist
+            sha256sum \
+              orchestrator-linux-x86_64 \
+              athernex-siem-linux-x86_64 \
+              "athernex-release-evidence-${VERSION}.tar.gz" \
+              evidence/cargo-metadata.json \
+              evidence/rust-sbom.cdx.json \
+              evidence/siem-sbom.cdx.json \
+              > SHA256SUMS
+          )
 
       - name: Upload promotion artifacts
         uses: actions/upload-artifact@v4
@@ -143,6 +161,7 @@ jobs:
           name: release-promotion-${{ steps.version.outputs.version }}
           path: |
             dist/orchestrator-linux-x86_64
+            dist/athernex-siem-linux-x86_64
             dist/athernex-release-evidence-${{ steps.version.outputs.version }}.tar.gz
             dist/SHA256SUMS
           if-no-files-found: error
@@ -158,6 +177,7 @@ jobs:
           notes_file="dist/evidence/promotion-summary.md"
           assets=(
             "dist/orchestrator-linux-x86_64"
+            "dist/athernex-siem-linux-x86_64"
             "dist/athernex-release-evidence-${VERSION}.tar.gz"
             "dist/SHA256SUMS"
           )

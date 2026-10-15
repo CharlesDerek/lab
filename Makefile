@@ -1,7 +1,12 @@
-.PHONY: menu help on off deploy local-up local-down local-status local-logs run-orchestrator run-paperclip run-codex-scheduler run-webui fmt check check-rust check-webui check-automation check-opentofu check-workflows check-supply-chain
+.PHONY: menu help on off deploy local-up local-down local-status local-logs run-orchestrator run-paperclip run-codex-scheduler run-webui fmt check check-rust check-webui check-automation check-opentofu check-workflows check-supply-chain research-siem
+.PHONY: run-siem run-siem-demo siem-init siem-key install-siem check-siem
 
 COMPOSE_FILE := infrastructure/local-dev/docker-compose.yml
 TOFU ?= tofu
+SIEM_KEY_FILE ?= $(HOME)/.config/athernex-siem/operator.key
+SIEM_DB ?= $(HOME)/.local/share/athernex-siem/siem.sqlite3
+SIEM_DEMO_DB ?= .athernex/demo.sqlite3
+SIEM_PORT ?= 8787
 
 menu:
 	@printf "\nAthernex lab menu\n"
@@ -33,6 +38,11 @@ help:
 	@printf "  make status        Show local Docker staging service status\n"
 	@printf "  make local-logs    Follow local Docker staging service logs\n"
 	@printf "  make check         Run validation suite\n"
+	@printf "  make research-siem Run bounded Rust encoding experiment\n"
+	@printf "  make run-siem      Launch the Rust SIEM at localhost:8787\n"
+	@printf "  make siem-key      Print the saved console sign-in key\n"
+	@printf "  make siem-init     Create a private key if none exists\n"
+	@printf "  make run-siem-demo Launch a separate synthetic demo\n"
 	@printf "  make deploy        Run validation, then guarded dual push\n"
 
 on: local-up
@@ -68,6 +78,47 @@ run-codex-scheduler:
 run-webui:
 	npm --prefix webui run dev
 
+siem-init:
+	@set -eu; umask 077; \
+	if [ ! -e "$(SIEM_KEY_FILE)" ]; then \
+		mkdir -p -- "$$(dirname -- "$(SIEM_KEY_FILE)")"; \
+		CARGO_PROFILE_RELEASE_STRIP=symbols cargo run --locked --release -p athernex-siem -- --init-operator-key "$(SIEM_KEY_FILE)"; \
+	fi
+
+siem-key:
+	@if [ ! -s "$(SIEM_KEY_FILE)" ]; then \
+		printf '%s\n' 'No saved operator key. Run make siem-init first, then make siem-key.' >&2; \
+		exit 1; \
+	fi
+	@cat -- "$(SIEM_KEY_FILE)"
+
+run-siem: siem-init
+	@printf '%s\n' 'Sign-in key: run make siem-key in another terminal. Stop this server with Ctrl+C.'
+	@CARGO_PROFILE_RELEASE_STRIP=symbols cargo run --locked --release -p athernex-siem -- --db "$(SIEM_DB)" --operator-key-file "$(SIEM_KEY_FILE)" --port "$(SIEM_PORT)"
+
+run-siem-demo: siem-init
+	@printf '%s\n' 'Demo sign-in key: run make siem-key in another terminal. Stop this server with Ctrl+C.'
+	@CARGO_PROFILE_RELEASE_STRIP=symbols cargo run --locked --release -p athernex-siem -- --demo --db "$(SIEM_DEMO_DB)" --operator-key-file "$(SIEM_KEY_FILE)" --port "$(SIEM_PORT)"
+
+install-siem:
+	./tools/install-siem-user.sh
+
+check-siem:
+	cargo test -p athernex-siem
+	cargo clippy -p athernex-siem --all-targets -- -D warnings
+	$(MAKE) research-siem
+
+# No Cargo dependency downloads, dataset files, or retained build artifacts.
+research-siem:
+	@set -eu; \
+	probe_dir=$$(mktemp -d); \
+	trap 'rm -rf "$$probe_dir"' EXIT HUP INT TERM; \
+	rustc --version; \
+	rustc --edition=2021 -D warnings --test tools/siem_encoding_probe.rs -o "$$probe_dir/tests"; \
+	"$$probe_dir/tests"; \
+	rustc --edition=2021 -D warnings -C opt-level=2 -C debuginfo=0 tools/siem_encoding_probe.rs -o "$$probe_dir/probe"; \
+	"$$probe_dir/probe"
+
 fmt:
 	cargo fmt --all
 
@@ -96,11 +147,14 @@ check-supply-chain:
 		echo "cargo-audit not found; skipping Rust dependency audit"; \
 	fi
 	@if command -v cargo-cyclonedx >/dev/null 2>&1; then \
+		set -eu; \
 		tmp_dir=$$(mktemp -d); \
+		trap 'rm -rf "$$tmp_dir"' EXIT HUP INT TERM; \
 		cargo cyclonedx --format json --override-filename rust-sbom; \
 		mv core-engines/orchestrator/rust-sbom.json "$$tmp_dir/rust-sbom.cdx.json"; \
+		mv core-engines/siem/rust-sbom.json "$$tmp_dir/siem-sbom.cdx.json"; \
 		test -s "$$tmp_dir/rust-sbom.cdx.json"; \
-		rm -rf "$$tmp_dir"; \
+		test -s "$$tmp_dir/siem-sbom.cdx.json"; \
 	else \
 		echo "cargo-cyclonedx not found; skipping Rust SBOM generation"; \
 	fi

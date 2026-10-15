@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="280" viewBox="0 0 1280 280" role="img" aria-labelledby="title desc">
+  <title id="title">Athernex — security intelligence, governed by evidence</title>
+  <desc id="desc">Forest green Athernex masthead with cyan architectural contours. Rust SIEM, agent authority and endpoint integration research.</desc>
+  <defs><linearGradient id="surface" x2="1" y2="1"><stop stop-color="#081b14"/><stop offset="1" stop-color="#123a2c"/></linearGradient></defs>
+  <rect x=".5" y=".5" width="1279" height="279" rx="12" fill="url(#surface)" stroke="#315c4c"/>
+  <g fill="none" stroke="#64e3eb" stroke-width="1" opacity=".23"><path d="M815 0v63l94 54h371M902 0v40l99 57h279M980 0v23l96 54h204M1280 211h-196l-96-56h-175l-84 49v76M1280 235h-214l-99-58H824l-76 44v59"/><path d="M1097 75v83l72 42 72-42V75l-72-42zM1120 89v55l49 29 49-29V89l-49-28z"/></g>
+  <g fill="#64e3eb"><circle cx="909" cy="117" r="3"/><circle cx="988" cy="155" r="3"/><circle cx="1169" cy="33" r="3"/></g>
+  <path d="M48 76 73 28l25 48M60 56h27" fill="none" stroke="#64e3eb" stroke-width="2"/>
+  <text x="118" y="61" fill="#e7f4ef" font-family="Arial,sans-serif" font-size="25" font-weight="700" letter-spacing="5">ATHERNEX</text>
+  <text x="49" y="139" fill="#e7f4ef" font-family="Arial,sans-serif" font-size="37" font-weight="600" letter-spacing="-.7">Security intelligence.</text>
+  <text x="49" y="183" fill="#9dece3" font-family="Arial,sans-serif" font-size="37" font-weight="600" letter-spacing="-.7">Governed by evidence.</text>
+  <text x="50" y="234" fill="#adccbd" font-family="monospace" font-size="12" letter-spacing="2">RUST SIEM / AGENT AUTHORITY / ENDPOINT INTEGRATION R&amp;D</text>
+  <path d="M48 259h1184" stroke="#64e3eb" opacity=".25"/>
+</svg>

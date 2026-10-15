@@ -1,0 +1,96 @@
+{
+  "schema": "athernex.screenshot-provenance.v1",
+  "captured_at": "2026-10-15T02:53:58.701Z",
+  "capture_command": "node tools/verify_siem_ui.cjs",
+  "data_policy": "Temporary --no-journal ledgers only. Operational API fixtures and explicit synthetic demo. No host telemetry or credentials.",
+  "browser": "154.0.8037.57",
+  "viewport": {
+    "width": 1440,
+    "height": 1080
+  },
+  "stylesheet_sha256": "2b7a3315754924e867a06f460eeb6368457bb46316d772c8184aab83728370b0",
+  "binary_sha256": "c8a5350de283412f7deb6c7fad7c05f778d130d70e6d00c6db7851b3404ae52f",
+  "total_bytes": 1767894,
+  "screenshots": [
+    {
+      "file": "siem-case.png",
+      "mode": "operational-fixture",
+      "route": "/case/1",
+      "description": "API fixture authentication burst; assigned case, copied evidence and committed triage receipt.",
+      "width": 1440,
+      "height": 1602,
+      "bytes": 191218,
+      "sha256": "214bfa20b35e7a33b528d1773fbba9f5b3b079fd4d7e1086c812d95496c6ae37"
+    },
+    {
+      "file": "siem-source.png",
+      "mode": "operational-fixture",
+      "route": "/source/public-fixture",
+      "description": "Managed public-fixture source after credential rotation; no credential is displayed.",
+      "width": 1440,
+      "height": 1210,
+      "bytes": 140348,
+      "sha256": "af393218491088d3ccd56e77e9a153b10c0fdf86eded666e3d250c378dd7c505"
+    },
+    {
+      "file": "siem-overview.png",
+      "mode": "demo",
+      "route": "/",
+      "description": "Explicit synthetic ledger; chart, metrics and stream counts derive from retained facts.",
+      "width": 1440,
+      "height": 1452,
+      "bytes": 227360,
+      "sha256": "b0cc0fb15c019e825e079ad27e13eb2a684e73db8f6a8830da7dac4312193503"
+    },
+    {
+      "file": "siem-hive.png",
+      "mode": "demo",
+      "route": "/hive",
+      "description": "Four fixture identities, task-bound grants and a policy-enforced quarantine.",
+      "width": 1440,
+      "height": 1928,
+      "bytes": 424997,
+      "sha256": "ce0570b02f792c33543e0060a46a4606b97c74a250fc123e5126182ec1c34ad6"
+    },
+    {
+      "file": "siem-agent.png",
+      "mode": "demo",
+      "route": "/agent/2",
+      "description": "Quarantined identity with an expanded access-decision trail.",
+      "width": 1440,
+      "height": 1716,
+      "bytes": 165430,
+      "sha256": "2b6fa9721edd7931215ca38c15034cd7d27bad1e132002f9ba3e099db3522f4e"
+    },
+    {
+      "file": "siem-event.png",
+      "mode": "demo",
+      "route": "/event/498",
+      "description": "Decoded fixture fact and its actual compact binary representation.",
+      "width": 1440,
+      "height": 1102,
+      "bytes": 206244,
+      "sha256": "debf07361c364308a854d27d428b6084369b712f433e5fcc08722e4ad014beff"
+    },
+    {
+      "file": "siem-workbench.png",
+      "mode": "demo",
+      "route": "/workbench",
+      "description": "Deterministic evidence-bound plan awaiting operator review; no model is connected.",
+      "width": 1440,
+      "height": 1495,
+      "bytes": 216056,
+      "sha256": "3aa82df465cefab90a1cc8bbcb54da96c98c6bcd1d99cea2d013142219b2c8f5"
+    },
+    {
+      "file": "siem-retention.png",
+      "mode": "demo",
+      "route": "/retention",
+      "description": "Actual fixture archive blocks, storage accounting and retention controls.",
+      "width": 1440,
+      "height": 1498,
+      "bytes": 196241,
+      "sha256": "a76edf02fcab719ce4d311e32e0ab05f30b48dc2f03e88f716f559c578e851c5"
+    }
+  ]
+}

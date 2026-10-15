@@ -52,3 +52,6 @@ kubeconfig*
 
 # MRGI local runtime state
 .mrgi
+
+# Bounded local SIEM state (synthetic fixtures and authenticated local ingestion)
+.athernex/
