@@ -284,8 +284,11 @@ impl Engine {
             let owned = Allocation(raw);
             let actual = unsafe { &*owned.0 };
             with_filter(policy, ordinal, |expected| {
-                if !same_filter(actual, expected) {
-                    return Err("Scanner network filter changed or is disabled".into());
+                if let Some(reason) = filter_mismatch(actual, expected) {
+                    return Err(format!(
+                        "Scanner network filter {ordinal} changed or is disabled: {reason}"
+                    )
+                    .into());
                 }
                 Ok(())
             })?;
@@ -443,31 +446,67 @@ fn with_filter<T>(
     // Soft permits preserve blocking decisions from other security providers.
     work(&filter)
 }
-fn same_filter(actual: &FWPM_FILTER0, expected: &FWPM_FILTER0) -> bool {
-    if !guid_equal(&actual.filterKey, &expected.filterKey)
-        || !guid_equal(&actual.layerKey, &expected.layerKey)
-        || !guid_equal(&actual.subLayerKey, &expected.subLayerKey)
-        || actual.flags != expected.flags
-        || !actual.providerKey.is_null()
-        || actual.action.r#type != expected.action.r#type
-        || actual.weight.r#type != FWP_UINT64
-        || unsafe { actual.weight.Anonymous.uint64.is_null() }
-        || actual.numFilterConditions != expected.numFilterConditions
-        || actual.filterCondition.is_null()
-    {
-        return false;
+fn filter_mismatch(actual: &FWPM_FILTER0, expected: &FWPM_FILTER0) -> Option<String> {
+    // Report only field names/types and numeric policy metadata, never app IDs,
+    // private file paths, provider data or filter keys. Every mismatch still
+    // refuses startup and removal; diagnostics do not normalize BFE output.
+    if !guid_equal(&actual.filterKey, &expected.filterKey) {
+        return Some("filter key".into());
+    }
+    if !guid_equal(&actual.layerKey, &expected.layerKey) {
+        return Some("layer key".into());
+    }
+    if !guid_equal(&actual.subLayerKey, &expected.subLayerKey) {
+        return Some("sublayer key".into());
+    }
+    if actual.flags != expected.flags {
+        return Some(format!(
+            "flags 0x{:x}, expected 0x{:x}",
+            actual.flags, expected.flags
+        ));
+    }
+    if !actual.providerKey.is_null() {
+        return Some("unexpected provider".into());
+    }
+    if actual.action.r#type != expected.action.r#type {
+        return Some(format!(
+            "action {}, expected {}",
+            actual.action.r#type, expected.action.r#type
+        ));
+    }
+    if actual.weight.r#type != FWP_UINT64 {
+        return Some(format!(
+            "weight type {}, expected {FWP_UINT64}",
+            actual.weight.r#type
+        ));
+    }
+    if unsafe { actual.weight.Anonymous.uint64.is_null() } {
+        return Some("missing weight".into());
+    }
+    if actual.numFilterConditions != expected.numFilterConditions {
+        return Some(format!(
+            "condition count {}, expected {}",
+            actual.numFilterConditions, expected.numFilterConditions
+        ));
+    }
+    if actual.filterCondition.is_null() {
+        return Some("missing conditions".into());
     }
     unsafe {
-        if *actual.weight.Anonymous.uint64 != *expected.weight.Anonymous.uint64
-            || !equal_blob(
-                &actual.providerData,
-                std::slice::from_raw_parts(
-                    expected.providerData.data,
-                    expected.providerData.size as usize,
-                ),
-            )
-        {
-            return false;
+        if *actual.weight.Anonymous.uint64 != *expected.weight.Anonymous.uint64 {
+            return Some(format!(
+                "weight {}, expected {}",
+                *actual.weight.Anonymous.uint64, *expected.weight.Anonymous.uint64
+            ));
+        }
+        if !equal_blob(
+            &actual.providerData,
+            std::slice::from_raw_parts(
+                expected.providerData.data,
+                expected.providerData.size as usize,
+            ),
+        ) {
+            return Some("provider data".into());
         }
         let actual =
             std::slice::from_raw_parts(actual.filterCondition, actual.numFilterConditions as usize);
@@ -475,13 +514,25 @@ fn same_filter(actual: &FWPM_FILTER0, expected: &FWPM_FILTER0) -> bool {
             expected.filterCondition,
             expected.numFilterConditions as usize,
         );
-        expected.iter().all(|condition| {
+        for (index, condition) in expected.iter().enumerate() {
             let matching: Vec<_> = actual
                 .iter()
                 .filter(|v| guid_equal(&v.fieldKey, &condition.fieldKey))
                 .collect();
-            matching.len() == 1 && same_condition(matching[0], condition)
-        })
+            if matching.len() != 1 {
+                return Some(format!("condition {index} missing or duplicated"));
+            }
+            if !same_condition(matching[0], condition) {
+                return Some(format!(
+                    "condition {index} differs: match/type {}/{}, expected {}/{}",
+                    matching[0].matchType,
+                    matching[0].conditionValue.r#type,
+                    condition.matchType,
+                    condition.conditionValue.r#type
+                ));
+            }
+        }
+        None
     }
 }
 fn same_condition(a: &FWPM_FILTER_CONDITION0, b: &FWPM_FILTER_CONDITION0) -> bool {
