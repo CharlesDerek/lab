@@ -4,6 +4,8 @@ use windows_sys::{
     core::GUID,
     Win32::{Foundation::*, System::EventLog::*},
 };
+#[cfg(test)]
+pub(super) mod tests;
 
 pub(super) struct Handle(pub EVT_HANDLE);
 impl Handle {
@@ -58,6 +60,9 @@ pub(super) fn next(query: &Handle) -> Result<Option<Handle>> {
     Ok(Some(event))
 }
 pub(super) fn text(event: &Handle, flags: u32, max_bytes: usize) -> Result<String> {
+    if flags != EvtRenderEventXml && flags != EvtRenderBookmark {
+        return Err("Unsupported Windows Security text rendering mode".into());
+    }
     let (mut required, mut count) = (0, 0);
     let rendered = unsafe {
         EvtRender(
@@ -118,7 +123,10 @@ pub(super) fn text(event: &Handle, flags: u32, max_bytes: usize) -> Result<Strin
         diagnose();
         return Err(failure_code("Windows Security text rendering", code));
     }
-    if count != 0 || required < 2 || required > capacity || required % 2 != 0 {
+    // PropertyCount describes EVT_VARIANT arrays, not text. Windows Server 2022
+    // returns 1 for a successful bookmark render, despite the documented zero.
+    // Use only the bounded byte count and terminated UTF-16 buffer for text.
+    if required < 2 || required > capacity || required % 2 != 0 {
         #[cfg(test)]
         diagnose();
         return Err("Invalid Windows Security rendered text size".into());

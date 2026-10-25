@@ -106,6 +106,7 @@ fn remove_fillers(store: &Store) {
 fn security_logon_delivery_replays_and_reports_policy_gaps() {
     host::require_disposable();
     println!("\nATHERNEX_AUTH_STAGE=guard_verified");
+    native::verify_bookmark_text().expect("Native synthetic bookmark regression failed");
     host::verify_privilege_scope();
     let mut policy = host::Policy::start();
     println!("\nATHERNEX_AUTH_STAGE=policy_ready");

@@ -20,6 +20,10 @@ use windows_sys::Win32::{
 
 const AUDITING: &str = "{54849625-5478-4994-a5ba-3e3b0328c30d}";
 const EVENTLOG: &str = "{fc65ddd8-d6ef-4962-83d5-6e5cfe9ce148}";
+#[cfg(test)]
+pub(super) fn verify_bookmark_text() -> Result<()> {
+    api::tests::verify_bookmark_text()
+}
 
 #[derive(Serialize)]
 struct Identity {
