@@ -360,7 +360,7 @@ impl Service {
         &self.output
     }
     pub(crate) fn poll(&mut self) -> io::Result<Option<i32>> {
-        self.pipe.drain(&mut self.output, self.limit)?;
+        self.pipe.drain_diagnostics(&mut self.output, self.limit)?;
         self.child.poll()
     }
 }

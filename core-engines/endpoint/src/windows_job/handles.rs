@@ -121,6 +121,19 @@ impl Pipe {
     // reported available cannot wait for the writer. Limit work per poll so a
     // continuous producer cannot starve timeout checks. No temporary disk file.
     pub fn drain(&mut self, output: &mut Vec<u8>, limit: usize) -> io::Result<bool> {
+        self.drain_inner(output, limit, false)
+    }
+    // Services retain bounded diagnostics while continuing to drain excess
+    // output. Finite actions above still fail when their output budget is used.
+    pub fn drain_diagnostics(&mut self, output: &mut Vec<u8>, limit: usize) -> io::Result<bool> {
+        self.drain_inner(output, limit, true)
+    }
+    fn drain_inner(
+        &mut self,
+        output: &mut Vec<u8>,
+        limit: usize,
+        truncate: bool,
+    ) -> io::Result<bool> {
         for _ in 0..16 {
             let mut available = 0;
             if unsafe {
@@ -146,9 +159,11 @@ impl Pipe {
             }
             let mut buffer = [0u8; 4096];
             let mut read = 0;
-            let amount = (available as usize)
-                .min(buffer.len())
-                .min(limit.saturating_sub(output.len()).saturating_add(1));
+            let amount = (available as usize).min(buffer.len()).min(if truncate {
+                buffer.len()
+            } else {
+                limit.saturating_sub(output.len()).saturating_add(1)
+            });
             if unsafe {
                 ReadFile(
                     self.0.as_raw_handle(),
@@ -164,10 +179,11 @@ impl Pipe {
             if read == 0 {
                 return Err(io::Error::other("Windows output pipe made no progress"));
             }
-            if output.len().saturating_add(read as usize) > limit {
+            if !truncate && output.len().saturating_add(read as usize) > limit {
                 return Err(io::Error::other("Action exceeded its output budget"));
             }
-            output.extend_from_slice(&buffer[..read as usize]);
+            let retained = (read as usize).min(limit.saturating_sub(output.len()));
+            output.extend_from_slice(&buffer[..retained]);
         }
         Ok(false)
     }

@@ -185,7 +185,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Test endpoint enforcement, receipt automation and protocol
-        run: cargo test --locked -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native
+        run: cargo test --locked --no-fail-fast -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native
       - name: Refuse disabled assertions in validation tools and isolated helpers
         run: python tools/test_verification_guards.py -v
       - name: Test artifact packaging with controlled signature results

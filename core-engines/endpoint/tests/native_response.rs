@@ -46,7 +46,12 @@ impl Fixture {
         fixture
     }
     fn new(fail_after_first: bool) -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        // macOS's per-user temporary directory can exceed sockaddr_un's path
+        // budget after adding the private state and response socket suffixes.
+        let temp = tempfile::Builder::new()
+            .prefix("ax-response-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let root = temp.path().canonicalize().unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let store = Store::open(&root.join("state")).unwrap();

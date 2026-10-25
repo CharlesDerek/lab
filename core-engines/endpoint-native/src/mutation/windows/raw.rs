@@ -11,19 +11,16 @@ use windows_sys::{
     Wdk::{
         Foundation::OBJECT_ATTRIBUTES,
         Storage::FileSystem::{
-            FileLinkInformation, NtCreateFile, NtFlushBuffersFileEx, NtSetInformationFile,
-            FILE_LINK_INFORMATION, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
-            FILE_SYNCHRONOUS_IO_NONALERT,
+            FileLinkInformation, FileRenameInformation, NtCreateFile, NtFlushBuffersFileEx,
+            NtSetInformationFile, FILE_LINK_INFORMATION, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
         },
     },
     Win32::{
         Foundation::{
             RtlNtStatusToDosError, HANDLE, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, UNICODE_STRING,
         },
-        Storage::FileSystem::{
-            FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO, FILE_SHARE_DELETE,
-            FILE_SHARE_READ, FILE_SHARE_WRITE,
-        },
+        Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE},
         System::IO::IO_STATUS_BLOCK,
     },
 };
@@ -136,9 +133,10 @@ pub(super) fn flush(file: &File) -> Result<()> {
 }
 pub(super) fn rename(file: &File, directory: &File, leaf: &str, replace: bool) -> Result<()> {
     let wide: Vec<u16> = leaf.encode_utf16().collect();
-    let bytes = offset_of!(FILE_RENAME_INFO, FileName) + (wide.len() + 1) * 2;
+    let bytes = size_of::<FILE_RENAME_INFORMATION>() + wide.len() * 2;
     let mut buffer = vec![0usize; bytes.div_ceil(size_of::<usize>())];
-    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    let mut io: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
     unsafe {
         (*info).Anonymous.ReplaceIfExists = replace;
         (*info).RootDirectory = directory.as_raw_handle();
@@ -148,15 +146,15 @@ pub(super) fn rename(file: &File, directory: &File, leaf: &str, replace: bool) -
             std::ptr::addr_of_mut!((*info).FileName).cast(),
             wide.len(),
         );
-        if SetFileInformationByHandle(
+        // Use the NT relative-name operation directly, as for hard links below.
+        // The target remains bound to the already-verified directory handle.
+        status(NtSetInformationFile(
             file.as_raw_handle(),
-            FileRenameInfo,
+            &mut io,
             info.cast(),
             bytes as u32,
-        ) == 0
-        {
-            return Err(std::io::Error::last_os_error().into());
-        }
+            FileRenameInformation,
+        ))?;
     }
     Ok(())
 }
