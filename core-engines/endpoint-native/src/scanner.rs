@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     ffi::CString,
     fs::{File, Metadata},
-    io::{BufRead, BufReader, Read, Write},
+    io::{Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{ffi::OsStrExt, fs::MetadataExt, net::UnixStream},
@@ -141,12 +141,10 @@ pub fn scan(request: &Scan, socket_path: &Path) -> Result<Verdict> {
     socket.set_write_timeout(Some(remaining(request.deadline)?))?;
     socket.write_all(&0u32.to_be_bytes())?;
     let mut response = Vec::new();
-    let mut reader = BufReader::new(socket);
+    let mut buffer = [0u8; 1024];
     loop {
-        reader
-            .get_mut()
-            .set_read_timeout(Some(remaining(request.deadline)?))?;
-        let available = reader.fill_buf()?;
+        let count = crate::socket_read::read(&socket, &mut buffer, request.deadline)?;
+        let available = &buffer[..count];
         if available.is_empty() {
             return Err("Scanner closed before completing its response".into());
         }
@@ -156,7 +154,6 @@ pub fn scan(request: &Scan, socket_path: &Path) -> Result<Verdict> {
             return Err("Scanner response exceeded its byte budget".into());
         }
         response.extend_from_slice(&available[..bytes]);
-        reader.consume(bytes);
         if end.is_some() {
             break;
         }

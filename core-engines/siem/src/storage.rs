@@ -87,6 +87,12 @@ fn file_hash(path: &Path) -> LabResult<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+fn sync_file(path: &Path) -> std::io::Result<()> {
+    // Windows FlushFileBuffers requires a handle opened for writing. Opening
+    // without create/truncate preserves the bytes produced by SQLite or copy.
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()
+}
+
 impl Engine {
     pub(crate) fn evidence_schemas(&self) -> LabResult<Vec<String>> {
         let mut names = vec!["main".into()];
@@ -150,14 +156,14 @@ impl Engine {
             sha256: file_hash(&ledger)?,
             bytes: fs::metadata(&ledger)?.len(),
         }];
-        fs::File::open(&ledger)?.sync_all()?;
+        sync_file(&ledger)?;
         let directory = pending.join("ledger.sqlite3.segments");
         fs::create_dir(&directory)?;
         for segment in self.segments()? {
             let source = self.segment_path(segment.id)?;
             let target = directory.join(&segment.filename);
             fs::copy(source, &target)?;
-            fs::File::open(&target)?.sync_all()?;
+            sync_file(&target)?;
             if file_hash(&target)? != segment.sha256 {
                 return Err(
                     "Backup segment verification failed; live evidence is unchanged".into(),
@@ -477,7 +483,7 @@ impl Engine {
             return Err("Segment integrity check failed".into());
         }
         drop(outgoing);
-        fs::File::open(&temp_path)?.sync_all()?;
+        sync_file(&temp_path)?;
         let hash = file_hash(&temp_path)?;
         let filename = format!("segment-{hash}.sqlite3");
         let final_path = directory.join(&filename);
@@ -640,12 +646,14 @@ pub fn restore_backup(source: &Path, destination: &Path) -> LabResult<std::path:
     verify_backup(source)?;
     let manifest: BackupManifest =
         serde_json::from_slice(&fs::read(source.join("manifest.json"))?)?;
-    let mut builder = fs::DirBuilder::new();
+    let builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
         builder.mode(0o700);
-    }
+        builder
+    };
     builder.create(destination)?;
     for name in manifest
         .files

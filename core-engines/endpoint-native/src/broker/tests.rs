@@ -1,6 +1,31 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+#[test]
+fn queued_frames_survive_peer_close_but_truncation_and_stalls_fail() {
+    let (mut reader, mut writer) = UnixStream::pair().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    write_frame(&mut writer, &vec!["fixture", "complete"], deadline).unwrap();
+    drop(writer);
+    let value: Vec<String> = read_frame(&mut reader, deadline).unwrap();
+    assert_eq!(value, ["fixture", "complete"]);
+
+    let (mut reader, mut writer) = UnixStream::pair().unwrap();
+    writer.write_all(&10u32.to_be_bytes()).unwrap();
+    writer.write_all(b"[1").unwrap();
+    drop(writer);
+    assert!(read_frame::<Vec<u8>>(&mut reader, deadline)
+        .unwrap_err()
+        .to_string()
+        .contains("closed early"));
+
+    let (mut reader, _writer) = UnixStream::pair().unwrap();
+    let start = Instant::now();
+    let error = read_frame::<Vec<u8>>(&mut reader, start + Duration::from_millis(40)).unwrap_err();
+    assert!(error.to_string().contains("deadline"), "{error}");
+    assert!(start.elapsed() < Duration::from_secs(1));
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     policy: Policy,

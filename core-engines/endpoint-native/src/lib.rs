@@ -123,6 +123,8 @@ pub mod broker;
 pub mod macos;
 #[cfg(unix)]
 pub mod scanner;
+#[cfg(unix)]
+mod socket_read;
 
 #[cfg(all(test, unix))]
 mod tests;
