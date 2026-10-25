@@ -951,7 +951,10 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The six native checks are **unverified**
-until the hosted job executes successfully. This gate does not establish signed
+and task cleanup using mocked commands. The [hosted run at `0f0b88b`](https://github.com/CharlesDerek/lab/actions/runs/40203647817)
+passed the private-state/engine access test, both workspace cleanup tests and
+partial scratch image recovery as LocalSystem. Scanner startup and the WFP
+control probe failed while loading runtime DLLs; network enforcement is still
+unverified. The complete six-check gate has **not passed**. This gate does not establish signed
 minifilter prevention, complete scanner confinement or hostile-administrator
 tamper resistance.
