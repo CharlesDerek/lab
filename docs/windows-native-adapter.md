@@ -1032,19 +1032,24 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `5d38b24`](https://github.com/CharlesDerek/lab/actions/runs/40216359999)
+and task cleanup using mocked commands. The [hosted run at `1ee1a26`](https://github.com/CharlesDerek/lab/actions/runs/40216753574)
 passed nine of eleven checks on Windows Server 2022 as LocalSystem in session
 zero. The retained report was checked against its source commit and input-manifest
 hash. Scanner startup/cleanup, private-state access, both workspace cleanup cases,
 partial-image recovery, WFP enforcement/removal, recovery after owner crashes,
 fixed-image checks and attachment release after owner exit passed. The GPT and
-full worker tests now create GPT successfully, but the new GPT has zero
-partitions and waiting for an automatic MSR times out. Initialization now creates
-only the owned MSR when the new GPT is empty, then requires matching identity,
-geometry and partition-interface arrival before adding the data partition. An
-automatically created MSR must also pass the existing arrival checks. The explicit
-MSR creation path, formatting, capacity enforcement and complete cleanup remain
-unverified. Bounded diagnostics report counts and geometry without paths or IDs.
+full worker tests now create the expected MSR, but Windows exposes no partition
+interfaces for enumeration. Arrival checks now open the partition-device name
+derived only from the held disk and checked partition number, matching
+[Microsoft's WSL disk helper](https://github.com/microsoft/WSL/blob/master/src/windows/common/disk.cpp).
+This handle is read-only and must match the owned disk number, partition number,
+GPT identity, type, attributes and extent. No caller-supplied name is accepted.
+
+Initialization creates only the owned MSR when the new GPT is empty, then verifies
+its arrival before adding data. An automatically created MSR must also pass
+geometry and arrival checks. Direct MSR device queries, complete partition/volume
+creation, formatting, capacity enforcement and cleanup remain unverified.
+Bounded diagnostics report geometry and error codes without paths or IDs.
 
 Image creation and verification now use `VirtualDiskId`, matching Microsoft's
 [VHDX identity implementation](https://github.com/microsoft/go-winio/blob/main/vhd/vhd.go).

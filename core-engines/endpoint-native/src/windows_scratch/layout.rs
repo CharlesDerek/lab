@@ -1,16 +1,12 @@
 //! All partition mutations use the physical handle obtained from the newly
-//! created VHDX. Device-interface enumeration below is read-only and establishes
-//! MSR arrival before changing the layout, as required by IOCTL_DISK_CREATE_DISK.
+//! created VHDX. Read-only partition queries establish MSR arrival before adding
+//! a data partition; they never confer authority to mutate another device.
 use super::*;
 use crate::windows_scratch_spec::Ranges;
 use std::{
     mem::offset_of,
     os::windows::fs::FileExt,
     time::{Duration, Instant},
-};
-use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-    CM_Get_Device_Interface_ListW, CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CR_BUFFER_SMALL,
-    CR_SUCCESS,
 };
 
 const PARTITIONS: usize = 128;
@@ -152,78 +148,50 @@ pub(super) fn same_partition(a: &PARTITION_INFORMATION_EX, b: &PARTITION_INFORMA
         && a_gpt.Attributes == b_gpt.Attributes
 }
 
-/// Enumeration never conveys authority to mutate a device. It only confirms
-/// that the MSR child of our held disk has actually arrived and can be queried.
-#[derive(Debug, Default)]
-struct MsrArrival {
-    interfaces: u32,
-    opened: u32,
-    queried: u32,
-    owned: u32,
-    arrived: bool,
-}
-fn msr_arrived(disk: &AttachedDisk, expected: &PARTITION_INFORMATION_EX) -> Result<MsrArrival> {
-    let mut names = vec![0u16; 65536];
-    let code = unsafe {
-        CM_Get_Device_Interface_ListW(
-            &GUID_DEVINTERFACE_PARTITION,
+/// Query only the partition number from our held disk's checked layout. The
+/// resulting device handle is read-only and must independently match both disk
+/// number and complete GPT identity/extent. It never grants mutation authority.
+fn msr_arrived(
+    disk: &AttachedDisk,
+    expected: &PARTITION_INFORMATION_EX,
+) -> Result<(bool, Option<i32>)> {
+    disk.verify()?;
+    if expected.PartitionNumber == 0 || expected.PartitionNumber > PARTITIONS as u32 {
+        return Err("Scratch MSR partition number exceeds its bounds".into());
+    }
+    // Windows need not expose an MSR through partition-interface enumeration.
+    // This is the partition-device form used by Microsoft's WSL disk helper.
+    let path = format!(
+        r"\\?\Harddisk{}Partition{}",
+        disk.number, expected.PartitionNumber
+    );
+    let wide: Vec<_> = path.encode_utf16().chain([0]).collect();
+    let raw = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
             null(),
-            names.as_mut_ptr(),
-            names.len() as u32,
-            CM_GET_DEVICE_INTERFACE_LIST_PRESENT,
+            OPEN_EXISTING,
+            0,
+            null_mut(),
         )
     };
-    if code == CR_BUFFER_SMALL {
-        return Err("Partition interface enumeration exceeds its budget".into());
+    if raw == INVALID_HANDLE_VALUE {
+        return Ok((false, io::Error::last_os_error().raw_os_error()));
     }
-    if code != CR_SUCCESS {
-        return Err(format!("Partition interface enumeration failed ({code})").into());
+    let file = unsafe { File::from_raw_handle(raw) };
+    let device = output::<STORAGE_DEVICE_NUMBER>(&file, IOCTL_STORAGE_GET_DEVICE_NUMBER)?;
+    let partition = output::<PARTITION_INFORMATION_EX>(&file, IOCTL_DISK_GET_PARTITION_INFO_EX)?;
+    if device.DeviceType != FILE_DEVICE_DISK
+        || device.DeviceNumber != disk.number
+        || device.PartitionNumber != expected.PartitionNumber
+        || !same_partition(&partition, expected)
+    {
+        return Err("Scratch MSR device does not match its owned disk layout".into());
     }
-    let mut observation = MsrArrival::default();
-    for path in names.split(|&c| c == 0).take_while(|p| !p.is_empty()) {
-        observation.interfaces += 1;
-        if observation.interfaces > 1024 || path.len() > 8192 {
-            return Err("Partition interface enumeration exceeds its budget".into());
-        }
-        let wide: Vec<_> = path.iter().copied().chain([0]).collect();
-        let raw = unsafe {
-            CreateFileW(
-                wide.as_ptr(),
-                GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                null(),
-                OPEN_EXISTING,
-                0,
-                null_mut(),
-            )
-        };
-        if raw == INVALID_HANDLE_VALUE {
-            continue;
-        }
-        observation.opened += 1;
-        let file = unsafe { File::from_raw_handle(raw) };
-        let Ok(device) = output::<STORAGE_DEVICE_NUMBER>(&file, IOCTL_STORAGE_GET_DEVICE_NUMBER)
-        else {
-            continue;
-        };
-        observation.queried += 1;
-        if device.DeviceType != FILE_DEVICE_DISK || device.DeviceNumber != disk.number {
-            continue;
-        }
-        observation.owned += 1;
-        if device.PartitionNumber != expected.PartitionNumber {
-            continue;
-        }
-        let partition =
-            output::<PARTITION_INFORMATION_EX>(&file, IOCTL_DISK_GET_PARTITION_INFO_EX)?;
-        if !same_partition(&partition, expected) {
-            return Err("Scratch MSR interface does not match its disk layout".into());
-        }
-        disk.verify()?;
-        observation.arrived = true;
-        return Ok(observation);
-    }
-    Ok(observation)
+    disk.verify()?;
+    Ok((true, None))
 }
 
 /// Initialization is a consuming transition. An existing image has no route
@@ -354,18 +322,18 @@ impl AttachedDisk {
                 {
                     return Err("Unexpected initial scratch MSR geometry".into());
                 }
-                let observation = msr_arrived(&self, msr)?;
-                if observation.arrived {
+                let (arrived, error) = msr_arrived(&self, msr)?;
+                if arrived {
                     break header;
                 }
-                arrival = Some(observation);
+                arrival = error;
             }
             if Instant::now() >= deadline {
-                // Bounded shape/count metadata distinguishes absent layouts
-                // from inaccessible interfaces, without paths or identifiers.
+                // Bounded shape/error metadata distinguishes absent layouts
+                // from inaccessible partition devices, without paths or IDs.
                 let first = layout.entries[0];
                 return Err(format!(
-                    "Scratch MSR did not arrive before its deadline: count={}, first_number={}, first_start={}, first_length={}, usable_start={}, usable_length={}, interfaces={arrival:?}",
+                    "Scratch MSR did not arrive before its deadline: count={}, first_number={}, first_start={}, first_length={}, usable_start={}, usable_length={}, partition_open_error={arrival:?}",
                     layout.count, first.PartitionNumber, first.StartingOffset,
                     first.PartitionLength, header.StartingUsableOffset, header.UsableLength
                 ).into());
