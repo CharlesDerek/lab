@@ -184,7 +184,14 @@ grants no access to a shared service or interactive station. The subsequent
 normal scanner launch with checked identity and job limits, assigned desktop,
 cross-logon denials, final desktop cleanup and failed ownership-callback cleanup.
 The network control also passed under the same reduced token before policy installation.
-Policy installation still fails; WFP enforcement remains unverified.
+The subsequent [filter diagnostic](https://github.com/CharlesDerek/lab/actions/runs/40210991144)
+found that BFE returned flags `0x41` for a filter created with `0x1`: it had added
+`FWPM_FILTER_FLAG_INDEXED`. The verifier now ignores only that documented
+[lookup metadata flag](https://learn.microsoft.com/en-us/windows/win32/api/fwpmtypes/ns-fwpmtypes-fwpm_filter0).
+Persistence, disabled/action flags, identities, weights and conditions still
+must match. A regression test toggles every other flag bit for all ten rule
+definitions, both with and without indexing, and requires rejection. Native WFP
+enforcement and recovery of the corrected policy remain to be validated.
 
 A fresh workspace contains copies of the executable, adjacent DLLs and flat
 signature files, with a combined 768 MiB staging budget and at most 256 source

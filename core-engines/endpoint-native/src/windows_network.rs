@@ -449,7 +449,8 @@ fn with_filter<T>(
 fn filter_mismatch(actual: &FWPM_FILTER0, expected: &FWPM_FILTER0) -> Option<String> {
     // Report only field names/types and numeric policy metadata, never app IDs,
     // private file paths, provider data or filter keys. Every mismatch still
-    // refuses startup and removal; diagnostics do not normalize BFE output.
+    // refuses startup and removal. BFE may add INDEXED as lookup metadata;
+    // every other flag remains exact, especially DISABLED and action overrides.
     if !guid_equal(&actual.filterKey, &expected.filterKey) {
         return Some("filter key".into());
     }
@@ -459,7 +460,7 @@ fn filter_mismatch(actual: &FWPM_FILTER0, expected: &FWPM_FILTER0) -> Option<Str
     if !guid_equal(&actual.subLayerKey, &expected.subLayerKey) {
         return Some("sublayer key".into());
     }
-    if actual.flags != expected.flags {
+    if actual.flags & !FWPM_FILTER_FLAG_INDEXED != expected.flags & !FWPM_FILTER_FLAG_INDEXED {
         return Some(format!(
             "flags 0x{:x}, expected 0x{:x}",
             actual.flags, expected.flags
@@ -556,6 +557,52 @@ fn same_condition(a: &FWPM_FILTER_CONDITION0, b: &FWPM_FILTER_CONDITION0) -> boo
                     )
             }
             _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indexed_metadata_never_masks_disabled_or_other_changed_flags() {
+        let policy = Policy {
+            schema: 1,
+            id: "a".repeat(64),
+            application: r"C:\fixture\scanner.exe".into(),
+            app_id: "\\Device\\Fixture\\scanner.exe"
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+            port: 3310,
+        };
+        for ordinal in 0..RULES.len() {
+            with_filter(&policy, ordinal, |expected| {
+                for indexing in [0, FWPM_FILTER_FLAG_INDEXED] {
+                    let mut returned = *expected;
+                    returned.flags |= indexing;
+                    assert_eq!(filter_mismatch(&returned, expected), None);
+                    // Every bit other than the documented indexing metadata
+                    // must still reject a changed filter, including removal of
+                    // PERSISTENT, DISABLED, hard permits and unknown flags.
+                    for bit in 0..32 {
+                        let changed = 1u32 << bit;
+                        if changed == FWPM_FILTER_FLAG_INDEXED {
+                            continue;
+                        }
+                        let mut altered = returned;
+                        altered.flags ^= changed;
+                        assert!(
+                            filter_mismatch(&altered, expected).is_some(),
+                            "filter {ordinal} accepted changed flag 0x{changed:x}"
+                        );
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
         }
     }
 }
