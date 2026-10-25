@@ -105,8 +105,6 @@ pub(super) struct Context {
 struct Request {
     nonce: String,
     logon: String,
-    #[cfg(test)]
-    ui_probe: u8,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -205,8 +203,6 @@ impl Context {
         let request = Request {
             nonce: crate::secret().map_err(io::Error::other)?,
             logon: token.logon_sid().into(),
-            #[cfg(test)]
-            ui_probe: super::debug::ui_probe(),
         };
         let event_sd = Descriptor::new("O:SYG:SYD:P(A;;GA;;;SY)")?;
         let raw = unsafe {
@@ -338,31 +334,17 @@ pub(super) fn worker_main(parent: u32) -> crate::Result<()> {
         )
     })?;
     // SYSTEM owns the objects. Scanner receives object-specific rights and
-    // READ_CONTROL, never DELETE/WRITE_DAC/WRITE_OWNER. It cannot create more
-    // desktops or log off the station (WINSTA_CREATEDESKTOP/EXITWINDOWS).
-    // No shared group grants.
+    // READ_CONTROL, never DELETE/WRITE_DAC/WRITE_OWNER or WINSTA_CREATEDESKTOP.
+    // Native Windows USER32 initialization requires WINSTA_EXITWINDOWS even
+    // here in session zero; grant it only on this new private station. The
+    // scanner still has no shutdown privilege. No shared station ACL is changed.
     // The low label permits USER32 writes within this private station only.
-    let (station_access, desktop_access) = ("0x20337", "0x201ff");
-    // Test-only comparison on new private USER objects. No shared object ACLs
-    // or token privileges change, and no production request accepts this field.
-    #[cfg(test)]
-    let (station_access, desktop_access) = match request.ui_probe {
-        0 => (station_access, desktop_access),
-        1 => ("0x2037f", desktop_access),
-        2 => ("GA", desktop_access),
-        3 => ("0x2037f", "GA"),
-        4 => ("GA", "GA"),
-        5 => ("0x2033f", desktop_access),
-        6 => ("0x20377", desktop_access),
-        7 => (station_access, "GA"),
-        _ => return Err("Invalid private USER object diagnostic mode".into()),
-    };
     let station_sd = Descriptor::new(&format!(
-        "O:SYG:SYD:P(A;;GA;;;SY)(A;;{station_access};;;{})S:(ML;;NW;;;LW)",
+        "O:SYG:SYD:P(A;;GA;;;SY)(A;;0x20377;;;{})S:(ML;;NW;;;LW)",
         request.logon
     ))?;
     let desktop_sd = Descriptor::new(&format!(
-        "O:SYG:SYD:P(A;;GA;;;SY)(A;;{desktop_access};;;{})S:(ML;;NW;;;LW)",
+        "O:SYG:SYD:P(A;;GA;;;SY)(A;;0x201ff;;;{})S:(ML;;NW;;;LW)",
         request.logon
     ))?;
     let original = unsafe { GetProcessWindowStation() };

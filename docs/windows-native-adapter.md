@@ -133,7 +133,7 @@ DACL grants access to SYSTEM and the scanner logon. Each scanner receives a new
 noninteractive window station and desktop. An owned SYSTEM worker creates them
 with SYSTEM ownership, a low-integrity label and access only for SYSTEM and the
 exclusive scanner logon. The scanner cannot change their owner or ACL, delete
-them, create additional desktops or log off the station. The supervisor never
+them or create additional desktops. The supervisor never
 switches its process station. It duplicates the worker's exact object handles,
 checks their names/types, and requires the worker and its job to exit before
 creating the suspended scanner. The scanner's owned process tree retains these
@@ -171,6 +171,16 @@ access mismatch; its process launch, cross-logon denial, cleanup and WFP checks
 must pass before claiming the startup failure is resolved. Creation uses
 Microsoft's [exclusive window-station creation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createwindowstationw)
 and [desktop association rules](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createdesktopw).
+
+A [loader trace and per-right comparison](https://github.com/CharlesDerek/lab/actions/runs/40209408033)
+then identified `USER32.dll` process-attach failure. On the hosted Windows Server
+2022 VM, adding only `WINSTA_EXITWINDOWS` to the private station let the helper
+reach `main`; adding only `WINSTA_CREATEDESKTOP` or granting full desktop rights
+did not. The station now includes the observed required right, while retaining
+the desktop-creation and owner/ACL/deletion refusals. This grant applies only to
+the new private station; the scanner has no shutdown privilege, and the change
+grants no access to a shared service or interactive station. Full launch, cleanup and WFP
+validation of this correction is still required.
 
 A fresh workspace contains copies of the executable, adjacent DLLs and flat
 signature files, with a combined 768 MiB staging budget and at most 256 source

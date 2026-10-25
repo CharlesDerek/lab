@@ -1055,9 +1055,6 @@ fn scanner_launch_has_checked_identity_job_limits_and_owned_cleanup() {
                 })
                 .unwrap();
                 super::debug::capture_startup(&mut diagnostic).unwrap();
-                drop(diagnostic);
-                drop(_loader_snaps);
-                super::debug::compare_private_ui_access(&invocation, &token);
             }
             panic!(
                 "scanner fixture exited with {code} (0x{:08x}): {}",
@@ -1152,8 +1149,10 @@ fn assert_station_access(
     // Own station attributes are readable, while a different scanner logon has
     // no access even though its LocalService user and BuiltinUsers group match.
     assert_eq!(probe(token, 2), Ok(()));
+    assert_eq!(probe(token, 0x40), Ok(()));
     assert_eq!(probe(other, 2), Err(Some(5)));
-    for rights in [0x8, 0x40, 0x10000, 0x40000, 0x80000] {
+    assert_eq!(probe(other, 0x40), Err(Some(5)));
+    for rights in [0x8, 0x10000, 0x40000, 0x80000] {
         assert_eq!(probe(token, rights), Err(Some(5)));
     }
 }
