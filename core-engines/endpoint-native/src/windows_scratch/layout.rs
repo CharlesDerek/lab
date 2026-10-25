@@ -154,7 +154,15 @@ pub(super) fn same_partition(a: &PARTITION_INFORMATION_EX, b: &PARTITION_INFORMA
 
 /// Enumeration never conveys authority to mutate a device. It only confirms
 /// that the MSR child of our held disk has actually arrived and can be queried.
-fn msr_arrived(disk: &AttachedDisk, expected: &PARTITION_INFORMATION_EX) -> Result<bool> {
+#[derive(Debug, Default)]
+struct MsrArrival {
+    interfaces: u32,
+    opened: u32,
+    queried: u32,
+    owned: u32,
+    arrived: bool,
+}
+fn msr_arrived(disk: &AttachedDisk, expected: &PARTITION_INFORMATION_EX) -> Result<MsrArrival> {
     let mut names = vec![0u16; 65536];
     let code = unsafe {
         CM_Get_Device_Interface_ListW(
@@ -171,10 +179,10 @@ fn msr_arrived(disk: &AttachedDisk, expected: &PARTITION_INFORMATION_EX) -> Resu
     if code != CR_SUCCESS {
         return Err(format!("Partition interface enumeration failed ({code})").into());
     }
-    let mut count = 0;
+    let mut observation = MsrArrival::default();
     for path in names.split(|&c| c == 0).take_while(|p| !p.is_empty()) {
-        count += 1;
-        if count > 1024 || path.len() > 8192 {
+        observation.interfaces += 1;
+        if observation.interfaces > 1024 || path.len() > 8192 {
             return Err("Partition interface enumeration exceeds its budget".into());
         }
         let wide: Vec<_> = path.iter().copied().chain([0]).collect();
@@ -192,15 +200,18 @@ fn msr_arrived(disk: &AttachedDisk, expected: &PARTITION_INFORMATION_EX) -> Resu
         if raw == INVALID_HANDLE_VALUE {
             continue;
         }
+        observation.opened += 1;
         let file = unsafe { File::from_raw_handle(raw) };
         let Ok(device) = output::<STORAGE_DEVICE_NUMBER>(&file, IOCTL_STORAGE_GET_DEVICE_NUMBER)
         else {
             continue;
         };
-        if device.DeviceType != FILE_DEVICE_DISK
-            || device.DeviceNumber != disk.number
-            || device.PartitionNumber != expected.PartitionNumber
-        {
+        observation.queried += 1;
+        if device.DeviceType != FILE_DEVICE_DISK || device.DeviceNumber != disk.number {
+            continue;
+        }
+        observation.owned += 1;
+        if device.PartitionNumber != expected.PartitionNumber {
             continue;
         }
         let partition =
@@ -209,9 +220,10 @@ fn msr_arrived(disk: &AttachedDisk, expected: &PARTITION_INFORMATION_EX) -> Resu
             return Err("Scratch MSR interface does not match its disk layout".into());
         }
         disk.verify()?;
-        return Ok(true);
+        observation.arrived = true;
+        return Ok(observation);
     }
-    Ok(false)
+    Ok(observation)
 }
 
 /// Initialization is a consuming transition. An existing image has no route
@@ -285,6 +297,7 @@ impl AttachedDisk {
             if layout.count > 1 {
                 return Err("Unexpected partitions on new scratch GPT disk".into());
             }
+            let mut arrival = None;
             if layout.count == 1 {
                 let msr = &layout.entries[0];
                 if msr.PartitionStyle != PARTITION_STYLE_GPT
@@ -301,12 +314,21 @@ impl AttachedDisk {
                 {
                     return Err("Unexpected initial scratch MSR geometry".into());
                 }
-                if msr_arrived(&self, msr)? {
+                let observation = msr_arrived(&self, msr)?;
+                if observation.arrived {
                     break header;
                 }
+                arrival = Some(observation);
             }
             if Instant::now() >= deadline {
-                return Err("Scratch MSR did not arrive before its deadline".into());
+                // Bounded shape/count metadata distinguishes absent layouts
+                // from inaccessible interfaces, without paths or identifiers.
+                let first = layout.entries[0];
+                return Err(format!(
+                    "Scratch MSR did not arrive before its deadline: count={}, first_number={}, first_start={}, first_length={}, usable_start={}, usable_length={}, interfaces={arrival:?}",
+                    layout.count, first.PartitionNumber, first.StartingOffset,
+                    first.PartitionLength, header.StartingUsableOffset, header.UsableLength
+                ).into());
             }
             std::thread::sleep(Duration::from_millis(100));
         };

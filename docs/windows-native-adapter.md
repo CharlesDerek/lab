@@ -1032,15 +1032,16 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `0e62f80`](https://github.com/CharlesDerek/lab/actions/runs/40215113681)
+and task cleanup using mocked commands. The [hosted run at `32fc5b1`](https://github.com/CharlesDerek/lab/actions/runs/40215940438)
 passed nine of eleven checks on Windows Server 2022 as LocalSystem in session
 zero. The retained report was checked against its source commit and input-manifest
 hash. Scanner startup/cleanup, private-state access, both workspace cleanup cases,
 partial-image recovery, WFP enforcement/removal, recovery after owner crashes,
 fixed-image checks and attachment release after owner exit passed. The GPT and
-full worker tests stopped because the generic VHDX identifier changed after a
-payload write; formatting, capacity enforcement and complete cleanup remain
-unverified.
+full worker tests now create GPT successfully, then time out waiting for MSR
+arrival. Bounded layout geometry and interface counts distinguish an absent MSR
+from an inaccessible device interface without exposing paths or identifiers.
+Formatting, capacity enforcement and complete cleanup remain unverified.
 
 Image creation and verification now use `VirtualDiskId`, matching Microsoft's
 [VHDX identity implementation](https://github.com/microsoft/go-winio/blob/main/vhd/vhd.go).
@@ -1048,7 +1049,8 @@ The journal-derived identity is set only immediately after successful creation,
 before attachment or marking the image ready. Inspection and recovery only read
 and compare it; they never repair an existing identity. The native fixture checks
 that changing this metadata invalidates both live checks and detached recovery,
-and that payload writes preserve the binding. These new checks await execution.
+and that payload writes preserve the binding. Both checks passed natively, as did
+recovery after those writes and both nonzero-header refusals.
 
 Internal worker requests accept canonical verbatim DOS paths, with pinned-directory
 and private-ACL checks, while rejecting UNC/device namespaces, traversal, alternate
