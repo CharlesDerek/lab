@@ -122,7 +122,16 @@ impl SourceBarrier {
             if identity.event_code == 4719
                 && identity.provider_name == "Microsoft-Windows-Security-Auditing"
             {
-                if !identity.auditing() || identity.version != Some(0) {
+                if !identity.auditing() {
+                    super::super::diagnostics::source("setup_policy_provider_mismatch");
+                    return Err(failure("setup_barrier_scope_invalid"));
+                }
+                if identity.version != Some(0) {
+                    super::super::diagnostics::source(match identity.version {
+                        None => "setup_policy_version_missing",
+                        Some(1) => "setup_policy_version_1",
+                        _ => "setup_policy_version_other",
+                    });
                     return Err(failure("setup_barrier_scope_invalid"));
                 }
                 Self::notification(&event, expected)?;
@@ -143,9 +152,18 @@ impl SourceBarrier {
             "Audit setup event context",
         )?;
         let values = Values::render(&context, event, 3)?;
-        let scope = values
-            .required_guid(0)
-            .map_err(|_| failure("setup_barrier_scope_invalid"))?;
+        let scope = values.required_guid(0).map_err(|error| {
+            super::super::diagnostics::source("setup_policy_guid_invalid");
+            super::super::diagnostics::source(match values.diagnostic_kind(0) {
+                "guid" => "setup_scope_guid",
+                "string" => "setup_scope_string",
+                "null" => "setup_scope_null",
+                "array" => "setup_scope_array",
+                _ => "setup_scope_other",
+            });
+            super::super::diagnostics::classify(error.as_ref());
+            failure("setup_barrier_scope_invalid")
+        })?;
         let index = if scope == api::guid_text(&Audit_Logon_Logon) {
             0
         } else if scope == api::guid_text(&Audit_Logon_AccountLockout) {

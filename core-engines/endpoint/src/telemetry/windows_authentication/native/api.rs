@@ -292,6 +292,20 @@ impl Values {
         }
     }
     #[cfg(test)]
+    pub fn diagnostic_kind(&self, index: usize) -> &'static str {
+        if index >= self.count {
+            return "other";
+        }
+        let kind = unsafe { (*self.buffer.as_ptr().cast::<EVT_VARIANT>().add(index)).Type };
+        match kind {
+            value if value == EvtVarTypeGuid as u32 => "guid",
+            value if value == EvtVarTypeString as u32 => "string",
+            value if value == EvtVarTypeNull as u32 => "null",
+            value if value & EVT_VARIANT_TYPE_ARRAY != 0 => "array",
+            _ => "other",
+        }
+    }
+    #[cfg(test)]
     pub fn local_system_sid(&self, index: i32) -> Result<bool> {
         let value = self.value(index, EvtVarTypeSid)?;
         let pointer = unsafe { value.Anonymous.SidVal };

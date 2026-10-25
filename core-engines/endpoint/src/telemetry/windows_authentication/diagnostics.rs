@@ -67,6 +67,16 @@ pub(super) fn source(category: &str) {
             | "setup_barrier_changes_invalid"
             | "setup_barrier_delta_unexpected"
             | "setup_barrier_budget"
+            | "setup_policy_provider_mismatch"
+            | "setup_policy_version_missing"
+            | "setup_policy_version_1"
+            | "setup_policy_version_other"
+            | "setup_policy_guid_invalid"
+            | "setup_scope_guid"
+            | "setup_scope_string"
+            | "setup_scope_null"
+            | "setup_scope_array"
+            | "setup_scope_other"
     ) {
         println!("\nATHERNEX_AUTH_SOURCE={category}");
     }

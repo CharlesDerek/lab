@@ -265,7 +265,10 @@ $source = @('controlled_queue_empty','controlled_queue_partial','controlled_queu
     'loss_system_policy_marker','loss_policy_scope_unknown',
     'setup_barrier_timeout','setup_barrier_continuity','setup_barrier_scope_invalid',
     'setup_barrier_subject_invalid','setup_barrier_changes_invalid',
-    'setup_barrier_delta_unexpected','setup_barrier_budget')
+    'setup_barrier_delta_unexpected','setup_barrier_budget',
+    'setup_policy_provider_mismatch','setup_policy_version_missing',
+    'setup_policy_version_1','setup_policy_version_other','setup_policy_guid_invalid',
+    'setup_scope_guid','setup_scope_string','setup_scope_null','setup_scope_array','setup_scope_other')
 $log = Join-Path $Root 'fixture.log'
 $lines = @($stages | ForEach-Object { 'ATHERNEX_AUTH_STAGE=' + $_ }) +
          @($source | ForEach-Object { 'ATHERNEX_AUTH_SOURCE=' + $_ })
@@ -382,7 +385,10 @@ class IsolationRunnerTests(unittest.TestCase):
             'loss_system_policy_marker', 'loss_policy_scope_unknown',
             'setup_barrier_timeout', 'setup_barrier_continuity', 'setup_barrier_scope_invalid',
             'setup_barrier_subject_invalid', 'setup_barrier_changes_invalid',
-            'setup_barrier_delta_unexpected', 'setup_barrier_budget'])
+            'setup_barrier_delta_unexpected', 'setup_barrier_budget',
+            'setup_policy_provider_mismatch', 'setup_policy_version_missing',
+            'setup_policy_version_1', 'setup_policy_version_other', 'setup_policy_guid_invalid',
+            'setup_scope_guid', 'setup_scope_string', 'setup_scope_null', 'setup_scope_array', 'setup_scope_other'])
         self.assertEqual(self.run_case('injected', PHASES_WRAPPER, 'Authentication'), {'stages': [], 'source': []})
 
     def test_setup_policy_restoration_does_not_claim_account_cleanup(self):
