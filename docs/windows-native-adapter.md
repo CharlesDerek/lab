@@ -725,9 +725,17 @@ install a service, or sign/load the driver.
 
 `.github/workflows/endpoint.yml` includes a Windows development build job, the
 native Rust platform tests, Linux execution of the C protocol validators, and
-the real-ClamAV stream fixture. Adding this workflow is not evidence that its
-Windows jobs have run. Development artifacts are separate from the portal's
-installer catalog.
+the real-ClamAV stream fixture. Development artifacts are separate from the
+portal's installer catalog.
+
+Hosted Windows Server 2022 validation at commit `1878125e` passed native Rust
+tests, evidence sealing/backup recovery, enrollment/response/restart recovery,
+signed agent and controller replacement with forced-crash recovery, and automatic
+agent installation/runtime rollback on 2026-10-25. The
+[platform job](https://github.com/CharlesDerek/lab/actions/runs/40197329277/job/121180895775)
+then failed at launcher-owned controller maintenance because its ownership lease
+was not established. SCM lifecycle and real minifilter authorization remain
+unverified. Earlier local verification records below retain their original scope.
 
 ## Verification and release gates
 
@@ -890,6 +898,11 @@ copies the executable and fixture scripts into a new SYSTEM/Administrators-only
 directory, verifies the copied executable hash, and starts one uniquely named
 LocalSystem task. The fixture independently requires LocalSystem in session zero
 and refuses an existing Athernex installation.
+
+The service gate also runs after unrelated post-build fixture failures when the
+native build, installer syntax, installer control-flow tests and service-runner
+tests passed. Cancellation prevents it from starting. Earlier test failures
+still fail the overall job.
 
 The task has a bounded execution time and the workflow has a ten-minute limit.
 Passing requires a successful task exit and all six native SCM checks, the exact

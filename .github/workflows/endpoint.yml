@@ -209,6 +209,7 @@ jobs:
       - name: Lint endpoint
         run: cargo clippy --locked -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native --all-targets -- -D warnings
       - name: Build native endpoint
+        id: native_endpoint_build
         run: cargo build --locked --release -p athernex-endpoint -p athernex-siem
       - name: Build development macOS authorization adapter
         if: runner.os == 'macOS'
@@ -244,7 +245,8 @@ jobs:
         if: runner.os != 'Windows'
         run: for script in infrastructure/endpoint/*.sh; do sh -n "$script"; done
       - name: Validate Windows installer syntax
-        if: runner.os == 'Windows'
+        id: windows_installer_syntax
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.native_endpoint_build.outcome == 'success' }}
         shell: pwsh
         run: |
           foreach ($file in @('infrastructure/endpoint/install.ps1', 'core-engines/endpoint/src/installer/register.ps1', 'tools/verify_windows_service.ps1', 'tools/verify_windows_service_ci.ps1')) {
@@ -254,13 +256,22 @@ jobs:
             if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
           }
       - name: Verify Windows installer control flow with mocked commands
-        if: runner.os == 'Windows'
+        id: windows_installer_tests
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.native_endpoint_build.outcome == 'success' }}
         run: python tools/test_windows_installer.py -v
       - name: Verify native service runner failure handling with mocked tasks
-        if: runner.os == 'Windows'
+        id: windows_service_runner_tests
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.native_endpoint_build.outcome == 'success' }}
         run: python tools/test_windows_service_ci.py -v
       - name: Verify real SCM lifecycle as LocalSystem on the disposable hosted VM
-        if: runner.os == 'Windows'
+        # Collect independent native service evidence after unrelated fixture
+        # failures, while retaining the job failure and all service prerequisites.
+        if: >-
+          ${{ !cancelled() && runner.os == 'Windows' &&
+              steps.native_endpoint_build.outcome == 'success' &&
+              steps.windows_installer_syntax.outcome == 'success' &&
+              steps.windows_installer_tests.outcome == 'success' &&
+              steps.windows_service_runner_tests.outcome == 'success' }}
         timeout-minutes: 10
         shell: pwsh
         run: tools/verify_windows_service_ci.ps1 -Agent target/release/athernex-endpoint.exe -OutputDirectory "$env:RUNNER_TEMP/native-windows-service" -DisposableHost

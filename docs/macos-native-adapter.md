@@ -8,8 +8,18 @@ build component. The endpoint controller now manages the scanner and adapter
 together when local protection policy is enabled. The installer prepares the
 dedicated scanner account, private runtime and signature database. Automatic
 health now requires live clean controls and matching native denial receipts for
-every protected root. **This implementation has not been executed on a Mac.**
+every protected root. **Live Endpoint Security authorization remains unverified.**
 A successful subscription or build cannot establish verified prevention.
+
+Hosted macOS validation at commit `1878125e` passed the complete
+[ARM platform job](https://github.com/CharlesDerek/lab/actions/runs/40197329277/job/121180895674)
+and [Intel platform job](https://github.com/CharlesDerek/lab/actions/runs/40197329277/job/121180895867)
+on 2026-10-25: endpoint/native unit and integration tests, strict lint, development
+builds, enrollment/response/restart recovery, and signed agent/controller
+replacement with forced-crash recovery. The update fixture confirmed automatic
+probe termination after updater death. Entitled Endpoint Security authorization,
+production account/installer lifecycle, signing and notarization remain release
+gates. Earlier local verification records below retain their original scope.
 
 ## Authorization and evidence
 
