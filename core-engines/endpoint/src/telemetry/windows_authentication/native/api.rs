@@ -266,6 +266,31 @@ impl Values {
         let guid = unsafe { std::ptr::read_unaligned(pointer) };
         Ok(Some(guid_text(&guid)))
     }
+    pub fn required_guid(&self, index: i32) -> Result<String> {
+        // XPath event values retain their native type. Accept a scalar GUID,
+        // or a bounded string only when it has the complete braced GUID shape.
+        // Arrays and other types must not become a known unrelated policy.
+        if self.value(index, EvtVarTypeString).is_ok() {
+            let value = self.string(index, 38)?;
+            if value.len() != 38
+                || !value
+                    .bytes()
+                    .enumerate()
+                    .all(|(offset, byte)| match offset {
+                        0 => byte == b'{',
+                        37 => byte == b'}',
+                        9 | 14 | 19 | 24 => byte == b'-',
+                        _ => byte.is_ascii_hexdigit(),
+                    })
+            {
+                return Err("Invalid Windows Security GUID text".into());
+            }
+            Ok(value.to_ascii_lowercase())
+        } else {
+            self.guid(index)?
+                .ok_or_else(|| "Required Windows Security GUID is missing".into())
+        }
+    }
     pub fn record_id(&self) -> Result<u64> {
         Ok(unsafe {
             self.value(EvtSystemEventRecordId, EvtVarTypeUInt64)?

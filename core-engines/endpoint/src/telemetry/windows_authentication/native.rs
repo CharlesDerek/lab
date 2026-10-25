@@ -24,6 +24,10 @@ const EVENTLOG: &str = "{fc65ddd8-d6ef-4962-83d5-6e5cfe9ce148}";
 pub(super) fn verify_bookmark_text() -> Result<()> {
     api::tests::verify_bookmark_text()
 }
+#[cfg(test)]
+pub(super) fn verify_policy_scope_variants() {
+    api::tests::verify_policy_scope_variants();
+}
 
 #[derive(Serialize)]
 struct Identity {
@@ -239,7 +243,10 @@ impl Reader {
             "Windows audit policy scope context",
         )?;
         let values = Values::render(&context, event, 1)?;
-        let value = values.string(0, 64)?.to_ascii_lowercase();
+        Self::policy_scope(&values)
+    }
+    fn policy_scope(values: &Values) -> Result<bool> {
+        let value = values.required_guid(0)?;
         Ok(value == api::guid_text(&Audit_Logon_Logon)
             || value == api::guid_text(&Audit_Logon_AccountLockout))
     }
