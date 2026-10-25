@@ -53,9 +53,32 @@ function Invoke-IsolationCheck([string]$Executable, [string]$Name, [string]$Log)
     }
 }
 
-function Invoke-IsolationWorker([string]$OutputDirectory) {
+function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report) {
+    $position = 0
+    foreach ($check in Get-IsolationChecks) {
+        $executable = Join-Path $OutputDirectory $check.binary
+        # A changed input is a trust failure: stop before executing anything else.
+        if ((Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Manifest.sha256.($check.binary)) {
+            throw 'Staged isolation executable hash changed'
+        }
+        $log = Join-Path $OutputDirectory ('check-' + $position + '.log')
+        try {
+            Invoke-IsolationCheck $executable $check.test $log
+            $Report.checks[$check.test] = 'passed'
+        } catch {
+            $Report.checks[$check.test] = 'failed'
+            $Report.failures[$check.test] = $_.Exception.Message
+        }
+        # Each test runs in a separate process with fresh fixture paths. The
+        # WFP check is last, so retained rules cannot affect later checks.
+        $position += 1
+    }
+    if ($Report.failures.Count) { throw 'One or more native isolation checks failed' }
+}
+
+function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost) {
     $ErrorActionPreference = 'Stop'
-    if ([Environment]::OSVersion.Platform -ne 'Win32NT' -or
+    if (-not $DisposableHost -or [Environment]::OSVersion.Platform -ne 'Win32NT' -or
         [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18' -or
         [Diagnostics.Process]::GetCurrentProcess().SessionId -ne 0) {
         throw 'Isolation worker requires native LocalSystem in session zero'
@@ -65,20 +88,11 @@ function Invoke-IsolationWorker([string]$OutputDirectory) {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $report = @{ schema=1; native_windows_executed=$true; production_readiness=$false;
         manifest_sha256=$manifestHash; user_sid='S-1-5-18'; session_id=0;
-        windows_version=[Environment]::OSVersion.Version.ToString(); checks=[ordered]@{}; error=$null }
+        windows_version=[Environment]::OSVersion.Version.ToString(); checks=[ordered]@{};
+        failures=[ordered]@{}; error=$null }
     try {
         if ($manifest.schema -ne 1) { throw 'Invalid isolation input manifest' }
-        $position = 0
-        foreach ($check in Get-IsolationChecks) {
-            $executable = Join-Path $OutputDirectory $check.binary
-            if ((Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $manifest.sha256.($check.binary)) {
-                throw 'Staged isolation executable hash changed'
-            }
-            $log = Join-Path $OutputDirectory ('check-' + $position + '.log')
-            Invoke-IsolationCheck $executable $check.test $log
-            $report.checks[$check.test] = 'passed'
-            $position += 1
-        }
+        Invoke-IsolationChecks $OutputDirectory $manifest $report
     } catch {
         $report.error = $_.Exception.Message
         throw
@@ -131,7 +145,7 @@ function Invoke-IsolationCi([string]$EndpointTests, [string]$NativeTests, [strin
     $code = @'
 $ErrorActionPreference = 'Stop'
 $p = ConvertFrom-Json '__PARAMETERS__'
-try { & $p.Fixture -OutputDirectory $p.OutputDirectory -Worker; exit 0 }
+try { & $p.Fixture -OutputDirectory $p.OutputDirectory -Worker -DisposableHost; exit 0 }
 catch { $_ | Out-File -LiteralPath (Join-Path $p.OutputDirectory 'worker.log') -Append; exit 1 }
 '@.Replace('__PARAMETERS__', $literal)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
@@ -151,6 +165,6 @@ catch { $_ | Out-File -LiteralPath (Join-Path $p.OutputDirectory 'worker.log') -
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    if ($Worker) { Invoke-IsolationWorker $OutputDirectory }
+    if ($Worker) { Invoke-IsolationWorker $OutputDirectory $DisposableHost.IsPresent }
     else { Invoke-IsolationCi $EndpointTests $NativeTests $OutputDirectory $DisposableHost.IsPresent }
 }

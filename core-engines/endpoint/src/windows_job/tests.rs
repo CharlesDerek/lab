@@ -110,6 +110,11 @@ fn helper() {
         "sleep" => {
             thread::sleep(Duration::from_secs(30));
         }
+        "scanner-ready" => {
+            println!("SCANNER_READY");
+            std::io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_secs(30));
+        }
         "input" => {
             use std::io::Read;
             super::guard_parent(
@@ -780,27 +785,38 @@ fn service_keeps_process_identity_and_drains_bounded_output_until_drop() {
 #[test]
 #[ignore = "requires native Windows LocalSystem service session zero"]
 fn scanner_launch_has_checked_identity_job_limits_and_owned_cleanup() {
-    use athernex_endpoint_native::windows_scanner::{self, Token};
+    use athernex_endpoint_native::{
+        windows_scanner::{self, Token},
+        windows_state::Directory,
+    };
     use windows_sys::Win32::System::JobObjects::{
         JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
     };
     let _serial = TEST_SERIAL.lock().unwrap();
     let token = Token::new().unwrap();
     let other = Token::new().unwrap();
-    let root = std::env::var_os("SystemRoot").unwrap();
-    let system = Path::new(&root).join("System32");
-    let mut invocation = Command::new(system.join("cmd.exe"));
+    // Execute our own bounded helper from the same private scanner workspace
+    // used by production. A command shell has unrelated startup requirements.
+    let retained = tempfile::tempdir().unwrap().keep();
+    let state = Directory::create_under(&retained.canonicalize().unwrap(), "private").unwrap();
+    let workspace = state.scanner_workspace("scanner", &token).unwrap();
+    let images = workspace.directory("engine", false).unwrap();
+    let scratch = workspace.directory("temporary", true).unwrap();
+    let mut source = fs::File::open(std::env::current_exe().unwrap()).unwrap();
+    images
+        .copy("scanner.exe", &mut source, &mut (512 * 1024 * 1024))
+        .unwrap();
+    let _image = images.pin("scanner.exe").unwrap();
+    let mut invocation = Command::new(images.path().join("scanner.exe"));
     invocation
         .env_clear()
-        .env("SystemRoot", &root)
-        .current_dir(&system)
-        .args([
-            "/d",
-            "/q",
-            "/s",
-            "/c",
-            "echo SCANNER_READY&for /l %i in (1,1,2147483647) do @rem keepalive",
-        ]);
+        .env("SystemRoot", std::env::var_os("SystemRoot").unwrap())
+        .env("TEMP", scratch.path())
+        .env("TMP", scratch.path())
+        .env(MODE, "scanner-ready")
+        .env(FILE, scratch.path().join("unused"))
+        .current_dir(images.path())
+        .args(args());
     let mut service = Service::start_scanner(&invocation, &token, 4096, |_, _| Ok(())).unwrap();
     let original = process(service.id());
     service.verify_scanner(token.logon_sid()).unwrap();
@@ -834,11 +850,13 @@ fn scanner_launch_has_checked_identity_job_limits_and_owned_cleanup() {
         .windows(b"SCANNER_READY".len())
         .any(|v| v == b"SCANNER_READY")
     {
-        assert!(
-            service.poll().unwrap().is_none(),
-            "scanner fixture exited: {}",
-            String::from_utf8_lossy(service.output())
-        );
+        if let Some(code) = service.poll().unwrap() {
+            panic!(
+                "scanner fixture exited with {code} (0x{:08x}): {}",
+                code as u32,
+                String::from_utf8_lossy(service.output())
+            );
+        }
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(10));
     }

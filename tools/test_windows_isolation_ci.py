@@ -58,16 +58,41 @@ try {
 @{ failed=($null -ne $failure); error=$failure; executed=$global:executed; count=$checks.Count } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
 '''
+WORKER_WRAPPER = r'''
+param([string]$Script, [string]$Case, [string]$Root)
+$ErrorActionPreference = 'Stop'
+. $Script
+$manifest = @{ sha256=@{} }
+foreach ($name in @('endpoint.exe','native.exe')) {
+    $path = Join-Path $Root $name
+    Set-Content -LiteralPath $path -Value 'fixture, never executed'
+    $manifest.sha256[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+if ($Case -eq 'changed-input') { $manifest.sha256['endpoint.exe'] = 'b'*64 }
+$global:executed = 0
+function Invoke-IsolationCheck([string]$Executable, [string]$Name, [string]$Log) {
+    $global:executed += 1
+    if ($Case -eq 'first-fails' -and $global:executed -eq 1) { throw 'First independent check failed' }
+}
+$report = @{ checks=[ordered]@{}; failures=[ordered]@{} }
+$failure = $null
+try { Invoke-IsolationChecks $Root $manifest $report }
+catch { $failure = $_.Exception.Message }
+@{ failed=($null -ne $failure); error=$failure; executed=$global:executed;
+   passed=@($report.checks.Values | Where-Object { $_ -ceq 'passed' }).Count;
+   failures=$report.failures.Count } |
+    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
+'''
 
 
 class IsolationRunnerTests(unittest.TestCase):
     powershell = None
 
-    def run_case(self, case):
+    def run_case(self, case, wrapper_source=WRAPPER):
         with tempfile.TemporaryDirectory(prefix='athernex-isolation-ci-') as temporary:
             root = Path(temporary)
             wrapper = root/'wrapper.ps1'
-            wrapper.write_text(WRAPPER)
+            wrapper.write_text(wrapper_source)
             result = subprocess.run(
                 [self.powershell, '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
                  str(wrapper), str(SCRIPT), case, str(root)],
@@ -75,7 +100,8 @@ class IsolationRunnerTests(unittest.TestCase):
                 env=dict(os.environ, POWERSHELL_TELEMETRY_OPTOUT='1', POWERSHELL_UPDATECHECK='Off'))
             self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
             value = json.loads((root/'result.json').read_text(encoding='utf-8-sig'))
-            self.assertEqual(value['count'], 6)
+            if wrapper_source == WRAPPER:
+                self.assertEqual(value['count'], 6)
             return value
 
     def test_exact_native_identity_and_complete_report_are_required(self):
@@ -97,6 +123,15 @@ class IsolationRunnerTests(unittest.TestCase):
         value = self.run_case('passed')
         self.assertFalse(value['failed'], value)
         self.assertEqual(value['executed'], 1)
+
+    def test_independent_failures_collect_remaining_checks_but_changed_input_stops_execution(self):
+        for case, executed, passed, failures, failed in [
+                ('passed', 6, 6, 0, False), ('first-fails', 6, 5, 1, True),
+                ('changed-input', 0, 0, 0, True)]:
+            with self.subTest(case=case):
+                value = self.run_case(case, WORKER_WRAPPER)
+                self.assertEqual((value['executed'], value['passed'], value['failures'], value['failed']),
+                                 (executed, passed, failures, failed), value)
 
 
 if __name__ == '__main__':
