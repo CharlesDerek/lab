@@ -3,6 +3,7 @@
 //! Closing the noninherited job handle on owner death kills its descendants.
 //! This is lifecycle ownership, not a sandbox for privileged/delegated services.
 mod command;
+mod desktop;
 mod environment;
 mod handles;
 pub use command::Command;
@@ -147,6 +148,7 @@ struct Tree {
     process: OwnedHandle,
     slot: Slot,
     exit: Option<i32>,
+    _desktop: Option<desktop::Context>,
 }
 impl Tree {
     fn root_exit(&mut self) -> io::Result<Option<i32>> {
@@ -407,6 +409,7 @@ fn spawn(
     stdio: &handles::Stdio,
     token: Option<&athernex_endpoint_native::windows_scanner::Token>,
 ) -> io::Result<Child> {
+    let mut desktop = token.map(desktop::Context::create).transpose()?;
     let slot = Slot::reserve()?;
     let job = job()?;
     if token.is_some() {
@@ -448,11 +451,9 @@ fn spawn(
         token.verify().map_err(io::Error::other)?;
         let security = token.process_security().map_err(io::Error::other)?;
         let attributes = security.attributes();
-        // An empty desktop chooses the noninteractive logon session station.
-        // NULL would inherit the privileged parent's desktop. No window station
-        // handles are included in our explicit inherited-handle list.
-        let mut desktop = [0u16];
-        startup.StartupInfo.lpDesktop = desktop.as_mut_ptr();
+        // The creation worker has already exited with its job empty. Only this
+        // restricted scanner connects to its private station and desktop.
+        startup.StartupInfo.lpDesktop = desktop.as_mut().unwrap().startup.as_mut_ptr();
         unsafe {
             CreateProcessAsUserW(
                 token.handle().as_raw_handle(),
@@ -502,6 +503,7 @@ fn spawn(
             process,
             slot,
             exit: None,
+            _desktop: desktop,
         }),
         initial_thread,
         pid: info.dwProcessId,
@@ -615,6 +617,11 @@ pub(crate) fn guard_parent(parent: u32) -> io::Result<()> {
     // An internal launch contract, not a privilege boundary. The creator uses
     // JOB_LIST for ownership before user code; job close enforces parent death.
     Ok(())
+}
+
+#[doc(hidden)]
+pub fn desktop_worker(parent: u32) -> crate::Result<()> {
+    desktop::worker_main(parent)
 }
 
 #[cfg(test)]

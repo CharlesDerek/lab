@@ -34,7 +34,7 @@ fn args() -> [&'static str; 5] {
         "--test-threads=1",
     ]
 }
-fn command(mode: &str, file: &Path) -> Command {
+pub(super) fn command(mode: &str, file: &Path) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command.args(args()).env(MODE, mode).env(FILE, file);
     command
@@ -230,6 +230,15 @@ fn helper() {
     };
     let file = std::env::var_os(FILE).unwrap();
     match mode.as_str() {
+        "desktop-worker" => {
+            super::desktop_worker(
+                std::env::var("ATHERNEX_WINDOWS_FIXTURE_PARENT")
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+            )
+            .unwrap();
+        }
         "echo" => {
             if let Ok(raw) = std::env::var("ATHERNEX_WINDOWS_FIXTURE_HANDLE") {
                 unsafe {
@@ -254,6 +263,17 @@ fn helper() {
             thread::sleep(Duration::from_secs(30));
         }
         "scanner-ready" => {
+            use windows_sys::Win32::System::{
+                StationsAndDesktops::{GetProcessWindowStation, GetThreadDesktop, UOI_NAME},
+                Threading::GetCurrentThreadId,
+            };
+            println!(
+                "SCANNER_UI {}",
+                json!({
+                    "station": super::desktop::object_text(unsafe { GetProcessWindowStation() }, UOI_NAME).unwrap(),
+                    "desktop": super::desktop::object_text(unsafe { GetThreadDesktop(GetCurrentThreadId()) }, UOI_NAME).unwrap(),
+                })
+            );
             println!("SCANNER_READY");
             std::io::stdout().flush().unwrap();
             thread::sleep(Duration::from_secs(30));
@@ -943,6 +963,17 @@ fn scanner_launch_has_checked_identity_job_limits_and_owned_cleanup() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let token = Token::new().unwrap();
     let other = Token::new().unwrap();
+    use windows_sys::Win32::System::StationsAndDesktops::GetProcessWindowStation;
+    let supervisor_station = unsafe { GetProcessWindowStation() };
+    assert!(!supervisor_station.is_null());
+    // The helper changes only its own station. Parent-side handles must merely
+    // pin these private objects, and their final drop must release the names.
+    let context = super::desktop::Context::create(&token).unwrap();
+    assert_eq!(unsafe { GetProcessWindowStation() }, supervisor_station);
+    assert_station_access(&context.name, &token, &other);
+    let discarded_name = context.name.clone();
+    drop(context);
+    assert_station_gone(&discarded_name);
     // Execute our own bounded helper from the same private scanner workspace
     // used by production. A command shell has unrelated startup requirements.
     let retained = tempfile::tempdir().unwrap().keep();
@@ -966,6 +997,18 @@ fn scanner_launch_has_checked_identity_job_limits_and_owned_cleanup() {
         .current_dir(images.path())
         .args(args());
     let mut service = Service::start_scanner(&invocation, &token, 4096, |_, _| Ok(())).unwrap();
+    assert_eq!(unsafe { GetProcessWindowStation() }, supervisor_station);
+    let station_name = service
+        .child
+        .tree
+        .as_ref()
+        .unwrap()
+        ._desktop
+        .as_ref()
+        .unwrap()
+        .name
+        .clone();
+    assert_station_access(&station_name, &token, &other);
     let original = process(service.id());
     service.verify_scanner(token.logon_sid()).unwrap();
     assert!(service.verify_scanner(other.logon_sid()).is_err());
@@ -1013,6 +1056,92 @@ fn scanner_launch_has_checked_identity_job_limits_and_owned_cleanup() {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(10));
     }
+    let text = String::from_utf8_lossy(service.output());
+    let ui: Value = text
+        .lines()
+        .find_map(|line| {
+            line.split_once("SCANNER_UI ")
+                .map(|(_, value)| serde_json::from_str(value).unwrap())
+        })
+        .expect("scanner did not identify its USER objects");
+    assert_eq!(ui["station"], station_name);
+    assert_eq!(ui["desktop"], "Scanner");
     drop(service);
     assert!(finished(&original, 5000));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while cleanup_ready().is_err() {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_station_gone(&station_name);
+    assert_eq!(unsafe { GetProcessWindowStation() }, supervisor_station);
+    // A failed ownership-record callback must kill the suspended process and
+    // release its complete Tree, including the private desktop handles.
+    let mut refused = None;
+    assert!(Service::start_scanner(&invocation, &token, 4096, |pid, _| {
+        refused = Some(process(pid));
+        Err(io::Error::other("intentional ownership-record refusal"))
+    })
+    .is_err());
+    assert!(finished(&refused.unwrap(), 5000));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while reaper().unwrap().active.load(Ordering::SeqCst) != 0 {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(unsafe { GetProcessWindowStation() }, supervisor_station);
+}
+
+fn assert_station_gone(name: &str) {
+    use windows_sys::Win32::System::StationsAndDesktops::{CloseWindowStation, OpenWindowStationW};
+    let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let raw = unsafe { OpenWindowStationW(name.as_ptr(), 0, 2) };
+    if !raw.is_null() {
+        unsafe {
+            CloseWindowStation(raw);
+        }
+        panic!("private scanner station survived confirmed cleanup");
+    }
+    assert_eq!(io::Error::last_os_error().raw_os_error(), Some(2));
+}
+
+fn assert_station_access(
+    name: &str,
+    token: &athernex_endpoint_native::windows_scanner::Token,
+    other: &athernex_endpoint_native::windows_scanner::Token,
+) {
+    use windows_sys::Win32::{
+        Security::{ImpersonateLoggedOnUser, RevertToSelf},
+        System::StationsAndDesktops::{CloseWindowStation, OpenWindowStationW},
+    };
+    let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    struct Revert;
+    impl Drop for Revert {
+        fn drop(&mut self) {
+            if unsafe { RevertToSelf() } == 0 {
+                std::process::abort();
+            }
+        }
+    }
+    let probe = |token: &athernex_endpoint_native::windows_scanner::Token, rights: u32| {
+        assert_ne!(
+            unsafe { ImpersonateLoggedOnUser(token.handle().as_raw_handle()) },
+            0
+        );
+        let _revert = Revert;
+        let raw = unsafe { OpenWindowStationW(name.as_ptr(), 0, rights) };
+        if raw.is_null() {
+            Err(io::Error::last_os_error().raw_os_error())
+        } else {
+            assert_ne!(unsafe { CloseWindowStation(raw) }, 0);
+            Ok(())
+        }
+    };
+    // Own station attributes are readable, while a different scanner logon has
+    // no access even though its LocalService user and BuiltinUsers group match.
+    assert_eq!(probe(token, 2), Ok(()));
+    assert_eq!(probe(other, 2), Err(Some(5)));
+    for rights in [0x8, 0x40, 0x10000, 0x40000, 0x80000] {
+        assert_eq!(probe(token, rights), Err(Some(5)));
+    }
 }

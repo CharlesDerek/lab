@@ -75,6 +75,10 @@ fn main() -> Result<()> {
             athernex_endpoint::protection::windows::worker_main(args[1].parse()?)?;
         }
         #[cfg(windows)]
+        "windows-desktop-worker" if args.len() == 2 => {
+            athernex_endpoint::windows_desktop_worker(args[1].parse()?)?;
+        }
+        #[cfg(windows)]
         "windows-scratch-worker" if args.len() == 2 => {
             athernex_endpoint::protection::windows::scratch_worker(args[1].parse()?)?;
         }

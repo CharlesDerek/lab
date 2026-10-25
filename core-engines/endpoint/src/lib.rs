@@ -34,6 +34,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 #[cfg(windows)]
+#[doc(hidden)]
+pub use windows_job::desktop_worker as windows_desktop_worker;
+#[cfg(windows)]
 pub use windows_job::Command as Process;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

@@ -129,9 +129,17 @@ enable AuthenticatedUsers-only access. Medium-integrity writes remain forbidden,
 including to files whose DACL grants BuiltinUsers write access. Public objects
 with low integrity can still be writable. Both the token supplied to process creation and the launched process
 token are checked. The process/thread owner is explicitly SYSTEM, and their
-DACL grants access to SYSTEM and the scanner logon. An empty desktop selection
-uses the noninteractive logon station instead of inheriting the supervisor's
-desktop. There is no fallback to a privileged scanner.
+DACL grants access to SYSTEM and the scanner logon. Each scanner receives a new
+noninteractive window station and desktop. An owned SYSTEM worker creates them
+with SYSTEM ownership, a low-integrity label and access only for SYSTEM and the
+exclusive scanner logon. The scanner cannot change their owner or ACL, delete
+them, create additional desktops or log off the station. The supervisor never
+switches its process station. It duplicates the worker's exact object handles,
+checks their names/types, and requires the worker and its job to exit before
+creating the suspended scanner. The scanner's owned process tree retains these
+handles through cleanup, including asynchronous reaping. There is no fallback
+to a shared desktop or privileged scanner. This desktop path still requires
+native validation; compilation does not establish confinement.
 
 The token's default object owner is also its exclusive logon SID, with the
 group marked owner-eligible. A private default DACL alone would leave the shared
@@ -154,6 +162,15 @@ requires runtime reads, rejects AuthenticatedUsers-only access, and checks that
 BuiltinUsers-writable medium-integrity files cannot be changed, deleted or have
 their ACL modified. Process startup and network enforcement must also pass their
 separate native tests before scanner isolation can be considered verified.
+
+The subsequent [native station diagnostic](https://github.com/CharlesDerek/lab/actions/runs/40206509968)
+found that SYSTEM could open the default LocalService station while the exact
+restricted scanner token received access denied. Both process fixtures exited
+with `0xc0000142` before helper startup. The private desktop path addresses that
+access mismatch; its process launch, cross-logon denial, cleanup and WFP checks
+must pass before claiming the startup failure is resolved. Creation uses
+Microsoft's [exclusive window-station creation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createwindowstationw)
+and [desktop association rules](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createdesktopw).
 
 A fresh workspace contains copies of the executable, adjacent DLLs and flat
 signature files, with a combined 768 MiB staging budget and at most 256 source
@@ -607,8 +624,9 @@ restart, and host-crash cleanup with SCM recovery. Process handles and creation
 identities distinguish owned descendants from reused PIDs. Cleanup checks the
 exact service command before removing only the fixture's service; files and its
 report remain private for review. It installs no antivirus or driver and makes
-no prevention claim. **This fixture has been syntax-checked but has not been
-executed on Windows.** Cross-builds and mocked PowerShell tests do not replace it.
+no prevention claim. All six checks passed on the hosted Windows Server 2022 VM
+at commit `62a4e27d`; see the hosted service lifecycle results below. This does
+not cover production installation, migration, reboot or signed prevention.
 
 ## Dedicated scratch disk development
 
@@ -748,8 +766,10 @@ signed agent and controller replacement with forced-crash recovery, and automati
 agent installation/runtime rollback on 2026-10-25. The
 [platform job](https://github.com/CharlesDerek/lab/actions/runs/40197329277/job/121180895775)
 then failed at launcher-owned controller maintenance because its ownership lease
-was not established. SCM lifecycle and real minifilter authorization remain
-unverified. Earlier local verification records below retain their original scope.
+was not established. The later full Windows platform job at `62a4e27d` passed,
+including controller delivery, both fleet rollouts and native SCM lifecycle.
+Real minifilter authorization remains unverified. Earlier local verification
+records below retain their original scope.
 
 ## Verification and release gates
 
@@ -934,11 +954,14 @@ the owned process tree, installer exclusion, stop, restart and crash recovery;
 they do not certify minifilter enforcement, signing or hostile-administrator
 resistance.
 
-Five local PowerShell control-flow tests (28 scenarios) passed, using mocked Task
-Scheduler commands. Syntax and workflow checks passed. The hosted native job
-has **not** been executed at this checkpoint; its six runtime checks remain
-unverified. Details are retained in
-`.athernex/verification/windows-service-ci-validation.json`.
+The [hosted Windows platform job](https://github.com/CharlesDerek/lab/actions/runs/40205131600/job/121204327964)
+passed all six native SCM checks at commit `62a4e27d` on 2026-10-25. The retained
+`native-windows-service` artifact binds the report to the exact executable hash,
+commit and run, and records LocalSystem in session zero. Registration, owned
+descendants, installer exclusion, complete stop, explicit restart and host-crash
+cleanup with SCM recovery passed. This is disposable-host service lifecycle
+evidence; signing, prevention, production migration/reboot and hostile-admin
+resistance remain separate open requirements.
 
 The runner uses Microsoft's [service-account task principal](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtaskprincipal)
 and [bounded task settings](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtasksettingsset).
