@@ -1,7 +1,7 @@
 <#
 Run the existing opt-in isolation checks as LocalSystem on a disposable hosted VM.
-No driver is loaded. The scratch test creates, attaches, formats and fills only
-its new private 256 MiB VHDX; no existing disk is adopted. WFP rules are scoped
+No driver is loaded. Scratch tests create only private 256 MiB VHDX files; the
+worker test formats and fills its own new volume. No existing disk is adopted. WFP rules are scoped
 to fresh fixture images. Failed checks retain their private recovery journals.
 Dot-sourcing defines helpers only.
 #>
@@ -17,7 +17,10 @@ function Get-IsolationChecks {
         @{ binary='endpoint.exe'; test='protection::windows::scratch::tests::recovery_preserves_live_corrupt_changed_and_pinned_images_and_replays_deletion' },
         @{ binary='endpoint.exe'; test='windows_job::tests::scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_service' },
         @{ binary='endpoint.exe'; test='protection::windows::scratch::tests::owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit' },
-        @{ binary='endpoint.exe'; test='protection::windows::recovery::tests::recovery_reconciles_aborted_installs_owner_crashes_and_committed_deletions' }
+        @{ binary='endpoint.exe'; test='protection::windows::recovery::tests::recovery_reconciles_aborted_installs_owner_crashes_and_committed_deletions' },
+        @{ binary='native.exe'; test='windows_scratch::tests::fixed_image_capacity_identity_and_detached_recovery_are_verified' },
+        @{ binary='native.exe'; test='windows_scratch::tests::fresh_disk_gpt_and_discovered_volume_remain_bound_to_the_created_image' },
+        @{ binary='native.exe'; test='windows_scratch::tests::owner_process_exit_releases_the_nonpermanent_scratch_attachment' }
     )
 }
 

@@ -165,7 +165,8 @@ impl Image {
             || !storage_matches
             || subtype != 2
             || size.VirtualSize != self.spec.bytes
-            || size.BlockSize != 2 * MIB as u32
+            // Fixed VHDX reports no dynamic allocation block size.
+            || size.BlockSize != 0
             || size.SectorSize != 512
             || size.PhysicalSize < self.spec.bytes
             || size.PhysicalSize > self.spec.bytes + MAX_OVERHEAD
@@ -275,7 +276,7 @@ impl FreshDisk {
                 Version2: CREATE_VIRTUAL_DISK_PARAMETERS_0_1 {
                     UniqueId: guid(&spec, Identifier::Image),
                     MaximumSize: spec.bytes,
-                    BlockSizeInBytes: 2 * MIB as u32,
+                    BlockSizeInBytes: CREATE_VIRTUAL_DISK_PARAMETERS_DEFAULT_BLOCK_SIZE,
                     SectorSizeInBytes: 512,
                     PhysicalSectorSizeInBytes: 4096,
                     ..Default::default()

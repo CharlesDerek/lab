@@ -1003,13 +1003,16 @@ and [disposable Windows runner model](https://docs.github.com/en/actions/referen
 
 ## Hosted isolation validation
 
-The independent `windows-isolation` job runs eight existing opt-in tests through
+The independent `windows-isolation` job runs eleven existing opt-in tests through
 `tools/verify_windows_isolation_ci.ps1` as LocalSystem in session zero. They cover
 the scanner's restricted identity and job limits, private-state and engine access
 controls, workspace cleanup with external links and pinned files, partial scratch
 image recovery, image-scoped WFP enforcement with a working loopback control,
 owned scratch capacity and network-policy recovery after owner crashes.
-The scratch test creates and attaches one new private 256 MiB fixed VHDX. It
+Three additional native storage checks exercise changed image identity/capacity,
+GPT and volume binding, and attachment release after the owner exits without
+destructors. Each uses only its own new private 256 MiB image.
+The full scratch worker test creates and attaches its own fixed VHDX. It
 formats only that volume after checking its GUID, partition identity, extent,
 unformatted state and lack of a drive letter; it never adopts an existing disk.
 The restricted scanner must reach native disk-full, while another scanner logon
@@ -1021,7 +1024,7 @@ the production Windows PowerShell interpreter.
 The runner stages only the two compiled library test executables in a new private
 directory. SHA-256 hashes bind the input manifest and each execution. Each exact
 test must appear in the ignored-test listing, exit successfully, and report one
-executed success. The final report must contain all eight checks and the expected
+executed success. The final report must contain all eleven checks and the expected
 native account, session and input-manifest hash. Missing, filtered or skipped tests
 cannot satisfy the gate. A bounded owned task and disposable VM contain a stalled
 fixture; failures retain scoped WFP/workspace journals for inspection and do not
@@ -1047,7 +1050,12 @@ The [run at `cfe231b`](https://github.com/CharlesDerek/lab/actions/runs/40213187
 accepted the corrected request and created the image, then refused its reported
 identity/allocation/capacity metadata before attachment. Diagnostics now report
 the numeric fields and identity-match results, without image paths or random
-identifiers; all verification conditions remain enforced.
+identifiers. The [diagnostic run at `c5d288d`](https://github.com/CharlesDerek/lab/actions/runs/40213574414)
+reported matching identity, fixed subtype, capacity and sectors, with block size
+zero. Creation now requests the fixed-disk default and verification requires
+zero, consistent with Microsoft's [fixed-VHDX sample](https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/Hyper-V/Storage/cpp/CreateVirtualDisk.cpp).
+Identity, fixed subtype, capacity, backing-size and sector checks remain exact.
+The expanded storage checks and complete worker lifecycle remain pending.
 This gate does not establish signed
 minifilter prevention, complete scanner confinement or hostile-administrator
 tamper resistance.
