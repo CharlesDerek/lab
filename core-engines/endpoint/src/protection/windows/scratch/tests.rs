@@ -2,6 +2,7 @@
 //! 256 MiB disk. The real formatter/worker runs inside the production owned job.
 use super::*;
 use std::{fs::File, io::Write};
+mod diagnostics;
 
 fn fixture_invocation(name: &str, temporary: &Path) -> crate::Process {
     let mut command = command(&std::env::current_exe().unwrap(), temporary).unwrap();
@@ -67,6 +68,7 @@ fn scratch_access_probe(path: &Path) {
             .and_then(|e| e.raw_os_error())
     );
     let alternative = PathBuf::from(std::env::var_os("ATHERNEX_SCRATCH_TEST_NT_PATH").unwrap());
+    diagnostics::native_file_access(&alternative);
     eprintln!(
         "checked NT scratch metadata error={:?}",
         std::fs::metadata(&alternative)
@@ -302,8 +304,9 @@ fn raw_device_access_is_denied() {
         Foundation::{GENERIC_READ, GENERIC_WRITE},
         Storage::FileSystem::*,
     };
-    let devices: [String; 2] =
+    let devices: [String; 3] =
         serde_json::from_str(&std::env::var("ATHERNEX_SCRATCH_TEST_DEVICES").unwrap()).unwrap();
+    diagnostics::native_raw_denied(&devices);
     for device in devices {
         for access in [
             GENERIC_READ,
@@ -408,14 +411,12 @@ fn restricted_io_fixture() {
 fn run_scanner(state: &Directory, token: &Token, ready: &Health, denied: bool) {
     let path = &ready.path;
     let nt_path = checked_nt_path(ready, token);
-    let devices = [
-        ready.target.volume.trim_end_matches('\\').to_owned(),
-        format!(r"\\.\PhysicalDrive{}", ready.target.disk_number),
-    ];
+    let devices = diagnostics::raw_devices(ready);
     // Positive controls use only the worker's identity-checked volume/disk.
     // Failure under the scanner must be access denied, never a missing device.
     for device in &devices {
         File::open(device).unwrap();
+        diagnostics::native_raw_control(device);
     }
     let staging = state
         .scanner_workspace(&format!("scanner-{}", secret().unwrap()), token)
@@ -554,6 +555,7 @@ fn owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit() {
     assert!(validate_observation(&state, &changed, token.logon_sid()).is_err());
     assert!(recovery::clean(&state).is_err());
     scratch_acl_probe(&ready, &token);
+    diagnostics::inspect(&ready, &token);
     run_scanner(&state, &Token::new().unwrap(), &ready, true);
     // Inherited access on an existing SYSTEM-created child is an independent
     // diagnostic of the scanner's create-file permissions on the directory.

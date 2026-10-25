@@ -1,5 +1,13 @@
 name: Public repository boundary
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      public_base:
+        description: 'Reviewed already-public commit ID to use as the history baseline'
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -15,8 +23,25 @@ jobs:
           python-version: '3.12'
       - name: Verify boundary checker
         run: python -m unittest discover -s tools -p test_public_boundary.py
-      - name: Check committed tree
-        run: python tools/check_public_boundary.py --tree HEAD
+      - name: Check committed tree and introduced history
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          DISPATCH_BASE: ${{ inputs.public_base }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_EVENT_NAME" in
+            push) baseline="$PUSH_BEFORE" ;;
+            pull_request) baseline="$PR_BASE" ;;
+            workflow_dispatch) baseline="$DISPATCH_BASE" ;;
+            *) echo 'Public boundary: unsupported event; refusing publication.'; exit 1 ;;
+          esac
+          if [[ ! "$baseline" =~ ^[0-9a-f]{40}$ || "$baseline" =~ ^0+$ ]]; then
+            echo 'Public boundary: no trusted pre-publication baseline. New-branch pushes require a manual workflow run with a reviewed already-public commit ID.'
+            exit 1
+          fi
+          python tools/check_public_boundary.py --tree HEAD --since "$baseline"
       - name: Install checksum-pinned secret scanner
         shell: bash
         run: |
@@ -31,5 +56,5 @@ jobs:
           set -euo pipefail
           snapshot="$(mktemp -d "$RUNNER_TEMP/public-tree.XXXXXX")"
           git archive HEAD | tar -x -C "$snapshot"
-          "$RUNNER_TEMP/gitleaks" dir "$snapshot" --config .gitleaks.toml --no-banner --redact=100 --ignore-gitleaks-allow --max-decode-depth 2
-          "$RUNNER_TEMP/gitleaks" git . --log-opts=HEAD --config .gitleaks.toml --no-banner --redact=100 --ignore-gitleaks-allow --max-decode-depth 2
+          "$RUNNER_TEMP/gitleaks" dir "$snapshot" --config .gitleaks.toml --no-banner --redact=100 --ignore-gitleaks-allow --gitleaks-ignore-path /dev/null --max-decode-depth 2
+          "$RUNNER_TEMP/gitleaks" git . --log-opts=HEAD --config .gitleaks.toml --no-banner --redact=100 --ignore-gitleaks-allow --gitleaks-ignore-path /dev/null --max-decode-depth 2

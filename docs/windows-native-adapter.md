@@ -1032,7 +1032,7 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `d338a47`](https://github.com/CharlesDerek/lab/actions/runs/40220747626)
+and task cleanup using mocked commands. The [hosted run at `13059ec`](https://github.com/CharlesDerek/lab/actions/runs/40221299877)
 passed ten of eleven checks on Windows Server 2022 as LocalSystem in session
 zero. The retained report was checked against its source commit and input-manifest
 hash. Scanner startup/cleanup, private-state access, both workspace cleanup cases,
@@ -1042,18 +1042,24 @@ passed. The formatter now supplies `windir` from `GetWindowsDirectoryW`, as it
 already does for `SystemRoot`. Native formatting, filesystem preparation and
 worker readiness pass. The unrelated logon is denied access as expected, but the
 intended scanner logon also receives access denied on its first file creation.
-Test-only checks show that the restricted token has traversal and scratch-creation
-rights, but synchronous/overlapped opens, impersonation and an identity-checked
-native-device path all remain denied. Win32 opens implicitly request metadata and
-synchronization rights in addition to the requested access; Microsoft's
+The root and volume-device grants include only
+`FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE` for this logon. The Win32
+file API implicitly requests metadata and synchronization rights; Microsoft's
 [FileSystemRights implementation](https://github.com/Microsoft/referencesource/blob/main/mscorlib/system/security/accesscontrol/filesecurity.cs)
-records the synchronization requirement. The root and volume-device grants now
-include only `FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE` for this logon.
-The root grant does not inherit or permit listing, creation or security changes.
-Both scanner logons were denied raw volume/disk data and attribute/security
-mutation, with SYSTEM read controls on the exact identity-checked devices.
-The revised grants, capacity enforcement and complete worker cleanup await
-native verification. Diagnostics report only object kinds, rights and results.
+records the synchronization requirement. Metadata and traversal now pass for
+the intended logon, including its child process; the unrelated logon remains
+denied. The root grant does not inherit or permit listing, creation or security
+changes. Both scanner logons remain denied raw volume/disk data and attribute/
+security mutation, with SYSTEM read controls on the checked devices.
+
+File reads, writes and creation still fail despite the scratch ACL permitting
+them. Test-only diagnostics now query filesystem-device characteristics, compare the
+queried volume DACL with the root and attachment descriptors, and use exact native
+access masks. Raw-access refusals also cover the data-partition alias after
+read-only verification of its disk number, partition ID, geometry and attributes.
+These probes do not widen production data permissions.
+Capacity enforcement and full worker cleanup remain unverified. Diagnostics
+report only object kinds, rights and results.
 
 Initialization creates the owned MSR when the new GPT is empty, verifies its
 arrival, then adds data. The read-only partition-device query uses numbers derived

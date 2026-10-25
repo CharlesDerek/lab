@@ -16,7 +16,7 @@ PRIVATE_DIRS = {
     ".athernex", ".paperclip", ".codex", ".cache", ".ssh", ".aws",
     ".terraform", "target", "node_modules", "__pycache__", "logs", "tmp", "temp",
 }
-PRIVATE_NAMES = {"AGENTS.md", "CODEX.md", "CLAUDE.md", "GEMINI.md", ".mrgi"}
+PRIVATE_NAMES = {"AGENTS.md", "CODEX.md", "CLAUDE.md", "GEMINI.md", ".mrgi", ".gitleaksignore"}
 PRIVATE_GLOBS = (
     "*.pem", "*.key", "*.pk8", "*.p8", "*.crt", "*.p12", "*.pfx", "*.jks", "*.keystore",
     "*.log", "*.db", "*.db-*", "*.sqlite", "*.sqlite3", "*.sqlite-*",
@@ -42,7 +42,49 @@ SYNTHETIC_PATHS = {
 
 
 def git(repo, *args):
-    return subprocess.check_output(["git", "-C", str(repo), *args])
+    return subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL)
+
+
+class BoundaryError(ValueError):
+    """A publication baseline cannot be verified; messages contain no input data."""
+
+
+def public_commit(repo, oid):
+    # Baselines must be immutable IDs from the remote/event, never local ref names.
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid) or not oid.strip("0"):
+        raise BoundaryError("An explicit, nonzero already-public commit ID is required.")
+    try:
+        resolved = git(repo, "rev-parse", "--verify", "--end-of-options", oid + "^{commit}").strip().decode()
+    except subprocess.CalledProcessError:
+        raise BoundaryError("An already-public baseline commit is missing locally; fetch it before publishing.") from None
+    if resolved != oid:
+        raise BoundaryError("The public baseline must identify a commit directly.")
+    return resolved
+
+
+def remote_public_baselines(repo, remote):
+    """Trust only currently advertised branch IDs, not local tracking/private refs."""
+    try:
+        advertised = git(repo, "ls-remote", "--heads", "--", remote).decode().splitlines()
+    except (subprocess.CalledProcessError, UnicodeError):
+        raise BoundaryError("Cannot read the public remote's advertised branches; refusing publication.") from None
+    baselines = []
+    for line in advertised:
+        fields = line.split()
+        if len(fields) != 2 or not fields[1].startswith("refs/heads/"):
+            raise BoundaryError("Unexpected public remote advertisement; refusing publication.")
+        baselines.append(public_commit(repo, fields[0]))
+    if not baselines:
+        raise BoundaryError("No public branch baseline exists; initial publication requires separate history review.")
+    return sorted(set(baselines))
+
+
+def introduced_commits(repo, ref, baselines):
+    if not baselines:
+        raise BoundaryError("An already-public history baseline is required.")
+    verified = [public_commit(repo, oid) for oid in baselines]
+    tip = git(repo, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}").strip().decode()
+    return git(repo, "rev-list", "--reverse", tip, "--not", *verified).decode().splitlines()
 
 
 def check_tree(repo, ref):
@@ -88,12 +130,33 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=".")
     parser.add_argument("--tree", default="HEAD", help="commit or tree to inspect")
+    baseline = parser.add_mutually_exclusive_group()
+    baseline.add_argument("--since", action="append", metavar="PUBLIC_COMMIT", help="also check every commit introduced after an already-public commit ID")
+    baseline.add_argument("--public-remote", metavar="REMOTE", help="for a new ref, exclude only advertised public branch ancestry")
     args = parser.parse_args()
-    tree, count, findings = check_tree(args.repo, args.tree)
-    for path, line, reason in findings:
-        print(f"{path!r}:{line}: {reason}")
-    print(f"Public boundary: {count} files, {len(findings)} findings, tree {tree}")
-    return bool(findings)
+    try:
+        refs = [args.tree]
+        if args.since is not None or args.public_remote is not None:
+            baselines = args.since if args.since is not None else remote_public_baselines(args.repo, args.public_remote)
+            refs.extend(introduced_commits(args.repo, args.tree, baselines))
+        seen = set()
+        failures = 0
+        for ref in refs:
+            tree = git(args.repo, "rev-parse", "--verify", "--end-of-options", ref + "^{tree}").strip().decode()
+            if tree in seen:
+                continue
+            seen.add(tree)
+            tree, count, findings = check_tree(args.repo, tree)
+            for path, line, reason in findings:
+                print(f"{path!r}:{line}: {reason}; tree {tree}")
+            print(f"Public boundary: {count} files, {len(findings)} findings, tree {tree}")
+            failures += len(findings)
+        return bool(failures)
+    except BoundaryError as error:
+        print(f"Public boundary: {error}")
+    except (subprocess.CalledProcessError, OSError, UnicodeError):
+        print("Public boundary: Git inspection failed; refusing publication.")
+    return 1
 
 
 if __name__ == "__main__":

@@ -12,10 +12,14 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   if [[ "$local_sha" =~ ^0+$ ]]; then
     continue
   fi
-  python3 tools/check_public_boundary.py --tree "$local_sha"
+  if [[ "$remote_sha" =~ ^0+$ ]]; then
+    python3 tools/check_public_boundary.py --tree "$local_sha" --public-remote "$2"
+  else
+    python3 tools/check_public_boundary.py --tree "$local_sha" --since "$remote_sha"
+  fi
   tree_dir="$snapshot/$local_sha"
   mkdir -p "$tree_dir"
   git archive "$local_sha" | tar -x -C "$tree_dir"
-  "$scanner" dir "$tree_dir" --config "$tree_dir/.gitleaks.toml" --no-banner --redact=100 --ignore-gitleaks-allow --max-decode-depth 2
-  "$scanner" git . --log-opts="$local_sha" --config "$tree_dir/.gitleaks.toml" --no-banner --redact=100 --ignore-gitleaks-allow --max-decode-depth 2
+  "$scanner" dir "$tree_dir" --config "$tree_dir/.gitleaks.toml" --no-banner --redact=100 --ignore-gitleaks-allow --gitleaks-ignore-path /dev/null --max-decode-depth 2
+  "$scanner" git . --log-opts="$local_sha" --config "$tree_dir/.gitleaks.toml" --no-banner --redact=100 --ignore-gitleaks-allow --gitleaks-ignore-path /dev/null --max-decode-depth 2
 done
