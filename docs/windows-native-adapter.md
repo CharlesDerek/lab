@@ -930,3 +930,28 @@ The runner uses Microsoft's [service-account task principal](https://learn.micro
 and [bounded task settings](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtasksettingsset).
 The host restriction follows GitHub's [runner environment variables](https://docs.github.com/en/actions/reference/workflows-and-actions/variables)
 and [disposable Windows runner model](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+
+## Hosted isolation validation
+
+The independent `windows-isolation` job runs six existing opt-in tests through
+`tools/verify_windows_isolation_ci.ps1` as LocalSystem in session zero. They cover
+the scanner's restricted identity and job limits, private-state and engine access
+controls, workspace cleanup with external links and pinned files, partial scratch
+image recovery, and image-scoped WFP enforcement with a working loopback control.
+These tests do not load a driver, attach a disk, or format a volume.
+
+The runner stages only the two compiled library test executables in a new private
+directory. SHA-256 hashes bind the input manifest and each execution. Each exact
+test must appear in the ignored-test listing, exit successfully, and report one
+executed success. The final report must contain all six checks and the expected
+native account, session and input-manifest hash. Missing, filtered or skipped tests
+cannot satisfy the gate. A bounded owned task and disposable VM contain a stalled
+fixture; failures retain scoped WFP/workspace journals for inspection and do not
+prove successful cleanup.
+
+Only fixture reports and logs are uploaded; staged executables and private
+workspace contents are excluded. Local runner tests validate evidence rejection
+and task cleanup using mocked commands. The six native checks are **unverified**
+until the hosted job executes successfully. This gate does not establish signed
+minifilter prevention, complete scanner confinement or hostile-administrator
+tamper resistance.

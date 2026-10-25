@@ -89,7 +89,15 @@ foreach ($name in @('New-ScheduledTaskPrincipal','New-ScheduledTaskSettingsSet',
     if ((Get-Command $name).CommandType -ne 'Function') { throw ('Missing mock: ' + $name) }
 }
 $failure = $null
-try { Invoke-ServiceFixtureTask 'fixture-task' $action $ResultFile ('a'*64) 60 }
+try {
+    if ($Case -in @('custom-passed','custom-fails')) {
+        Invoke-ServiceFixtureTask 'fixture-task' $action $ResultFile ('a'*64) 60 {
+            param($Report, $ExpectedHash)
+            $global:trace.Add('validate-custom')
+            if ($Case -eq 'custom-fails' -or $Report.custom_hash -cne $ExpectedHash) { throw 'Custom report rejected' }
+        }
+    } else { Invoke-ServiceFixtureTask 'fixture-task' $action $ResultFile ('a'*64) 60 }
+}
 catch { $failure = $_.Exception.Message }
 @{ failed=($null -ne $failure); error=$failure; trace=@($global:trace.ToArray()) } |
     ConvertTo-Json | Set-Content -LiteralPath $TraceFile -Encoding UTF8
@@ -172,6 +180,13 @@ class ServiceRunnerTests(unittest.TestCase):
                 value = self.run_case(case)
                 self.assertTrue(value['failed'], value)
                 self.assertEqual(value['trace'], trace)
+
+    def test_custom_report_validator_is_required_and_preserves_task_cleanup(self):
+        for case in ['custom-passed', 'custom-fails']:
+            with self.subTest(case=case):
+                value = self.run_case(case, dict(custom_hash='a'*64))
+                self.assertEqual(value['failed'], case == 'custom-fails', value)
+                self.assertEqual(value['trace'], ['register', 'start', 'validate-custom', 'disable', 'unregister'])
 
 
 if __name__ == '__main__':

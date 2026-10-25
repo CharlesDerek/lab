@@ -43,6 +43,8 @@ on:
       - 'tools/verify_windows_service.ps1'
       - 'tools/verify_windows_service_ci.ps1'
       - 'tools/test_windows_service_ci.py'
+      - 'tools/verify_windows_isolation_ci.ps1'
+      - 'tools/test_windows_isolation_ci.py'
       - 'tools/test_verification_guards.py'
       - 'tools/verify_ecosystem_recovery.py'
       - 'Cargo.toml'
@@ -55,6 +57,47 @@ on:
 permissions:
   contents: read
 jobs:
+  windows-isolation:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify privileged runner failure and evidence handling with mocked commands
+        run: |
+          python tools/test_windows_service_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Task runner control-flow tests failed' }
+          python tools/test_windows_isolation_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Isolation evidence tests failed' }
+      - name: Build and select exact native isolation test executables
+        shell: pwsh
+        env:
+          CARGO_PROFILE_TEST_DEBUG: 0
+        run: |
+          cargo test --locked --no-run --lib -p athernex-endpoint -p athernex-endpoint-native --message-format=json > "$env:RUNNER_TEMP/isolation-build.jsonl"
+          if ($LASTEXITCODE -ne 0) { throw 'Native isolation build failed' }
+          $records = Get-Content -LiteralPath "$env:RUNNER_TEMP/isolation-build.jsonl" | ForEach-Object { $_ | ConvertFrom-Json }
+          foreach ($entry in @(@('athernex_endpoint','ISOLATION_ENDPOINT_TESTS'), @('athernex_endpoint_native','ISOLATION_NATIVE_TESTS'))) {
+            $matches = @($records | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -ceq $entry[0] -and $_.profile.test -eq $true -and $_.executable })
+            if ($matches.Count -ne 1) { throw ('Expected one test executable for ' + $entry[0]) }
+            ($entry[1] + '=' + $matches[0].executable) >> $env:GITHUB_ENV
+          }
+      - name: Verify scanner identity, filesystem isolation, WFP enforcement and recovery as LocalSystem
+        timeout-minutes: 10
+        shell: pwsh
+        run: tools/verify_windows_isolation_ci.ps1 -EndpointTests "$env:ISOLATION_ENDPOINT_TESTS" -NativeTests "$env:ISOLATION_NATIVE_TESTS" -OutputDirectory "$env:RUNNER_TEMP/native-windows-isolation" -DisposableHost
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-windows-isolation
+          path: |
+            ${{ runner.temp }}/native-windows-isolation/*.json
+            ${{ runner.temp }}/native-windows-isolation/*.log
+          if-no-files-found: warn
   windows-filter-build:
     runs-on: windows-2022
     steps:

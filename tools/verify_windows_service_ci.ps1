@@ -25,7 +25,7 @@ function Assert-ServiceFixtureReport($Report, [string]$AgentSha256) {
 }
 
 function Invoke-ServiceFixtureTask([string]$TaskName, $Action, [string]$ResultFile, [string]$AgentSha256,
-                                   [int]$TimeoutSeconds = 540) {
+                                   [int]$TimeoutSeconds = 540, [scriptblock]$ValidateReport = $null) {
     $registered = $false
     try {
         if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw 'Fixture task already exists' }
@@ -43,7 +43,8 @@ function Invoke-ServiceFixtureTask([string]$TaskName, $Action, [string]$ResultFi
             if ($task.State -notin @('Running', 'Queued') -and (Test-Path -LiteralPath $ResultFile)) {
                 if ($info.LastTaskResult -ne 0) { throw ('Native service task failed: ' + $info.LastTaskResult) }
                 $report = Get-Content -LiteralPath $ResultFile -Raw | ConvertFrom-Json
-                Assert-ServiceFixtureReport $report $AgentSha256
+                if ($ValidateReport) { & $ValidateReport $report $AgentSha256 }
+                else { Assert-ServiceFixtureReport $report $AgentSha256 }
                 return
             }
             if ($task.State -notin @('Running', 'Queued') -and $info.LastRunTime -gt [datetime]::new(2000,1,1) -and
