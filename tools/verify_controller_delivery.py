@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from native_fixture import create_private_directory, private_fixture_root
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -32,14 +33,14 @@ def main():
     target = ('windows' if os.name == 'nt' else 'linux')+'-'+{'amd64':'x86_64','x86_64':'x86_64','aarch64':'aarch64','arm64':'aarch64'}[platform.machine().lower()]
     processes = []; checks = {}; launcher = None; server = None
     with tempfile.TemporaryDirectory(prefix='athernex-controller-delivery-') as temporary:
-        root = Path(temporary).resolve(); root.chmod(0o700)
+        root = private_fixture_root(temporary)
         launcher_binary = root/('launcher'+suffix); controller = root/('controller'+suffix)
         agent = root/('agent'+suffix); updater = root/('updater'+suffix)
         for path in [launcher_binary, controller, agent, updater]:
             shutil.copy2(source, path); path.chmod(0o700)
         server_binary = root/('server'+suffix); shutil.copy2(server_source, server_binary); server_binary.chmod(0o700)
         baseline = hashlib.sha256(agent.read_bytes()).hexdigest()
-        state = root/'state'; state.mkdir(mode=0o700)
+        state = root/'state'; create_private_directory(state)
         catalog = root/'catalog'; catalog.mkdir()
         shutil.copy2(agent, catalog/('athernex-endpoint-'+target+suffix))
         (catalog/(target+'.json')).write_text(json.dumps(dict(target=target,version='fixture',sha256=baseline,signing='development-unsigned')))

@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from native_fixture import create_private_directory, private_fixture_root
 
 
 def eventually(check, timeout=20):
@@ -64,7 +65,7 @@ def main():
     args = parser.parse_args()
     prefix = 'controller-' if args.component == 'controller' else ''
     with tempfile.TemporaryDirectory(prefix='athernex-update-fixture-') as directory:
-        root = Path(directory).resolve()
+        root = private_fixture_root(directory)
         agent = root / ('controller.exe' if os.name == 'nt' else 'controller')
         shutil.copy2(args.agent, agent)
         installed = root / ('installed-agent.exe' if os.name == 'nt' else 'installed-agent')
@@ -77,7 +78,7 @@ def main():
             shutil.copy2(agent, managed)
             managed.chmod(0o700)
         state = root / 'state'
-        state.mkdir(mode=0o700)
+        create_private_directory(state)
         child = None
         applying = None
         log = None

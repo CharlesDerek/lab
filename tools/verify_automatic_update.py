@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from native_fixture import create_private_directory, private_fixture_root
 import urllib.parse
 import urllib.request
 import zipfile
@@ -41,14 +42,14 @@ def main():
     target=('windows' if os.name=='nt' else 'linux')+'-'+{'amd64':'x86_64','x86_64':'x86_64','aarch64':'aarch64','arm64':'aarch64'}[platform.machine().lower()]
     processes=[]
     with tempfile.TemporaryDirectory(prefix='athernex-automatic-fixture-') as temp:
-        root=Path(temp).resolve();root.chmod(0o700)
+        root=private_fixture_root(temp)
         controller=root/('controller'+suffix);installed=root/('installed'+suffix)
         shutil.copy2(source,controller);shutil.copy2(source,installed);installed.chmod(0o700)
         baseline=hashlib.sha256(installed.read_bytes()).hexdigest()
         catalog=root/'catalog';catalog.mkdir()
         shutil.copy2(source,catalog/('athernex-endpoint-'+target+suffix))
         (catalog/(target+'.json')).write_text(json.dumps(dict(target=target,version='fixture',sha256=baseline,signing='development-unsigned')))
-        state=root/'state';state.mkdir(mode=0o700)
+        state=root/'state';create_private_directory(state)
         public=subprocess.check_output([str(controller),'release-keygen',str(root/'keys')],text=True).strip()
         key='controlled-automatic-fixture-'+'a'*32
         with socket.socket() as listener:

@@ -23,6 +23,7 @@ on:
       - 'tools/test_macos_installer.py'
       - 'tools/verify_endpoint_fleet.py'
       - 'tools/verify_endpoint_update.py'
+      - 'tools/native_fixture.py'
       - 'tools/verify_automatic_update.py'
       - 'tools/verify_controller_maintenance.py'
       - 'tools/verify_controller_delivery.py'

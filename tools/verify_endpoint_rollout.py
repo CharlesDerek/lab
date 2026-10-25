@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from native_fixture import create_private_directory, private_fixture_root
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -63,8 +64,7 @@ def main():
     original_configs = []
     original_agent_status = []
     with tempfile.TemporaryDirectory(prefix='athernex-rollout-fixture-') as temporary:
-        root = Path(temporary).resolve()
-        root.chmod(0o700)
+        root = private_fixture_root(temporary)
         controller = root / ('controller' + suffix)
         shutil.copy2(agent, controller)
         baseline = hashlib.sha256(agent.read_bytes()).hexdigest()
@@ -150,7 +150,7 @@ def main():
             ids = [f'{i:064x}' for i in [1, 2]]
             for index, endpoint in enumerate(ids):
                 state = root / ('state-' + str(index))
-                state.mkdir(mode=0o700)
+                create_private_directory(state)
                 states.append(state)
                 installed = root / ('installed-' + str(index) + suffix)
                 shutil.copy2(agent, installed)

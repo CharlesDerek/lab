@@ -7,6 +7,7 @@ struct Fixture {
     state: PathBuf,
     controller: PathBuf,
     agent: PathBuf,
+    #[cfg(any(target_os = "linux", windows))]
     id: String,
     release: SignedRelease,
 }
@@ -68,6 +69,7 @@ fn fixture() -> Fixture {
         state,
         controller,
         agent,
+        #[cfg(any(target_os = "linux", windows))]
         id: release.id().unwrap(),
         release,
     }

@@ -539,9 +539,11 @@ sudo python3 tools/verify_macos_native.py \
 ```
 
 The gate creates temporary watched files and a private synthetic signature
-database. It locally ad-hoc signs a temporary copy of `/usr/bin/true` with a
-unique identifier before computing its whole-file signature; the installed
-utility and shipped binaries are not modified. Clean and synthetic files must
+database. It locally ad-hoc signs two copies of the native adapter with distinct
+identifiers before computing their whole-file signatures. Their health entry
+point exits without starting services, and their signatures do not preserve the
+adapter's Endpoint Security entitlement. The shipped binaries are unchanged.
+Clean and synthetic files must
 both work before protection starts. After startup, clean operations must succeed
 and synthetic open, execute and memory-map operations must be denied. Mapping
 uses descriptors opened before activation, so an open denial cannot substitute

@@ -69,17 +69,17 @@ def verify(args):
         clean = watched/'clean';clean.write_bytes(b'Ordinary native authorization test')
         blocked = watched/'blocked';sample = b'ATHERNEX PUBLIC MAC AUTHORIZATION PROBE 0102030405';blocked.write_bytes(sample)
         clean_exec = watched/'clean-exec';blocked_exec = watched/'blocked-exec'
-        shutil.copyfile('/usr/bin/true',clean_exec);shutil.copyfile('/usr/bin/true',blocked_exec)
-        clean_exec.chmod(0o700);blocked_exec.chmod(0o700)
-        # The unique signing identifier gives this harmless private copy unique
-        # bytes. The whole-file signature must never classify the installed true
-        # utility or distributed agent as the synthetic detection.
-        invoke(['/usr/bin/codesign','--force','--sign','-','--identifier',
-                'com.athernex.validation.'+secrets.token_hex(16),'--options','0',blocked_exec])
-        invoke(['/usr/bin/codesign','--verify','--strict',blocked_exec])
+        # Re-sign our ordinary native image, not Apple's arm64e platform code.
+        # probe-owned supplies --athernex-health-image, which exits without
+        # starting services. Do not preserve the adapter's ES entitlements.
+        for target in (clean_exec,blocked_exec):
+            shutil.copyfile(adapter,target);target.chmod(0o700)
+            invoke(['/usr/bin/codesign','--force','--sign','-','--identifier',
+                    'com.athernex.validation.'+secrets.token_hex(16),'--options','0',target])
+            invoke(['/usr/bin/codesign','--verify','--strict',target])
         digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
         blocked_sha = digest(blocked);exec_sha = digest(blocked_exec)
-        if exec_sha == digest(clean_exec):
+        if len({exec_sha,digest(clean_exec),digest(adapter)}) != 3:
             raise RuntimeError('Executable probe bytes are not unique')
         signature = database/'fixture.hsb'
         signature.write_text(f'{blocked_sha}:{blocked.stat().st_size}:AthernexNativeProbeText\n'
