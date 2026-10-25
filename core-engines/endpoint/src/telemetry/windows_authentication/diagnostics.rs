@@ -60,6 +60,13 @@ pub(super) fn source(category: &str) {
             | "loss_per_user_policy_marker"
             | "loss_system_policy_marker"
             | "loss_policy_scope_unknown"
+            | "setup_barrier_timeout"
+            | "setup_barrier_continuity"
+            | "setup_barrier_scope_invalid"
+            | "setup_barrier_subject_invalid"
+            | "setup_barrier_changes_invalid"
+            | "setup_barrier_delta_unexpected"
+            | "setup_barrier_budget"
     ) {
         println!("\nATHERNEX_AUTH_SOURCE={category}");
     }

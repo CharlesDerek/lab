@@ -3,6 +3,8 @@
 mod api;
 mod policy;
 pub(super) mod privilege;
+#[cfg(test)]
+pub(super) mod setup_test;
 use super::{Batch, Checkpoint};
 use crate::Result;
 use api::{Handle, Values};

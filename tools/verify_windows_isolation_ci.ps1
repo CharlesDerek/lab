@@ -72,7 +72,9 @@ function Get-AuthenticationStages([string]$Log) {
     $allowed = @('guard_verified','security_privilege_starting','security_privilege_verified',
         'policy_capture_starting','policy_captured',
         'policy_clear_starting','policy_cleared','policy_apply_starting','policy_applied',
-        'policy_readback_verified','policy_ready','account_ready','source_starting',
+        'policy_readback_verified','setup_position_ready','setup_clear_verified',
+        'setup_clear_observed','setup_apply_observed','setup_cleanup_verified',
+        'policy_ready','account_ready','source_starting',
         'source_ready','listener_ready','client_ready','heartbeat_accepted','allowed_attempt_verified',
         'denied_attempts_verified','controlled_queue_ready','stalled_cycle_verified','capture_health_verified',
         'stalled_http_verified','backpressure_verified','crash_replay_verified',
@@ -133,7 +135,10 @@ function Get-AuthenticationSource([string]$Log) {
         'rejected_text_field','rejected_identity_mismatch','rejected_other',
         'loss_policy_health_transition','loss_log_identity_changed','loss_bookmark_anchor_missing',
         'loss_record_sequence','loss_eventlog_marker','loss_per_user_policy_marker',
-        'loss_system_policy_marker','loss_policy_scope_unknown')
+        'loss_system_policy_marker','loss_policy_scope_unknown',
+        'setup_barrier_timeout','setup_barrier_continuity','setup_barrier_scope_invalid',
+        'setup_barrier_subject_invalid','setup_barrier_changes_invalid',
+        'setup_barrier_delta_unexpected','setup_barrier_budget')
     if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
     try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
     catch { return }

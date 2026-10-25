@@ -191,6 +191,36 @@ pub(in super::super) fn verify_policy_scope_variants() {
     let pointer = unsafe { header(&mut invalid_utf16).Anonymous.StringVal };
     unsafe { pointer.cast_mut().write(0xd800) };
     uncertain(&invalid_utf16);
+
+    let mut subject = variant_buffer(12);
+    let pointer = unsafe {
+        subject
+            .buffer
+            .as_mut_ptr()
+            .cast::<u8>()
+            .add(size_of::<EVT_VARIANT>())
+    };
+    let system = [1u8, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+    unsafe { std::ptr::copy_nonoverlapping(system.as_ptr(), pointer, system.len()) };
+    *header(&mut subject) = EVT_VARIANT {
+        Anonymous: EVT_VARIANT_0 {
+            SidVal: pointer.cast(),
+        },
+        Count: 0,
+        Type: EvtVarTypeSid as u32,
+    };
+    assert!(subject.local_system_sid(0).is_ok_and(|value| value));
+    unsafe { pointer.add(8).write(19) };
+    assert!(subject.local_system_sid(0).is_ok_and(|value| !value));
+    unsafe { pointer.add(8).write(18) };
+    subject.used -= 1;
+    assert!(subject.local_system_sid(0).is_err());
+    subject.used += 1;
+    header(&mut subject).Type |= EVT_VARIANT_TYPE_ARRAY;
+    assert!(subject.local_system_sid(0).is_err());
+    header(&mut subject).Type = EvtVarTypeSid as u32;
+    header(&mut subject).Anonymous.SidVal = std::ptr::null_mut();
+    assert!(subject.local_system_sid(0).is_err());
 }
 
 #[test]

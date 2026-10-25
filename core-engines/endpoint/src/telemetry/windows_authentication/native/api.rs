@@ -291,6 +291,21 @@ impl Values {
                 .ok_or_else(|| "Required Windows Security GUID is missing".into())
         }
     }
+    #[cfg(test)]
+    pub fn local_system_sid(&self, index: i32) -> Result<bool> {
+        let value = self.value(index, EvtVarTypeSid)?;
+        let pointer = unsafe { value.Anonymous.SidVal };
+        // The fixture expects exactly S-1-5-18. Compare its complete bounded
+        // binary representation without an API following an untrusted count.
+        const LOCAL_SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+        if pointer.is_null() || !self.contains(pointer as usize, LOCAL_SYSTEM.len()) {
+            return Err("Invalid Windows Security subject SID pointer".into());
+        }
+        Ok(
+            unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), LOCAL_SYSTEM.len()) }
+                == LOCAL_SYSTEM,
+        )
+    }
     pub fn record_id(&self) -> Result<u64> {
         Ok(unsafe {
             self.value(EvtSystemEventRecordId, EvtVarTypeUInt64)?

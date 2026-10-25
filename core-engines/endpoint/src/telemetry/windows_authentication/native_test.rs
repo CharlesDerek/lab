@@ -156,6 +156,7 @@ fn security_logon_delivery_replays_and_reports_policy_gaps() {
     println!("\nATHERNEX_AUTH_STAGE=guard_verified");
     native::verify_bookmark_text().expect("Native synthetic bookmark regression failed");
     native::verify_policy_scope_variants();
+    native::setup_test::verify_setup_delta_parser();
     host::verify_privilege_scope();
     let mut policy = host::Policy::start();
     println!("\nATHERNEX_AUTH_STAGE=policy_ready");

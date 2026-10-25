@@ -1,5 +1,6 @@
 //! Mutations are confined to this explicitly opted-in disposable-host fixture.
 use super::super::native::privilege::SecurityPrivilege;
+use super::super::native::setup_test::SourceBarrier;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, GetLastError},
@@ -132,6 +133,25 @@ fn set_policy_exact(desired: &[AUDIT_POLICY_INFORMATION]) -> bool {
     }
     reset && applied
 }
+fn set_setup_step(desired: &[AUDIT_POLICY_INFORMATION], clear: bool) -> bool {
+    let Some(_security) = security_privilege() else {
+        return false;
+    };
+    if clear {
+        println!("\nATHERNEX_AUTH_STAGE=policy_clear_starting");
+    } else {
+        println!("\nATHERNEX_AUTH_STAGE=policy_apply_starting");
+    }
+    let ok = unsafe { AuditSetSystemPolicy(desired.as_ptr(), desired.len() as u32) };
+    let code = unsafe { GetLastError() };
+    match (clear, ok) {
+        (true, true) => println!("\nATHERNEX_AUTH_STAGE=policy_cleared"),
+        (false, true) => println!("\nATHERNEX_AUTH_STAGE=policy_applied"),
+        (true, false) => println!("\nATHERNEX_AUTH_DIAGNOSTIC=policy_clear:{code}"),
+        (false, false) => println!("\nATHERNEX_AUTH_DIAGNOSTIC=policy_apply:{code}"),
+    }
+    ok
+}
 pub(super) struct Policy {
     original: Vec<AUDIT_POLICY_INFORMATION>,
     restored: bool,
@@ -140,13 +160,74 @@ impl Policy {
     pub fn start() -> Self {
         require_disposable();
         println!("\nATHERNEX_AUTH_STAGE=policy_capture_starting");
-        let guard = Self {
+        let mut guard = Self {
             original: policies().expect("Cannot capture original audit policy"),
             restored: false,
         };
         println!("\nATHERNEX_AUTH_STAGE=policy_captured");
-        guard.set_logon(3);
+        if let Err(error) = guard.initialize() {
+            super::super::diagnostics::classify(error.as_ref());
+            assert!(
+                guard.restore(),
+                "Original audit policy restoration after setup failure was not verified"
+            );
+            println!("\nATHERNEX_AUTH_STAGE=setup_cleanup_verified");
+            panic!("Native audit policy setup source barrier was not verified");
+        }
         guard
+    }
+    fn initialize(&self) -> crate::Result<()> {
+        // Establish the private source boundary before either policy mutation.
+        // Every expected clear/addition notification is acknowledged before the
+        // independent production Collector establishes its collection window.
+        let mut source = SourceBarrier::capture()?;
+        if self
+            .original
+            .iter()
+            .any(|value| !matches!(value.AuditingInformation, 0..=4))
+            || !policies().is_some_and(|actual| same_policy(&actual, &self.original))
+        {
+            return Err("Native audit setup original policy is uncertain".into());
+        }
+        let removed = [
+            self.original[0].AuditingInformation & 3,
+            self.original[1].AuditingInformation & 3,
+        ];
+        let mut cleared = self.original.clone();
+        for value in &mut cleared {
+            value.AuditingInformation = POLICY_AUDIT_EVENT_NONE as u32;
+        }
+        if !set_setup_step(&cleared, true) {
+            return Err("Native audit setup clear failed".into());
+        }
+        let mut actual = policies().ok_or("Native audit setup clear readback failed")?;
+        // A query can encode disabled auditing as zero or explicit NONE. This
+        // semantic check is only for this intermediate disabled setup state;
+        // final restoration still compares the exact captured representation.
+        for value in &mut actual {
+            if !matches!(value.AuditingInformation, 0 | 4) {
+                return Err("Native audit setup clear readback was not disabled".into());
+            }
+            value.AuditingInformation = POLICY_AUDIT_EVENT_NONE as u32;
+        }
+        if !same_policy(&actual, &cleared) {
+            return Err("Native audit setup clear readback changed scope".into());
+        }
+        println!("\nATHERNEX_AUTH_STAGE=setup_clear_verified");
+        source.observe(removed, [0, 0])?;
+        println!("\nATHERNEX_AUTH_STAGE=setup_clear_observed");
+        let mut desired = self.original.clone();
+        desired[0].AuditingInformation = 3;
+        desired[1].AuditingInformation = 2;
+        if !set_setup_step(&desired, false)
+            || !policies().is_some_and(|actual| same_policy(&actual, &desired))
+        {
+            return Err("Native audit setup application readback failed".into());
+        }
+        println!("\nATHERNEX_AUTH_STAGE=policy_readback_verified");
+        source.observe([0, 0], [3, 2])?;
+        println!("\nATHERNEX_AUTH_STAGE=setup_apply_observed");
+        Ok(())
     }
     pub fn set_logon(&self, flags: u32) {
         require_disposable();

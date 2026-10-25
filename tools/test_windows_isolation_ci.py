@@ -251,7 +251,9 @@ PHASES_WRAPPER = r'''
 param([string]$Script, [string]$Case, [string]$Root, [string]$SelectedSuite)
 $ErrorActionPreference = 'Stop'
 . $Script
-$stages = @('listener_ready','client_ready','heartbeat_accepted','allowed_attempt_verified',
+$stages = @('setup_position_ready','setup_clear_verified','setup_clear_observed','setup_apply_observed',
+    'setup_cleanup_verified',
+    'listener_ready','client_ready','heartbeat_accepted','allowed_attempt_verified',
     'denied_attempts_verified','controlled_queue_ready','stalled_cycle_verified','capture_health_verified')
 $source = @('controlled_queue_empty','controlled_queue_partial','controlled_queue_extra','queue_wait_timeout',
     'capture_health_timeout','health_has_rejections','health_has_loss','health_has_error',
@@ -260,10 +262,14 @@ $source = @('controlled_queue_empty','controlled_queue_partial','controlled_queu
     'rejected_text_field','rejected_identity_mismatch','rejected_other',
     'loss_policy_health_transition','loss_log_identity_changed','loss_bookmark_anchor_missing',
     'loss_record_sequence','loss_eventlog_marker','loss_per_user_policy_marker',
-    'loss_system_policy_marker','loss_policy_scope_unknown')
+    'loss_system_policy_marker','loss_policy_scope_unknown',
+    'setup_barrier_timeout','setup_barrier_continuity','setup_barrier_scope_invalid',
+    'setup_barrier_subject_invalid','setup_barrier_changes_invalid',
+    'setup_barrier_delta_unexpected','setup_barrier_budget')
 $log = Join-Path $Root 'fixture.log'
 $lines = @($stages | ForEach-Object { 'ATHERNEX_AUTH_STAGE=' + $_ }) +
          @($source | ForEach-Object { 'ATHERNEX_AUTH_SOURCE=' + $_ })
+if ($Case -ceq 'setup-cleanup-only') { $lines = @('ATHERNEX_AUTH_STAGE=setup_cleanup_verified') }
 if ($Case -ceq 'injected') {
     $lines = @($lines | ForEach-Object {
         $_ + ':private_fixture_payload'
@@ -361,6 +367,8 @@ class IsolationRunnerTests(unittest.TestCase):
     def test_controlled_capture_categories_accept_only_exact_fixed_lines(self):
         value = self.run_case('valid', PHASES_WRAPPER, 'Authentication')
         self.assertEqual(value['stages'], [
+            'setup_position_ready', 'setup_clear_verified', 'setup_clear_observed', 'setup_apply_observed',
+            'setup_cleanup_verified',
             'listener_ready', 'client_ready', 'heartbeat_accepted', 'allowed_attempt_verified',
             'denied_attempts_verified', 'controlled_queue_ready', 'stalled_cycle_verified', 'capture_health_verified'])
         self.assertEqual(value['source'], [
@@ -371,8 +379,16 @@ class IsolationRunnerTests(unittest.TestCase):
             'rejected_text_field', 'rejected_identity_mismatch', 'rejected_other',
             'loss_policy_health_transition', 'loss_log_identity_changed', 'loss_bookmark_anchor_missing',
             'loss_record_sequence', 'loss_eventlog_marker', 'loss_per_user_policy_marker',
-            'loss_system_policy_marker', 'loss_policy_scope_unknown'])
+            'loss_system_policy_marker', 'loss_policy_scope_unknown',
+            'setup_barrier_timeout', 'setup_barrier_continuity', 'setup_barrier_scope_invalid',
+            'setup_barrier_subject_invalid', 'setup_barrier_changes_invalid',
+            'setup_barrier_delta_unexpected', 'setup_barrier_budget'])
         self.assertEqual(self.run_case('injected', PHASES_WRAPPER, 'Authentication'), {'stages': [], 'source': []})
+
+    def test_setup_policy_restoration_does_not_claim_account_cleanup(self):
+        value = self.run_case('setup-cleanup-only', PHASES_WRAPPER, 'Authentication')
+        self.assertEqual(value, {'stages': ['setup_cleanup_verified'], 'source': []})
+        self.assertNotIn('cleanup_verified', value['stages'])
 
     def test_isolation_rejects_unbound_or_other_suite_inputs(self):
         for case in ['wrong-suite', 'missing-suite']:
