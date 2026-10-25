@@ -118,11 +118,14 @@ fn open(parent: &File, leaf: &[u16], directory: bool) -> Result<File> {
                 FILE_OPEN,
                 FILE_SYNCHRONOUS_IO_NONALERT
                     | FILE_OPEN_REPARSE_POINT
-                    | FILE_OPEN_NO_RECALL
                     | if directory {
+                        // MS-FSA's ValidDirectoryCreateOptions excludes
+                        // NO_RECALL: combining it with DIRECTORY_FILE returns
+                        // STATUS_INVALID_PARAMETER. REPARSE_POINT still opens
+                        // the directory leaf itself without following links.
                         FILE_DIRECTORY_FILE
                     } else {
-                        FILE_NON_DIRECTORY_FILE
+                        FILE_NON_DIRECTORY_FILE | FILE_OPEN_NO_RECALL
                     },
                 null(),
                 0,

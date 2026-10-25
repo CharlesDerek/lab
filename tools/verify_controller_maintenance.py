@@ -73,9 +73,18 @@ def main():
             if launcher.poll() is not None:
                 raise AssertionError('Launcher exited before health: '+logs[-1].read_text(errors='replace'))
             path = state/'supervisor/ready.json'; lease = state/'supervisor/lease.json'
-            if not path.exists() or not lease.exists(): return False
-            ready = json.loads(path.read_text()); owner = json.loads(lease.read_text())
-            launched = json.loads((state/'supervisor/launcher.json').read_text())
+            try:
+                ready = json.loads(path.read_text()); owner = json.loads(lease.read_text())
+                launched = json.loads((state/'supervisor/launcher.json').read_text())
+            except FileNotFoundError:
+                return False
+            except PermissionError:
+                # Windows can deny a new open while an old status file is
+                # pending deletion. Read a fresh snapshot on the next bounded
+                # health poll; persistent denial must still time out.
+                if os.name != 'nt':
+                    raise
+                return False
             return (ready['token'] == owner['token'] and ready['pid'] == owner.get('child_pid')
                     and launched['controller_pid'] == owner['controller_pid'] and alive(ready['pid'])
                     and ready['time_ms'] >= launched['started_ms'])

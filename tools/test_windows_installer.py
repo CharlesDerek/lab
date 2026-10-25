@@ -32,6 +32,16 @@ $global:serviceStarted = $false
 $global:taskStopped = $false
 $global:clockCalls = 0
 $global:LASTEXITCODE = 0
+$global:fixtureLocation = $null
+function Set-Location {
+    param($Path)
+    if ($Mode -ne 'installer' -or $Path -ne (Split-Path -Parent $Script)) {
+        throw 'Unexpected installer working directory'
+    }
+    # All relative filesystem operations are mocked too. Keep the harness's
+    # command location stable so Windows PowerShell does not rebase path aliases.
+    $global:fixtureLocation = $Path
+}
 function Fixture-Paths {
     if ($Mode -eq 'register') {
         return @($env:ATHERNEX_INSTALL_STATE, $env:ATHERNEX_INSTALL_LAUNCHER, $env:ATHERNEX_INSTALL_CONTROLLER, $env:ATHERNEX_INSTALL_AGENT)
@@ -41,6 +51,9 @@ function Fixture-Paths {
       (Join-Path $folder 'athernex-controller.exe'), (Join-Path $folder 'athernex-endpoint.exe'))
 }
 function Invoke-Fixture {
+    if ($global:fixtureLocation -ne (Split-Path -Parent $Script)) {
+        throw 'Installer must select its bundle directory before invoking the endpoint'
+    }
     $global:trace.Add(@{ call = 'endpoint'; arguments = @($args) })
     $global:LASTEXITCODE = 0
     if (($args[0] -eq 'installer-check' -and $env:ATHERNEX_CASE -eq 'preflight-fails') -or
@@ -137,7 +150,7 @@ Set-Alias -Name $scPath -Value Invoke-Sc
 if ((Get-Command $source).Definition -ne 'Invoke-Fixture' -or (Get-Command $scPath).Definition -ne 'Invoke-Sc') {
     throw 'Fixture executable aliases are not bound; refusing to execute installer'
 }
-foreach ($command in @('Get-CimInstance','Get-Service','New-Service','Set-Service','Get-ScheduledTask','Disable-ScheduledTask','Stop-ScheduledTask','Unregister-ScheduledTask','Remove-Item')) {
+foreach ($command in @('Set-Location','Get-CimInstance','Get-Service','New-Service','Set-Service','Get-ScheduledTask','Disable-ScheduledTask','Stop-ScheduledTask','Unregister-ScheduledTask','Remove-Item')) {
     if ((Get-Command $command).CommandType -ne 'Function') { throw ('Fixture command is not mocked: ' + $command) }
 }
 $failed = $false
@@ -204,14 +217,14 @@ class InstallerTests(unittest.TestCase):
             with self.subTest(case=case):
                 result, value = self.run_case(case)
                 self.assertNotEqual(result.returncode, 0, value)
-                self.assertEqual(self.calls(value), expected)
+                self.assertEqual(self.calls(value), expected, value)
 
     def test_foreign_services_and_tasks_are_never_stopped(self):
         for case in ['foreign-service','foreign-account','foreign-type','legacy-foreign']:
             with self.subTest(case=case):
                 result, value = self.run_case(case)
                 self.assertNotEqual(result.returncode, 0, value)
-                self.assertEqual(self.calls(value), ['endpoint'])
+                self.assertEqual(self.calls(value), ['endpoint'], value)
 
     def test_registration_quotes_paths_and_configures_restart_and_query_only_user_access(self):
         result, value = self.run_case('register', 'register')
