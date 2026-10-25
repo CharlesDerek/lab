@@ -69,7 +69,10 @@ function Invoke-IsolationCheck([string]$Executable, [string]$Name, [string]$Log)
 function Get-AuthenticationStages([string]$Log) {
     # Only return constants whose complete marker line occurred. Never copy a
     # captured line, suffix, exception, XML value, or account into public evidence.
-    $allowed = @('guard_verified','policy_ready','account_ready','source_starting',
+    $allowed = @('guard_verified','security_privilege_starting','security_privilege_verified',
+        'policy_capture_starting','policy_captured',
+        'policy_clear_starting','policy_cleared','policy_apply_starting','policy_applied',
+        'policy_readback_verified','policy_ready','account_ready','source_starting',
         'source_ready','stalled_http_verified','backpressure_verified','crash_replay_verified',
         'policy_gap_verified','anchor_mismatch_verified','http_delivery_verified',
         'original_export_verified','detection_verified','cleanup_verified')
@@ -80,6 +83,30 @@ function Get-AuthenticationStages([string]$Log) {
         foreach ($line in $lines) {
             if ([string]::Equals($line, ('ATHERNEX_AUTH_STAGE=' + $stage), [StringComparison]::Ordinal)) {
                 $stage
+                break
+            }
+        }
+    }
+}
+
+function Get-AuthenticationDiagnostics([string]$Log) {
+    # Numeric API failures only, under fixed operation names. This field is
+    # diagnostic evidence and cannot make a failed or skipped test pass.
+    $allowed = @('privilege_acquire','policy_query','policy_clear','policy_apply')
+    if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
+    try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
+    catch { return }
+    $count = 0
+    foreach ($line in $lines) {
+        foreach ($operation in $allowed) {
+            $pattern = '\A' + [regex]::Escape('ATHERNEX_AUTH_DIAGNOSTIC=' + $operation + ':') + '(0|[1-9][0-9]{0,9})\z'
+            $match = [regex]::Match($line, $pattern, [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+            [uint32]$code = 0
+            if ($match.Success -and [uint32]::TryParse($match.Groups[1].Value,
+                [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$code)) {
+                @{ operation=$operation; win32_error=$code }
+                $count += 1
+                if ($count -ge 32) { return }
                 break
             }
         }
@@ -106,6 +133,7 @@ function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report,
         } finally {
             if ($Suite -ceq 'Authentication') {
                 $Report.authentication_stages = @(Get-AuthenticationStages $log)
+                $Report.authentication_diagnostics = @(Get-AuthenticationDiagnostics $log)
             }
         }
         # Each test runs in a separate process with fresh fixture paths. WFP
@@ -130,7 +158,10 @@ function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost,
         manifest_sha256=$manifestHash; user_sid='S-1-5-18'; session_id=0;
         windows_version=[Environment]::OSVersion.Version.ToString(); checks=[ordered]@{};
         failures=[ordered]@{}; error=$null }
-    if ($Suite -ceq 'Authentication') { $report.authentication_stages = @() }
+    if ($Suite -ceq 'Authentication') {
+        $report.authentication_stages = @()
+        $report.authentication_diagnostics = @()
+    }
     $authenticationOptIn = 'ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST'
     $previousOptIn = [Environment]::GetEnvironmentVariable($authenticationOptIn, 'Process')
     try {

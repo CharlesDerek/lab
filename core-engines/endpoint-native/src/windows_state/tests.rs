@@ -37,6 +37,92 @@ fn private_snapshots_allow_atomic_replacement_and_locks_exclude_other_owners() {
     assert!(std::fs::rename(&path, temp.path().join("moved")).is_err());
 }
 
+fn pin_snapshot_destination(path: &std::path::Path) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(path)
+        .unwrap()
+}
+
+#[test]
+fn private_snapshot_replacement_waits_for_a_temporary_destination_reader() {
+    use std::{sync::mpsc, time::Duration};
+    let temp = tempfile::tempdir().unwrap();
+    let state =
+        Arc::new(Directory::create_under(&temp.path().canonicalize().unwrap(), "private").unwrap());
+    state
+        .write_json("status.json", &json!({"generation": 0}))
+        .unwrap();
+    let reader = pin_snapshot_destination(&state.path().join("status.json"));
+    let writer_state = state.clone();
+    let (sender, receiver) = mpsc::channel();
+    let writer = thread::spawn(move || {
+        sender
+            .send(writer_state.write_json("status.json", &json!({"generation": 1})))
+            .unwrap();
+    });
+    assert!(matches!(
+        receiver.recv_timeout(Duration::from_millis(150)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(
+        state.read_json::<serde_json::Value>("status.json").unwrap(),
+        json!({"generation": 0})
+    );
+    drop(reader);
+    receiver
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .unwrap();
+    writer.join().unwrap();
+    assert_eq!(
+        state.read_json::<serde_json::Value>("status.json").unwrap(),
+        json!({"generation": 1})
+    );
+    assert!(!state.path().join(".status.json.new").exists());
+}
+
+#[test]
+fn private_snapshot_replacement_refuses_a_persistent_reader_without_losing_state() {
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let state = Directory::create_under(&temp.path().canonicalize().unwrap(), "private").unwrap();
+    state
+        .write_json("status.json", &json!({"generation": 0}))
+        .unwrap();
+    let reader = pin_snapshot_destination(&state.path().join("status.json"));
+    let started = Instant::now();
+    assert!(state
+        .write_json("status.json", &json!({"generation": 1}))
+        .is_err());
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(
+        state.read_json::<serde_json::Value>("status.json").unwrap(),
+        json!({"generation": 0})
+    );
+    // Preserve the existing journal recovery contract: failure leaves the
+    // complete private candidate while the old published destination survives.
+    assert_eq!(
+        state
+            .read_json::<serde_json::Value>(".status.json.new")
+            .unwrap(),
+        json!({"generation": 1})
+    );
+    drop(reader);
+    state
+        .write_json("status.json", &json!({"generation": 2}))
+        .unwrap();
+    assert_eq!(
+        state.read_json::<serde_json::Value>("status.json").unwrap(),
+        json!({"generation": 2})
+    );
+    assert!(!state.path().join(".status.json.new").exists());
+}
+
 #[test]
 fn maintenance_objects_keep_service_compatible_permissions_for_elevated_creators() {
     use crate::windows_scanner;

@@ -136,6 +136,11 @@ function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [
     if ($Case -ceq 'missing-log') { throw 'Fixture executable failed before output' }
     @(
         'ATHERNEX_AUTH_STAGE=guard_verified',
+        'ATHERNEX_AUTH_STAGE=security_privilege_starting',
+        'ATHERNEX_AUTH_STAGE=security_privilege_verified',
+        'ATHERNEX_AUTH_STAGE=policy_capture_starting',
+        'ATHERNEX_AUTH_STAGE=policy_captured',
+        'ATHERNEX_AUTH_STAGE=policy_readback_verified',
         'ATHERNEX_AUTH_STAGE=policy_ready',
         'ATHERNEX_AUTH_STAGE=guard_verified',
         'ATHERNEX_AUTH_STAGE=unknown_private_payload',
@@ -147,8 +152,30 @@ function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [
         ' ATHERNEX_AUTH_STAGE=source_ready',
         'test fixture ... ATHERNEX_AUTH_STAGE=source_ready',
         '<Event>private_fixture_payload</Event>',
+        'ATHERNEX_AUTH_DIAGNOSTIC=privilege_acquire:1300',
+        'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:1314',
+        'ATHERNEX_AUTH_DIAGNOSTIC=policy_clear:5',
+        'ATHERNEX_AUTH_DIAGNOSTIC=policy_apply:4294967295',
+        'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:0',
+        'ATHERNEX_AUTH_DIAGNOSTIC=unknown_private_payload:5',
+        'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:5 private_payload',
+        'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:-1',
+        'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:+1',
+        'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:01',
+        'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:4294967296',
+        'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:0x5',
+        'ATHERNEX_AUTH_DIAGNOSTIC=POLICY_QUERY:5',
+        ' ATHERNEX_AUTH_DIAGNOSTIC=policy_query:5',
+        'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:5:private_payload',
+        "ATHERNEX_AUTH_DIAGNOSTIC=policy_query:5$([char]0x00ad)",
+        "ATHERNEX_AUTH_DIAGNOSTIC=policy_query:5$([char]0)",
+        "ATHERNEX_AUTH_DIAGNOSTIC=policy_query:$([char]0x0665)",
         'ATHERNEX_AUTH_STAGE=cleanup_verified'
     ) | Set-Content -LiteralPath $Log
+    if ($Case -ceq 'diagnostic-flood') {
+        0..63 | ForEach-Object { 'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:' + $_ } |
+            Set-Content -LiteralPath $Log
+    }
     if ($Case -ceq 'exit-failure') { throw 'Fixture executable failed' }
     if ($Case -ceq 'skipped') {
         Add-Content -LiteralPath $Log -Value 'test result: ok. 0 passed; 0 failed; 1 ignored;'
@@ -161,9 +188,11 @@ $failure = $null
 try { Invoke-IsolationChecks $Root $manifest $report $SelectedSuite }
 catch { $failure = $_.Exception.Message }
 @{ failed=($null -ne $failure); has_stages=$report.ContainsKey('authentication_stages');
+   has_diagnostics=$report.ContainsKey('authentication_diagnostics');
+   diagnostics=@($report.authentication_diagnostics);
    stages=@($report.authentication_stages); failures=$report.failures.Count;
    passed=@($report.checks.Values | Where-Object { $_ -ceq 'passed' }).Count } |
-    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
+    ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
 '''
 
 
@@ -257,7 +286,10 @@ class IsolationRunnerTests(unittest.TestCase):
         value = self.run_case('passed', STAGES_WRAPPER, 'Authentication')
         self.assertFalse(value['failed'], value)
         self.assertEqual(value['passed'], 1)
-        self.assertEqual(value['stages'], ['guard_verified', 'policy_ready', 'cleanup_verified'])
+        self.assertEqual(value['stages'], ['guard_verified', 'security_privilege_starting',
+                                         'security_privilege_verified', 'policy_capture_starting',
+                                         'policy_captured', 'policy_readback_verified',
+                                         'policy_ready', 'cleanup_verified'])
         self.assertTrue(value['has_stages'])
         self.assertNotIn('private_payload', json.dumps(value))
 
@@ -269,11 +301,39 @@ class IsolationRunnerTests(unittest.TestCase):
                 self.assertEqual(value['passed'], 0)
                 self.assertEqual(value['failures'], 1)
                 self.assertEqual(value['stages'], [] if case == 'missing-log' else
-                                 ['guard_verified', 'policy_ready', 'cleanup_verified'])
+                                 ['guard_verified', 'security_privilege_starting',
+                                  'security_privilege_verified', 'policy_capture_starting', 'policy_captured',
+                                  'policy_readback_verified', 'policy_ready', 'cleanup_verified'])
+                self.assertEqual(value['diagnostics'], [] if case == 'missing-log' else [
+                    {'operation': 'privilege_acquire', 'win32_error': 1300},
+                    {'operation': 'policy_query', 'win32_error': 1314},
+                    {'operation': 'policy_clear', 'win32_error': 5},
+                    {'operation': 'policy_apply', 'win32_error': 4294967295},
+                    {'operation': 'policy_query', 'win32_error': 0},
+                ])
         value = self.run_case('passed', STAGES_WRAPPER, 'Isolation')
         self.assertFalse(value['failed'], value)
         self.assertEqual(value['passed'], 11)
         self.assertFalse(value['has_stages'])
+        self.assertFalse(value['has_diagnostics'])
+
+    def test_authentication_diagnostics_allow_only_fixed_operations_and_bounded_decimal_codes(self):
+        value = self.run_case('passed', STAGES_WRAPPER, 'Authentication')
+        self.assertFalse(value['failed'], value)
+        self.assertTrue(value['has_diagnostics'])
+        self.assertEqual(value['diagnostics'], [
+            {'operation': 'privilege_acquire', 'win32_error': 1300},
+            {'operation': 'policy_query', 'win32_error': 1314},
+            {'operation': 'policy_clear', 'win32_error': 5},
+            {'operation': 'policy_apply', 'win32_error': 4294967295},
+            {'operation': 'policy_query', 'win32_error': 0},
+        ])
+        self.assertNotIn('private_payload', json.dumps(value))
+        value = self.run_case('diagnostic-flood', STAGES_WRAPPER, 'Authentication')
+        self.assertFalse(value['failed'], value)
+        self.assertEqual(value['diagnostics'], [
+            {'operation': 'policy_query', 'win32_error': code} for code in range(32)
+        ])
 
 
 if __name__ == '__main__':

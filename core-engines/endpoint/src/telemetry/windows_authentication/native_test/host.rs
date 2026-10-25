@@ -1,7 +1,8 @@
 //! Mutations are confined to this explicitly opted-in disposable-host fixture.
+use super::super::native::privilege::SecurityPrivilege;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::{
-    Foundation::CloseHandle,
+    Foundation::{CloseHandle, GetLastError},
     NetworkManagement::NetManagement::*,
     Security::{Authentication::Identity::*, *},
     System::RemoteDesktop::ProcessIdToSessionId,
@@ -34,11 +35,17 @@ impl Drop for AuditAllocation {
     }
 }
 fn policies() -> Option<Vec<AUDIT_POLICY_INFORMATION>> {
+    let _security = security_privilege()?;
     let ids = [Audit_Logon_Logon, Audit_Logon_AccountLockout];
     let mut raw = null_mut();
     let ok = unsafe { AuditQuerySystemPolicy(ids.as_ptr(), 2, &mut raw) };
+    let code = unsafe { GetLastError() };
     let _allocation = AuditAllocation(raw.cast());
-    if !ok || raw.is_null() {
+    if !ok {
+        println!("\nATHERNEX_AUTH_DIAGNOSTIC=policy_query:{code}");
+        return None;
+    }
+    if raw.is_null() {
         return None;
     }
     let result = unsafe { std::slice::from_raw_parts(raw, 2) }.to_vec();
@@ -47,6 +54,33 @@ fn policies() -> Option<Vec<AUDIT_POLICY_INFORMATION>> {
         .zip(ids)
         .all(|(p, id)| same_guid(p.AuditSubCategoryGuid, id))
         .then_some(result)
+}
+fn security_privilege() -> Option<SecurityPrivilege> {
+    match SecurityPrivilege::acquire() {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            if let Some(code) = error.raw_os_error() {
+                println!(
+                    "\nATHERNEX_AUTH_DIAGNOSTIC=privilege_acquire:{}",
+                    code as u32
+                );
+            }
+            None
+        }
+    }
+}
+pub(super) fn verify_privilege_scope() {
+    println!("\nATHERNEX_AUTH_STAGE=security_privilege_starting");
+    if let Err(error) = super::super::native::privilege::verify_scope() {
+        if let Some(code) = error.raw_os_error() {
+            println!(
+                "\nATHERNEX_AUTH_DIAGNOSTIC=privilege_acquire:{}",
+                code as u32
+            );
+        }
+        panic!("Thread-scoped Security privilege proof failed");
+    }
+    println!("\nATHERNEX_AUTH_STAGE=security_privilege_verified");
 }
 fn same_guid(a: windows_sys::core::GUID, b: windows_sys::core::GUID) -> bool {
     a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
@@ -60,6 +94,9 @@ fn same_policy(a: &[AUDIT_POLICY_INFORMATION], b: &[AUDIT_POLICY_INFORMATION]) -
         })
 }
 fn set_policy_exact(desired: &[AUDIT_POLICY_INFORMATION]) -> bool {
+    let Some(_security) = security_privilege() else {
+        return false;
+    };
     // A query can report disabled auditing as zero, but zero in a set request
     // means UNCHANGED. Keep normalization separate from the saved original.
     let mut request = desired.to_vec();
@@ -75,10 +112,24 @@ fn set_policy_exact(desired: &[AUDIT_POLICY_INFORMATION]) -> bool {
     for policy in &mut cleared {
         policy.AuditingInformation = POLICY_AUDIT_EVENT_NONE as u32;
     }
+    println!("\nATHERNEX_AUTH_STAGE=policy_clear_starting");
     let reset = unsafe { AuditSetSystemPolicy(cleared.as_ptr(), cleared.len() as u32) };
+    let code = unsafe { GetLastError() };
+    if reset {
+        println!("\nATHERNEX_AUTH_STAGE=policy_cleared");
+    } else {
+        println!("\nATHERNEX_AUTH_DIAGNOSTIC=policy_clear:{code}");
+    }
     // Attempt the target even if reset failed, so a partially applied reset
     // cannot prevent the restoration attempt. Both operations must succeed.
+    println!("\nATHERNEX_AUTH_STAGE=policy_apply_starting");
     let applied = unsafe { AuditSetSystemPolicy(request.as_ptr(), request.len() as u32) };
+    let code = unsafe { GetLastError() };
+    if applied {
+        println!("\nATHERNEX_AUTH_STAGE=policy_applied");
+    } else {
+        println!("\nATHERNEX_AUTH_DIAGNOSTIC=policy_apply:{code}");
+    }
     reset && applied
 }
 pub(super) struct Policy {
@@ -88,10 +139,12 @@ pub(super) struct Policy {
 impl Policy {
     pub fn start() -> Self {
         require_disposable();
+        println!("\nATHERNEX_AUTH_STAGE=policy_capture_starting");
         let guard = Self {
             original: policies().expect("Cannot capture original audit policy"),
             restored: false,
         };
+        println!("\nATHERNEX_AUTH_STAGE=policy_captured");
         guard.set_logon(3);
         guard
     }
@@ -108,6 +161,7 @@ impl Policy {
             policies().is_some_and(|actual| same_policy(&actual, &desired)),
             "Disposable audit policy update was not verified"
         );
+        println!("\nATHERNEX_AUTH_STAGE=policy_readback_verified");
     }
     pub fn restore(&mut self) -> bool {
         if self.restored {

@@ -8,13 +8,16 @@ use std::{
     os::windows::io::AsRawHandle,
     path::{Component, Prefix},
     ptr::null_mut,
+    time::{Duration, Instant},
 };
 use windows_sys::{
     Wdk::Storage::FileSystem::{
         FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF,
     },
     Win32::{
-        Foundation::ERROR_HANDLE_EOF,
+        Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_HANDLE_EOF, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
+        },
         Storage::FileSystem::{
             FileBasicInfo, FileDispositionInfoEx, FileIdInfo, FileStandardInfo, FileStreamInfo,
             GetDiskFreeSpaceExW, GetDriveTypeW, GetFileInformationByHandleEx, GetFileType,
@@ -449,7 +452,32 @@ impl Dir {
         let mut file = self.create_with_acl_rights(&temp, false, maintenance)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        raw::rename(&file, &self.file, leaf, true)?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match raw::rename(&file, &self.file, leaf, true) {
+                Ok(()) => break,
+                Err(error) => {
+                    let retryable = error.downcast_ref::<io::Error>().is_some_and(|error| {
+                        matches!(
+                            error.raw_os_error().map(|code| code as u32),
+                            Some(
+                                ERROR_ACCESS_DENIED
+                                    | ERROR_LOCK_VIOLATION
+                                    | ERROR_SHARING_VIOLATION
+                            )
+                        )
+                    });
+                    if !retryable || Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    // Classic replacement can fail while a reader holds the old
+                    // target. Retry this same synchronized file and pinned parent;
+                    // never unlink the destination or relax its ACL/sharing.
+                    // Exhaustion retains the temporary file for reconciliation.
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
         self.sync()
     }
     pub fn read_json<T: serde::de::DeserializeOwned>(&self, leaf: &str) -> Result<T> {

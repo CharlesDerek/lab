@@ -595,7 +595,10 @@ python3 tools/verify_auth_events.py --manifest /tmp/authentication-tests.jsonl -
 Set `"windows_authentication": true` alongside `"enabled": true` in the private
 `telemetry` configuration, upgrade the server first, and restart the Windows
 agent. The default is off; `run --once` is refused. The service needs access to the
-local Security channel and audit-policy inspection. Production collection only
+local Security channel and audit-policy inspection. Security reads temporarily
+enable an already-held `SeSecurityPrivilege` on a duplicate of the thread's
+effective token, then restore its prior impersonation. Accounts without that
+privilege still require existing audit-object/channel access. Production collection only
 reads policy: Logon success/failure and Account Lockout failure auditing must
 already be enabled. Disabled or uninspectable policy, per-user exclusions and a
 disabled/full channel make coverage incomplete.
@@ -632,8 +635,8 @@ and exact policy restoration. It exercises real successful/failed logons, stalle
 HTTP, full queues, forced collector-process termination, replay, authenticated
 original export, controlled AX-001 evidence and an observed policy gap. It checks
 anchor mismatch without clearing the host Security log. This is not the full SCM
-agent lifecycle or a measured production coverage result. Native execution of
-this new gate remains pending. Uploaded artifacts contain only suite-bound status
+agent lifecycle or a measured production coverage result. The gate must pass on its source commit before native behavior is considered
+validated. Uploaded artifacts contain only suite-bound status
 and executable hashes; account details and event XML stay on the disposable host.
 
 ## Storage lifecycle and recovery

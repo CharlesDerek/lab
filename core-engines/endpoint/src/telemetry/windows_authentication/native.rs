@@ -2,6 +2,7 @@
 //! The bookmark anchor hashes native System identity, not the full event body.
 mod api;
 mod policy;
+pub(super) mod privilege;
 use super::{Batch, Checkpoint};
 use crate::Result;
 use api::{Handle, Values};
@@ -76,6 +77,7 @@ pub(super) struct Reader {
 impl Reader {
     #[cfg(test)]
     pub(super) fn original(record_id: u64) -> Result<String> {
+        let _security = privilege::SecurityPrivilege::acquire().ok();
         let filter = api::wide(&format!("*[System[EventRecordID={record_id}]]"));
         let query = Handle::checked(
             unsafe {
@@ -163,6 +165,10 @@ impl Reader {
         Ok(result)
     }
     pub fn baseline(&mut self) -> Result<(Checkpoint, String)> {
+        // Privilege activation is confined to this read on a duplicate of the
+        // effective token. ACL-authorized readers without it still get a read
+        // attempt; API failures remain coverage failures.
+        let _security = privilege::SecurityPrivilege::acquire().ok();
         let (created, error) = self.source()?;
         let query = Self::query(true)?;
         let event = api::next(&query)?.ok_or("Windows Security log has no baseline record")?;
@@ -216,6 +222,7 @@ impl Reader {
             || value == api::guid_text(&Audit_Logon_AccountLockout))
     }
     pub fn batch(&mut self, previous: &Checkpoint) -> Result<Batch> {
+        let _security = privilege::SecurityPrivilege::acquire().ok();
         previous.validate()?;
         let (created, error) = self.source()?;
         let mut result = Batch {
