@@ -666,8 +666,9 @@ not cover production installation, migration, reboot or signed prevention.
 `endpoint-native/src/windows_scratch/` and the preview's `windows/scratch/`
 implement dedicated temporary storage. The supervisor starts an owned scratch
 worker before ClamAV, checks its committed readiness, and directs ClamAV's
-`TemporaryDirectory`, `TEMP` and `TMP` to its volume GUID path. **Native Windows
-execution remains unverified; this integration does not enable production
+`TemporaryDirectory`, `TEMP` and `TMP` to its volume GUID path. **Native creation,
+formatting and readiness pass, but restricted scanner writes and the full worker
+lifecycle remain unverified. This integration does not enable production
 protection or establish antivirus replacement.** There is no directory-storage
 fallback after disk creation or validation fails.
 
@@ -696,8 +697,9 @@ drive letter or disk number. These operations do not change host-volume quota
 policy.
 
 After formatting, native checks independently verify the volume binding, NTFS,
-allocation unit and capacity. The fresh volume root receives SYSTEM/admin-only
-permissions and is held exclusively. A newly created low-integrity scratch child
+allocation unit and capacity. The fresh volume root grants SYSTEM/admin full
+access and the scanner logon only noninheriting traversal, read-attributes and
+synchronization rights; it is held exclusively. A newly created low-integrity scratch child
 grants its scanner logon create/list/traverse rights on the directory and Modify
 on descendants. Its held handle denies write/delete sharing, preventing the
 root from being reopened for reparse-point changes or replacement. Actual
@@ -745,13 +747,15 @@ to adopt existing content, changed identities, attached-image recovery refusal,
 GPT/volume provenance, thread impersonation cleanup and attachment-owner exit
 without Rust destructors. They create only fresh private images and leave
 evidence on failure. They require LocalSystem on a disposable Windows host,
-with `--ignored --test-threads=1`; they have not been executed here. Native MSR
-arrival and attachment cleanup remain release gates. The endpoint fixture
+with `--ignored --test-threads=1`. These storage fixtures passed on the hosted
+Windows Server 2022 VM, including MSR arrival and attachment-owner exit. The endpoint fixture
 `protection::windows::scratch::tests::owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit`
 runs the real worker and formatter, fills a fresh 256 MiB volume under the
 restricted scanner token until native disk-full, checks another logon's refusal
 and scratch-root write/rename denial, and verifies recovery ordering and replay.
-It has been cross-built, not executed. Real ClamAV volume-path compatibility,
+It executes on the hosted VM but currently fails at the intended scanner's first
+file creation, so disk-full behavior and full worker cleanup have not run.
+Real ClamAV volume-path compatibility,
 low-space behavior, crashes during each storage phase, reboot recovery and native
 permissions/sharing behavior still need validation.
 
@@ -1032,7 +1036,7 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `13059ec`](https://github.com/CharlesDerek/lab/actions/runs/40221299877)
+and task cleanup using mocked commands. The [hosted run at `5d6b0cc`](https://github.com/CharlesDerek/lab/actions/runs/40222345499)
 passed ten of eleven checks on Windows Server 2022 as LocalSystem in session
 zero. The retained report was checked against its source commit and input-manifest
 hash. Scanner startup/cleanup, private-state access, both workspace cleanup cases,
@@ -1053,13 +1057,29 @@ changes. Both scanner logons remain denied raw volume/disk data and attribute/
 security mutation, with SYSTEM read controls on the checked devices.
 
 File reads, writes and creation still fail despite the scratch ACL permitting
-them. Test-only diagnostics now query filesystem-device characteristics, compare the
-queried volume DACL with the root and attachment descriptors, and use exact native
-access masks. Raw-access refusals also cover the data-partition alias after
+them. Native diagnostics confirmed `FILE_DEVICE_SECURE_OPEN` in characteristics
+`0x20120` and that the queried volume DACL matches the attachment descriptor,
+not the filesystem root. Windows also checks that device descriptor for opens
+within its namespace, as described in Microsoft's
+[device namespace access contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/controlling-device-namespace-access).
+Exact native traversal/read-attributes requests pass; data and security-control
+requests fail with access denied. Raw-access refusals also cover the data-partition alias after
 read-only verification of its disk number, partition ID, geometry and attributes.
-These probes do not widen production data permissions.
+Both restricted logons passed all 18 exact native raw data/mutation refusals,
+with SYSTEM positive controls. These probes do not widen production data permissions.
 Capacity enforcement and full worker cleanup remain unverified. Diagnostics
 report only object kinds, rights and results.
+
+A separate test-only experiment snapshots the checked volume, filesystem root,
+data-partition alias and physical device before temporarily adding only the
+scanner logon's `FILE_WRITE_DATA` right and a noninheriting low-integrity label
+to the volume descriptor. It rejects propagation to another object, owner/group
+changes, another logon's file access, or any permitted raw data/mutation open.
+The exact native probes run while impersonating the existing restricted tokens;
+they never read or write raw data. Saved descriptors are restored and verified
+before returning or reporting a rejected candidate. Restoration failure aborts
+the disposable fixture. This experiment has not yet run natively, changes no
+production grant and cannot satisfy the original disk-full/cleanup gate.
 
 Initialization creates the owned MSR when the new GPT is empty, verifies its
 arrival, then adds data. The read-only partition-device query uses numbers derived
