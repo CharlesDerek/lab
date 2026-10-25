@@ -17,6 +17,8 @@ mod telemetry_sockets;
 pub mod update;
 #[cfg(windows)]
 mod windows_job;
+#[cfg(windows)]
+mod windows_private_write;
 #[cfg(any(windows, test))]
 pub mod windows_service;
 #[cfg(any(windows, test))]
@@ -134,6 +136,9 @@ pub fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     temp.write_all(bytes)?;
     temp.as_file().sync_all()?;
+    #[cfg(windows)]
+    windows_private_write::persist(temp, path)?;
+    #[cfg(not(windows))]
     temp.persist(path)?;
     #[cfg(unix)]
     fs::File::open(parent)?.sync_all()?;

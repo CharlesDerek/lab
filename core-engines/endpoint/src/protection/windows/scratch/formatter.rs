@@ -12,8 +12,8 @@ struct Formatted {
 
 pub(super) fn run(volume: UnformattedVolume, logon: &str, temporary: &Path) -> Result<ReadyVolume> {
     volume.verify()?;
-    let powershell = PathBuf::from(super::super::system_root()?)
-        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let root = super::super::system_root()?;
+    let powershell = PathBuf::from(&root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
     let _system_directory =
         PinnedDirectory::open(powershell.parent().ok_or("PowerShell has no parent")?)?;
     let nonce = secret()?;
@@ -25,6 +25,9 @@ pub(super) fn run(volume: UnformattedVolume, logon: &str, temporary: &Path) -> R
     }
     let mut invocation = command(&powershell, temporary)?;
     invocation
+        // Storage's manifest resolves its native assembly through windir.
+        // Supply the API-derived directory after command clears inheritance.
+        .env("windir", root)
         .env("PSModulePath", powershell.parent().unwrap().join("Modules"))
         .args([
             "-NoLogo",

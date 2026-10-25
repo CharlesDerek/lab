@@ -1032,24 +1032,34 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `1ee1a26`](https://github.com/CharlesDerek/lab/actions/runs/40216753574)
-passed nine of eleven checks on Windows Server 2022 as LocalSystem in session
+and task cleanup using mocked commands. The [hosted run at `f000bc8`](https://github.com/CharlesDerek/lab/actions/runs/40217271761)
+passed ten of eleven checks on Windows Server 2022 as LocalSystem in session
 zero. The retained report was checked against its source commit and input-manifest
 hash. Scanner startup/cleanup, private-state access, both workspace cleanup cases,
 partial-image recovery, WFP enforcement/removal, recovery after owner crashes,
-fixed-image checks and attachment release after owner exit passed. The GPT and
-full worker tests now create the expected MSR, but Windows exposes no partition
-interfaces for enumeration. Arrival checks now open the partition-device name
-derived only from the held disk and checked partition number, matching
-[Microsoft's WSL disk helper](https://github.com/microsoft/WSL/blob/master/src/windows/common/disk.cpp).
-This handle is read-only and must match the owned disk number, partition number,
-GPT identity, type, attributes and extent. No caller-supplied name is accepted.
+fixed-image checks, GPT/volume binding and attachment release after owner exit
+passed. The full worker reaches the formatter but Storage module import fails
+because its cleared environment lacks `windir`. The formatter now supplies that
+value from `GetWindowsDirectoryW`, as it already does for `SystemRoot`; no inherited
+user environment is trusted. Formatting, capacity enforcement and full worker
+cleanup remain unverified.
 
-Initialization creates only the owned MSR when the new GPT is empty, then verifies
-its arrival before adding data. An automatically created MSR must also pass
-geometry and arrival checks. Direct MSR device queries, complete partition/volume
-creation, formatting, capacity enforcement and cleanup remain unverified.
-Bounded diagnostics report geometry and error codes without paths or IDs.
+Initialization creates the owned MSR when the new GPT is empty, verifies its
+arrival, then adds data. The read-only partition-device query uses numbers derived
+only from the held disk and checked layout, matching
+[Microsoft's WSL disk helper](https://github.com/microsoft/WSL/blob/master/src/windows/common/disk.cpp).
+It requires the owned disk number, partition number, GPT identity, type, attributes
+and extent to match. No caller-supplied name is accepted. The complete partition
+and volume-discovery fixture now passes natively, including both nonzero-header
+refusals and detached cleanup.
+
+Separate hosted update checks failed at atomic state-file replacement with Windows
+access denied. State persistence now retries only access/sharing/lock errors for
+up to two seconds, using the same synchronized temporary file. It never unlinks
+the old destination or changes permissions; persistent denial still fails. Two
+native tests cover transient reader release and persistent refusal with unchanged
+old contents and no temporary-file leak. Native execution of these tests and
+subsequent controller delivery remains pending.
 
 Image creation and verification now use `VirtualDiskId`, matching Microsoft's
 [VHDX identity implementation](https://github.com/microsoft/go-winio/blob/main/vhd/vhd.go).
