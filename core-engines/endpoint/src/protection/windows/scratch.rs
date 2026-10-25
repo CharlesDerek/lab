@@ -303,7 +303,10 @@ pub fn worker_main(parent: u32) -> Result<()> {
     // leave only an unmounted partial/new image for exclusive reclamation.
     record.image_ready = true;
     record.save(&journal)?;
-    let volume = disk.attach()?.initialize()?.discover()?;
+    let volume = disk
+        .attach_for_scanner(&record.logon)?
+        .initialize()?
+        .discover()?;
     let temporary = state.directory("worker-temporary")?;
     let ready = formatter::run(volume, &record.logon, temporary.path())?;
     let health_directory = state.directory("scratch-health")?;

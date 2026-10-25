@@ -63,6 +63,38 @@ fn scratch_access_probe(path: &Path) {
     );
 }
 
+fn raw_device_access_is_denied() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::{
+        Foundation::{GENERIC_READ, GENERIC_WRITE},
+        Storage::FileSystem::*,
+    };
+    let devices: [String; 2] =
+        serde_json::from_str(&std::env::var("ATHERNEX_SCRATCH_TEST_DEVICES").unwrap()).unwrap();
+    for device in devices {
+        for access in [
+            GENERIC_READ,
+            GENERIC_WRITE,
+            FILE_READ_DATA,
+            FILE_WRITE_DATA,
+            FILE_APPEND_DATA,
+            FILE_WRITE_ATTRIBUTES,
+            WRITE_DAC,
+            WRITE_OWNER,
+        ] {
+            let result = std::fs::OpenOptions::new()
+                .access_mode(access)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .open(&device);
+            assert_eq!(
+                result.err().and_then(|error| error.raw_os_error()),
+                Some(5),
+                "raw scratch device access must be denied for mask {access:#x}"
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore = "internal restricted scratch filesystem fixture"]
 fn restricted_io_fixture() {
@@ -70,6 +102,7 @@ fn restricted_io_fixture() {
         return;
     };
     let path = PathBuf::from(path);
+    raw_device_access_is_denied();
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -139,7 +172,17 @@ fn restricted_io_fixture() {
     println!("native-scratch-disk-full-and-root-protection-proven");
 }
 
-fn run_scanner(state: &Directory, token: &Token, path: &Path, denied: bool) {
+fn run_scanner(state: &Directory, token: &Token, ready: &Health, denied: bool) {
+    let path = &ready.path;
+    let devices = [
+        ready.target.volume.trim_end_matches('\\').to_owned(),
+        format!(r"\\.\PhysicalDrive{}", ready.target.disk_number),
+    ];
+    // Positive controls use only the worker's identity-checked volume/disk.
+    // Failure under the scanner must be access denied, never a missing device.
+    for device in &devices {
+        File::open(device).unwrap();
+    }
     let staging = state
         .scanner_workspace(&format!("scanner-{}", secret().unwrap()), token)
         .unwrap();
@@ -156,7 +199,11 @@ fn run_scanner(state: &Directory, token: &Token, path: &Path, denied: bool) {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env("ATHERNEX_SCRATCH_TEST_PATH", path);
+        .env("ATHERNEX_SCRATCH_TEST_PATH", path)
+        .env(
+            "ATHERNEX_SCRATCH_TEST_DEVICES",
+            serde_json::to_string(&devices).unwrap(),
+        );
     if denied {
         command.env("ATHERNEX_SCRATCH_TEST_DENIED", "yes");
     }
@@ -271,11 +318,11 @@ fn owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit() {
     changed.directory.file_id[0] ^= 0xff;
     assert!(validate_observation(&state, &changed, token.logon_sid()).is_err());
     assert!(recovery::clean(&state).is_err());
-    run_scanner(&state, &Token::new().unwrap(), &ready.path, true);
+    run_scanner(&state, &Token::new().unwrap(), &ready, true);
     // Inherited access on an existing SYSTEM-created child is an independent
     // diagnostic of the scanner's create-file permissions on the directory.
     std::fs::write(ready.path.join("existing-proof"), b"system fixture bytes").unwrap();
-    run_scanner(&state, &token, &ready.path, false);
+    run_scanner(&state, &token, &ready, false);
     health(&state, &id, token.logon_sid()).unwrap();
     let network = state.directory("network").unwrap();
     network
