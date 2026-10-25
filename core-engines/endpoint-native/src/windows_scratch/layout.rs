@@ -289,17 +289,57 @@ impl AttachedDisk {
             size_of::<CREATE_DISK>(),
         )?;
         update(&self.physical)?;
+        let initial = Layout::get(&self.physical)?;
+        let initial_header = initial.gpt(self.spec())?;
+        let ranges = self.spec().ranges(
+            initial_header.StartingUsableOffset as u64,
+            initial_header.UsableLength as u64,
+        )?;
+        let mut desired = Layout::empty();
+        desired.style = PARTITION_STYLE_GPT as u32;
+        desired.count = 1;
+        desired.header.Gpt = initial_header;
+        desired.entries[0] = entry(
+            self.spec(),
+            Identifier::Reserved,
+            ranges.reserved_start,
+            ranges.reserved_length,
+            1,
+        );
+        // CREATE_DISK can leave an empty GPT. Create only our MSR first and
+        // establish its arrival before adding any data partition. An existing
+        // initial MSR follows the same arrival checks without this mutation.
+        let created_reserved = initial.count == 0;
+        if created_reserved {
+            self.verify()?;
+            input(
+                &self.physical,
+                IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
+                &desired,
+                offset_of!(Layout, entries) + size_of::<PARTITION_INFORMATION_EX>(),
+            )?;
+            update(&self.physical)?;
+            self.physical.sync_all()?;
+        }
         let deadline = Instant::now() + Duration::from_secs(15);
         let header = loop {
             self.verify()?;
             let layout = Layout::get(&self.physical)?;
             let header = layout.gpt(self.spec())?;
+            if header.StartingUsableOffset != initial_header.StartingUsableOffset
+                || header.UsableLength != initial_header.UsableLength
+            {
+                return Err("Scratch GPT usable geometry changed during MSR arrival".into());
+            }
             if layout.count > 1 {
                 return Err("Unexpected partitions on new scratch GPT disk".into());
             }
             let mut arrival = None;
             if layout.count == 1 {
                 let msr = &layout.entries[0];
+                if created_reserved && !same_partition(msr, &desired.entries[0]) {
+                    return Err("Created scratch MSR differs from its owned specification".into());
+                }
                 if msr.PartitionStyle != PARTITION_STYLE_GPT
                     || !same_guid(
                         &unsafe { msr.Anonymous.Gpt }.PartitionType,
@@ -332,22 +372,8 @@ impl AttachedDisk {
             }
             std::thread::sleep(Duration::from_millis(100));
         };
-        let ranges = self.spec().ranges(
-            header.StartingUsableOffset as u64,
-            header.UsableLength as u64,
-        )?;
-        let mut layout = Layout::empty();
-        layout.style = PARTITION_STYLE_GPT as u32;
-        layout.count = 2;
-        layout.header.Gpt = header;
-        layout.entries[0] = entry(
-            self.spec(),
-            Identifier::Reserved,
-            ranges.reserved_start,
-            ranges.reserved_length,
-            1,
-        );
-        layout.entries[1] = entry(
+        desired.count = 2;
+        desired.entries[1] = entry(
             self.spec(),
             Identifier::Data,
             ranges.data_start,
@@ -358,7 +384,7 @@ impl AttachedDisk {
         input(
             &self.physical,
             IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
-            &layout,
+            &desired,
             offset_of!(Layout, entries) + 2 * size_of::<PARTITION_INFORMATION_EX>(),
         )?;
         update(&self.physical)?;

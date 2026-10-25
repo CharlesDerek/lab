@@ -1032,16 +1032,19 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `32fc5b1`](https://github.com/CharlesDerek/lab/actions/runs/40215940438)
+and task cleanup using mocked commands. The [hosted run at `5d38b24`](https://github.com/CharlesDerek/lab/actions/runs/40216359999)
 passed nine of eleven checks on Windows Server 2022 as LocalSystem in session
 zero. The retained report was checked against its source commit and input-manifest
 hash. Scanner startup/cleanup, private-state access, both workspace cleanup cases,
 partial-image recovery, WFP enforcement/removal, recovery after owner crashes,
 fixed-image checks and attachment release after owner exit passed. The GPT and
-full worker tests now create GPT successfully, then time out waiting for MSR
-arrival. Bounded layout geometry and interface counts distinguish an absent MSR
-from an inaccessible device interface without exposing paths or identifiers.
-Formatting, capacity enforcement and complete cleanup remain unverified.
+full worker tests now create GPT successfully, but the new GPT has zero
+partitions and waiting for an automatic MSR times out. Initialization now creates
+only the owned MSR when the new GPT is empty, then requires matching identity,
+geometry and partition-interface arrival before adding the data partition. An
+automatically created MSR must also pass the existing arrival checks. The explicit
+MSR creation path, formatting, capacity enforcement and complete cleanup remain
+unverified. Bounded diagnostics report counts and geometry without paths or IDs.
 
 Image creation and verification now use `VirtualDiskId`, matching Microsoft's
 [VHDX identity implementation](https://github.com/microsoft/go-winio/blob/main/vhd/vhd.go).
