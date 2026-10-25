@@ -28,12 +28,39 @@ fn prepared_samples_execute_and_map_before_protection_without_claiming_blocking(
         startup_secs: 5,
     };
     let prepared = health::prepare(&plan).unwrap();
-    health::baseline(
+    let baseline = health::baseline(
         &prepared,
         &plan.policy,
         std::path::Path::new(env!("CARGO_BIN_EXE_athernex-endpoint-native")),
-    )
-    .unwrap();
+    );
+    #[cfg(target_os = "macos")]
+    if baseline.is_err() {
+        // Diagnostics concern only the executable samples created above. Keep
+        // the baseline failure; direct execution distinguishes signing/loader
+        // failures from the owned probe's process-lifetime checks.
+        for sample in &prepared.manifest.roots[0].samples[2..] {
+            for (program, args) in [
+                ("/usr/bin/file", vec!["--brief"]),
+                ("/usr/bin/codesign", vec!["--verify", "--strict"]),
+                ("/usr/bin/codesign", vec!["--display", "--verbose=4"]),
+            ] {
+                let output = std::process::Command::new(program)
+                    .args(args)
+                    .arg(&sample.path)
+                    .output()
+                    .unwrap();
+                eprintln!(
+                    "Sample diagnostic {program}: {:?}\n{}{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            let status = std::process::Command::new(&sample.path).status().unwrap();
+            eprintln!("Direct sample execution: {status:?}");
+        }
+    }
+    baseline.unwrap();
     assert_eq!(
         fs::read_dir(plan.policy.state.join("health/proofs"))
             .unwrap()

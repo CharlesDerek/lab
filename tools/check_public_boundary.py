@@ -18,7 +18,7 @@ PRIVATE_DIRS = {
 }
 PRIVATE_NAMES = {"AGENTS.md", "CODEX.md", "CLAUDE.md", "GEMINI.md", ".mrgi"}
 PRIVATE_GLOBS = (
-    "*.pem", "*.key", "*.crt", "*.p12", "*.pfx", "*.jks", "*.keystore",
+    "*.pem", "*.key", "*.pk8", "*.p8", "*.crt", "*.p12", "*.pfx", "*.jks", "*.keystore",
     "*.log", "*.db", "*.db-*", "*.sqlite", "*.sqlite3", "*.sqlite-*",
     "*.tfstate", "*.tfstate.*", "*kubeconfig*", "*.pyc",
     "*.exe", "*.dll", "*.sys", "*.zip", "*.tar", "*.gz", "*.dmp", "*.pcap",

@@ -1,5 +1,48 @@
 use super::*;
 
+#[test]
+fn key_generation_is_private_and_never_adopts_or_overwrites_existing_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::path::absolute(temp.path()).unwrap();
+    let directory = root.join("keys");
+    let public = keygen(&directory).unwrap();
+    let private = fs::read(directory.join("release.pk8")).unwrap();
+    assert_eq!(wire::public_key(&private).unwrap(), public);
+    assert_eq!(
+        fs::read_to_string(directory.join("public-key.txt")).unwrap(),
+        public
+    );
+    #[cfg(windows)]
+    {
+        let guard = athernex_endpoint_native::windows_state::Directory::open(&directory).unwrap();
+        // Both directory and file ACLs are checked by these native primitives.
+        guard.read("release.pk8").unwrap();
+        guard.read("public-key.txt").unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [&directory, &directory.join("release.pk8")] {
+            assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o077, 0);
+        }
+    }
+    assert!(keygen(&directory).is_err());
+    // Never print private bytes, including when a regression makes this fail.
+    assert_eq!(
+        protocol::hash(&fs::read(directory.join("release.pk8")).unwrap()),
+        protocol::hash(&private)
+    );
+    let foreign = root.join("existing");
+    fs::create_dir(&foreign).unwrap();
+    fs::write(foreign.join("retained"), b"existing state").unwrap();
+    assert!(keygen(&foreign).is_err());
+    assert!(!foreign.join("release.pk8").exists());
+    assert_eq!(
+        fs::read(foreign.join("retained")).unwrap(),
+        b"existing state"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn disabled_windows_protection_still_excludes_native_preview_maintenance() {

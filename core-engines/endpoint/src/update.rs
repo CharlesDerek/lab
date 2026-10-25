@@ -1186,27 +1186,51 @@ pub(crate) fn confirm_controller_trial(state: &Path, nonce: &str) -> Result<()> 
     cleanup(state, component, &mut status, &config)
 }
 pub fn keygen(directory: &Path) -> Result<String> {
-    #[cfg(unix)]
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(not(unix))]
-    let builder = fs::DirBuilder::new();
-    #[cfg(unix)]
+    #[cfg(not(windows))]
     {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        #[cfg(unix)]
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(not(unix))]
+        let builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(directory)?;
     }
-    builder.create(directory)?;
+    #[cfg(windows)]
+    let private_directory = {
+        let absolute = std::path::absolute(directory)?;
+        // Create the private ACL with the directory itself and retain its
+        // pinned ancestry while writing keys. No shell or inherited module
+        // search path participates in the signing-key boundary.
+        athernex_endpoint_native::windows_state::Directory::create_under(
+            absolute.parent().ok_or("Missing release key parent")?,
+            absolute
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("Invalid release key directory name")?,
+        )?
+    };
+    let (private, public) = wire::generate_key()?;
     #[cfg(windows)]
     {
-        let (code, _) = run_bounded(Command::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
-            .env("ATHERNEX_KEY_DIRECTORY", directory).args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $id=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[System.Security.AccessControl.DirectorySecurity]::new(); $acl.SetOwner($id); $acl.SetAccessRuleProtection($true,$false); $rule=[System.Security.AccessControl.FileSystemAccessRule]::new($id,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($rule); Set-Acl -LiteralPath $env:ATHERNEX_KEY_DIRECTORY -AclObject $acl"]), 10)?;
-        if code != 0 {
-            return Err("Could not restrict the release key directory".into());
+        for (name, bytes) in [
+            ("release.pk8", private.as_slice()),
+            ("public-key.txt", public.as_bytes()),
+        ] {
+            let mut file = private_directory.create(name)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
         }
+        private_directory.sync()?;
     }
-    let (private, public) = wire::generate_key()?;
-    private_write(&directory.join("release.pk8"), &private)?;
-    private_write(&directory.join("public-key.txt"), public.as_bytes())?;
+    #[cfg(not(windows))]
+    {
+        private_write(&directory.join("release.pk8"), &private)?;
+        private_write(&directory.join("public-key.txt"), public.as_bytes())?;
+    }
     Ok(public)
 }
 pub fn sign(

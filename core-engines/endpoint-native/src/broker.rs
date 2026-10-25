@@ -119,8 +119,16 @@ fn remaining(deadline: Instant) -> Result<Duration> {
 }
 fn read_exact(stream: &mut UnixStream, mut bytes: &mut [u8], deadline: Instant) -> Result<()> {
     while !bytes.is_empty() {
-        stream.set_read_timeout(Some(remaining(deadline)?))?;
-        let n = stream.read(bytes)?;
+        let timeout = remaining(deadline)?;
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|e| format!("Set native response read timeout ({timeout:?}): {e}"))?;
+        let n = stream.read(bytes).map_err(|e| {
+            format!(
+                "Read native response bytes ({} requested): {e}",
+                bytes.len()
+            )
+        })?;
         if n == 0 {
             return Err("Native response connection closed early".into());
         }

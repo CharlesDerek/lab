@@ -35,7 +35,8 @@ class PublicBoundaryTests(unittest.TestCase):
         self.assertEqual(check_tree(self.repo, tree), (tree, 1, []))
 
     def test_force_added_private_files_are_rejected(self):
-        names = [".env", ".athernex/report.json", "CODEX.md", "nested/signing.key", "state.sqlite"]
+        names = [".env", ".athernex/report.json", "CODEX.md", "nested/signing.key",
+                 "nested/release.pk8", "nested/apple.p8", "state.sqlite"]
         for name in names:
             self.write(name, "local-only contents\n")
         findings = check_tree(self.repo, self.tree())[2]
