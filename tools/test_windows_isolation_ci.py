@@ -254,7 +254,9 @@ $ErrorActionPreference = 'Stop'
 $stages = @('setup_position_ready','setup_clear_verified','setup_clear_observed','setup_apply_observed',
     'setup_cleanup_verified',
     'listener_ready','client_ready','heartbeat_accepted','allowed_attempt_verified',
-    'denied_attempts_verified','controlled_queue_ready','stalled_cycle_verified','capture_health_verified')
+    'denied_attempts_verified','controlled_queue_ready','stalled_cycle_verified','capture_health_verified',
+    'server_replay_verified','export_authorization_verified','original_link_verified',
+    'portal_coverage_verified','server_restart_verified')
 $source = @('controlled_queue_empty','controlled_queue_partial','controlled_queue_extra','queue_wait_timeout',
     'capture_health_timeout','health_has_rejections','health_has_loss','health_has_error',
     'health_state_inactive','health_backpressure','health_not_caught_up',
@@ -373,7 +375,9 @@ class IsolationRunnerTests(unittest.TestCase):
             'setup_position_ready', 'setup_clear_verified', 'setup_clear_observed', 'setup_apply_observed',
             'setup_cleanup_verified',
             'listener_ready', 'client_ready', 'heartbeat_accepted', 'allowed_attempt_verified',
-            'denied_attempts_verified', 'controlled_queue_ready', 'stalled_cycle_verified', 'capture_health_verified'])
+            'denied_attempts_verified', 'controlled_queue_ready', 'stalled_cycle_verified', 'capture_health_verified',
+            'server_replay_verified', 'export_authorization_verified', 'original_link_verified',
+            'portal_coverage_verified', 'server_restart_verified'])
         self.assertEqual(value['source'], [
             'controlled_queue_empty', 'controlled_queue_partial', 'controlled_queue_extra', 'queue_wait_timeout',
             'capture_health_timeout', 'health_has_rejections', 'health_has_loss', 'health_has_error',

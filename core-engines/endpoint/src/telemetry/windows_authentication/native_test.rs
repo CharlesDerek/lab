@@ -514,6 +514,7 @@ fn deliver(
             "Conflicting replay was accepted"
         );
     }
+    println!("\nATHERNEX_AUTH_STAGE=server_replay_verified");
     let http = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
@@ -527,6 +528,7 @@ fn deliver(
         !http.get(&export).send().unwrap().status().is_success(),
         "Original evidence export did not require authentication"
     );
+    println!("\nATHERNEX_AUTH_STAGE=export_authorization_verified");
     #[derive(serde::Deserialize)]
     struct Observation {
         evidence_id: u64,
@@ -566,6 +568,7 @@ fn deliver(
                         page.contains("Open original device evidence"),
                         "Native SIEM event lacks its original evidence link"
                     );
+                    println!("\nATHERNEX_AUTH_STAGE=original_link_verified");
                     inspected = true;
                 }
                 found.insert(row.event.id.clone(), (row.evidence_id, row.event));
@@ -582,20 +585,29 @@ fn deliver(
             "Authenticated export altered a native original"
         );
     }
-    let page = http
-        .get(format!("http://{address}/endpoints/{}", config.endpoint_id))
-        .bearer_auth("public-native-event-operator-fixture-32")
-        .send()
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .text()
-        .unwrap();
-    assert!(
-        page.contains("Windows Security logons: coverage incomplete / catching up"),
-        "Portal hides Windows authentication coverage gap"
-    );
     println!("\nATHERNEX_AUTH_STAGE=original_export_verified");
+    for (path, expected) in [
+        (
+            "/endpoints".to_owned(),
+            "Windows Security logons: coverage incomplete / catching up",
+        ),
+        (format!("/endpoints/{}", config.endpoint_id), "Original XML"),
+    ] {
+        let page = http
+            .get(format!("http://{address}{path}"))
+            .bearer_auth("public-native-event-operator-fixture-32")
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .unwrap();
+        assert!(
+            page.contains(expected),
+            "Portal hides native Windows evidence or authentication coverage gap"
+        );
+    }
+    println!("\nATHERNEX_AUTH_STAGE=portal_coverage_verified");
     drop(server);
     drop(app);
     let engine = Engine::open(&server_db).unwrap();
@@ -608,6 +620,7 @@ fn deliver(
             "Server restart lost deduplication state"
         );
     }
+    println!("\nATHERNEX_AUTH_STAGE=server_restart_verified");
     assert!(
         engine
             .snapshot()

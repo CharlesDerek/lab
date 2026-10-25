@@ -79,7 +79,9 @@ function Get-AuthenticationStages([string]$Log) {
         'denied_attempts_verified','controlled_queue_ready','stalled_cycle_verified','capture_health_verified',
         'stalled_http_verified','backpressure_verified','crash_replay_verified',
         'policy_gap_verified','anchor_mismatch_verified','http_delivery_verified',
-        'original_export_verified','detection_verified','cleanup_verified')
+        'server_replay_verified','export_authorization_verified','original_link_verified',
+        'original_export_verified','portal_coverage_verified','server_restart_verified',
+        'detection_verified','cleanup_verified')
     if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
     try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
     catch { return }
