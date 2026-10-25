@@ -21,5 +21,5 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   mkdir -p "$tree_dir"
   git archive "$local_sha" | tar -x -C "$tree_dir"
   "$scanner" dir "$tree_dir" --config "$tree_dir/.gitleaks.toml" --no-banner --redact=100 --ignore-gitleaks-allow --gitleaks-ignore-path /dev/null --max-decode-depth 2
-  "$scanner" git . --log-opts="$local_sha" --config "$tree_dir/.gitleaks.toml" --no-banner --redact=100 --ignore-gitleaks-allow --gitleaks-ignore-path /dev/null --max-decode-depth 2
+  "$scanner" git . --log-opts="--diff-merges=first-parent $local_sha" --config "$tree_dir/.gitleaks.toml" --no-banner --redact=100 --ignore-gitleaks-allow --gitleaks-ignore-path /dev/null --max-decode-depth 2
 done

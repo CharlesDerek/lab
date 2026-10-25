@@ -50,7 +50,13 @@ IDs and excludes only their ancestry. Missing objects, failed remote discovery,
 and an empty public remote fail closed. Fetch the advertised commits first.
 
 The `Public repository boundary` workflow also scans the committed tree and its
-reachable history using checksum-pinned Gitleaks. Its configuration retains the
+reachable history using checksum-pinned Gitleaks. Both CI and the pre-push hook
+pass `--diff-merges=first-parent` to Git through Gitleaks so additions made only
+during merge resolution are scanned even if deleted later. This selects the
+merge diff format; it does not limit traversal to first-parent ancestry. A
+synthetic merge-only regression exercises the actual pre-push hook in CI.
+Gitleaks' reported commit count can omit deletion-only commits and is not a
+complete ancestry count. Its configuration retains the
 default rules with two exact, file-specific exceptions for known test/prose false
 positives. `.gitleaksignore` files are rejected and scanner suppression files and
 inline allow comments are disabled. Neither matching secret values nor runtime

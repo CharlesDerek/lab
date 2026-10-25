@@ -560,7 +560,6 @@ fn owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit() {
     // Inherited access on an existing SYSTEM-created child is an independent
     // diagnostic of the scanner's create-file permissions on the directory.
     std::fs::write(ready.path.join("existing-proof"), b"system fixture bytes").unwrap();
-    diagnostics::volume_acl_experiment(&ready, &token);
     run_scanner(&state, &token, &ready, false);
     health(&state, &id, token.logon_sid()).unwrap();
     let network = state.directory("network").unwrap();

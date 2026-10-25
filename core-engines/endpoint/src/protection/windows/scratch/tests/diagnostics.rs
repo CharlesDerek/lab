@@ -1,6 +1,5 @@
 //! Bounded diagnostics on this fixture's checked objects. No raw data is read or
-//! written. The separate ACL experiment restores its checked disposable objects
-//! before returning or unwinding. Reports contain no paths or identities.
+//! written, no permissions change, and reports contain no paths or identities.
 use super::*;
 use std::{
     mem::size_of,
@@ -22,9 +21,7 @@ use windows_sys::{
         System::SystemServices::{FILE_DEVICE_SECURE_OPEN, FILE_FS_DEVICE_INFORMATION},
     },
     Win32::{
-        Foundation::{
-            GetLastError, LocalFree, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, UNICODE_STRING,
-        },
+        Foundation::{LocalFree, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, UNICODE_STRING},
         Security::{Authorization::*, *},
         Storage::FileSystem::*,
         System::{Ioctl::*, IO::*},
@@ -49,28 +46,24 @@ impl Drop for Descriptor {
     }
 }
 fn descriptor(file: &File) -> Descriptor {
-    read_descriptor(file, DACL_SECURITY_INFORMATION).unwrap()
-}
-fn read_descriptor(file: &File, information: u32) -> std::result::Result<Descriptor, u32> {
     let mut raw = null_mut();
-    let status = unsafe {
-        GetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            information,
-            null_mut(),
-            null_mut(),
-            null_mut(),
-            null_mut(),
-            &mut raw,
-        )
-    };
-    let result = Descriptor(raw);
-    if status != 0 {
-        return Err(status);
-    }
-    assert!(!result.0.is_null());
-    Ok(result)
+    assert_eq!(
+        unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                &mut raw,
+            )
+        },
+        0
+    );
+    assert!(!raw.is_null());
+    Descriptor(raw)
 }
 fn aces(descriptor: &Descriptor) -> Vec<Vec<u8>> {
     let (mut acl, mut present, mut defaulted) = (null_mut(), 0, 0);
@@ -79,10 +72,6 @@ fn aces(descriptor: &Descriptor) -> Vec<Vec<u8>> {
         0
     );
     assert!(present != 0 && !acl.is_null());
-    acl_entries(acl, true)
-}
-fn acl_entries(acl: *mut ACL, map_generic: bool) -> Vec<Vec<u8>> {
-    assert!(!acl.is_null());
     assert_ne!(unsafe { IsValidAcl(acl) }, 0);
     let count = unsafe { (*acl).AceCount };
     let bytes = unsafe { (*acl).AclSize } as usize;
@@ -98,9 +87,6 @@ fn acl_entries(acl: *mut ACL, map_generic: bool) -> Vec<Vec<u8>> {
             let mut bytes = unsafe { std::slice::from_raw_parts(raw.cast::<u8>(), len) }.to_vec();
             // Attachment input uses generic GA, whereas the installed file
             // security can contain its mapped rights. Compare equivalent masks.
-            if !map_generic {
-                return bytes;
-            }
             let offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, Mask);
             assert!(offset + 4 <= bytes.len());
             let mut mask = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
@@ -363,314 +349,5 @@ pub(super) fn native_file_access(path: &Path) {
             "native existing scratch file mask={access:#x}, status={:#x}",
             status as u32
         );
-    }
-}
-
-const SNAPSHOT_SECURITY: u32 = OWNER_SECURITY_INFORMATION
-    | GROUP_SECURITY_INFORMATION
-    | DACL_SECURITY_INFORMATION
-    | LABEL_SECURITY_INFORMATION;
-
-// Never derive Debug: equality failures must not print owner/group SID bytes.
-#[derive(PartialEq, Eq)]
-struct SecurityState {
-    control: u16,
-    owner: Vec<u8>,
-    group: Vec<u8>,
-    dacl: Option<Vec<Vec<u8>>>,
-    label: Option<Vec<Vec<u8>>>,
-}
-fn sid_bytes(sid: *mut std::ffi::c_void) -> Vec<u8> {
-    assert!(!sid.is_null() && unsafe { IsValidSid(sid) } != 0);
-    let size = unsafe { GetLengthSid(sid) };
-    assert!(size > 0 && size <= SECURITY_MAX_SID_SIZE);
-    unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), size as usize) }.to_vec()
-}
-fn security_state(sd: &Descriptor) -> SecurityState {
-    let (mut control, mut revision) = (0, 0);
-    assert_ne!(
-        unsafe { GetSecurityDescriptorControl(sd.0, &mut control, &mut revision) },
-        0
-    );
-    let (mut owner, mut group, mut defaulted) = (null_mut(), null_mut(), 0);
-    assert_ne!(
-        unsafe { GetSecurityDescriptorOwner(sd.0, &mut owner, &mut defaulted) },
-        0
-    );
-    assert_ne!(
-        unsafe { GetSecurityDescriptorGroup(sd.0, &mut group, &mut defaulted) },
-        0
-    );
-    let (mut dacl, mut sacl, mut present) = (null_mut(), null_mut(), 0);
-    assert_ne!(
-        unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) },
-        0
-    );
-    let dacl = (!dacl.is_null()).then(|| acl_entries(dacl, false));
-    assert_ne!(
-        unsafe { GetSecurityDescriptorSacl(sd.0, &mut present, &mut sacl, &mut defaulted) },
-        0
-    );
-    let label = (!sacl.is_null()).then(|| acl_entries(sacl, false));
-    SecurityState {
-        control: control & !SE_SELF_RELATIVE,
-        owner: sid_bytes(owner),
-        group: sid_bytes(group),
-        dacl,
-        label,
-    }
-}
-fn parsed_descriptor(sddl: &str) -> Descriptor {
-    let wide: Vec<_> = sddl.encode_utf16().chain([0]).collect();
-    let mut raw = null_mut();
-    let success = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(wide.as_ptr(), 1, &mut raw, null_mut())
-    };
-    let result = Descriptor(raw);
-    assert_ne!(success, 0);
-    assert!(!result.0.is_null());
-    result
-}
-fn apply_dacl_label(file: &File, sd: &Descriptor) -> u32 {
-    let (mut dacl, mut sacl, mut present, mut defaulted) = (null_mut(), null_mut(), 0, 0);
-    assert_ne!(
-        unsafe { GetSecurityDescriptorDacl(sd.0, &mut present, &mut dacl, &mut defaulted) },
-        0
-    );
-    assert!(present != 0 && !dacl.is_null());
-    assert_ne!(
-        unsafe { GetSecurityDescriptorSacl(sd.0, &mut present, &mut sacl, &mut defaulted) },
-        0
-    );
-    let (mut control, mut revision) = (0, 0);
-    assert_ne!(
-        unsafe { GetSecurityDescriptorControl(sd.0, &mut control, &mut revision) },
-        0
-    );
-    // LABEL changes only mandatory labels. Do not request SACL protection flags
-    // or alter audit ACEs; those need additional privileges and are unnecessary.
-    let protection = if control & SE_DACL_PROTECTED != 0 {
-        PROTECTED_DACL_SECURITY_INFORMATION
-    } else {
-        UNPROTECTED_DACL_SECURITY_INFORMATION
-    };
-    unsafe {
-        SetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION | protection,
-            null_mut(),
-            null_mut(),
-            dacl,
-            sacl,
-        )
-    }
-}
-struct SavedSecurity {
-    file: File,
-    original: Descriptor,
-    state: SecurityState,
-}
-impl SavedSecurity {
-    fn new(file: File) -> Self {
-        let original = read_descriptor(&file, SNAPSHOT_SECURITY).unwrap();
-        // Refuse an unrestorable snapshot before any permissions change.
-        aces(&original);
-        let state = security_state(&original);
-        Self {
-            file,
-            original,
-            state,
-        }
-    }
-    fn unchanged(&self) -> bool {
-        read_descriptor(&self.file, SNAPSHOT_SECURITY)
-            .map(|sd| security_state(&sd) == self.state)
-            .unwrap_or(false)
-    }
-}
-struct RestoreSecurity {
-    objects: [SavedSecurity; 4],
-    armed: bool,
-}
-impl RestoreSecurity {
-    fn restore(&mut self) {
-        let restored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut success = true;
-            for (index, saved) in self.objects.iter().enumerate() {
-                if !saved.unchanged() {
-                    let status = apply_dacl_label(&saved.file, &saved.original);
-                    eprintln!("volume ACL experiment restore object={index}, status={status:#x}");
-                    success &= status == 0;
-                }
-            }
-            for saved in &self.objects {
-                success &= saved.unchanged();
-            }
-            success
-        }))
-        .unwrap_or(false);
-        eprintln!("volume ACL experiment restored={restored}");
-        if !restored {
-            // Never unwind into ordinary teardown with an unverified policy.
-            // Process death also ends ownership of the nonpermanent fixture.
-            std::process::abort();
-        }
-        self.armed = false;
-    }
-}
-impl Drop for RestoreSecurity {
-    fn drop(&mut self) {
-        if self.armed {
-            self.restore();
-        }
-    }
-}
-fn security_handle(path: impl AsRef<Path>, raw: bool) -> File {
-    std::fs::OpenOptions::new()
-        // Raw handles need read access for partition metadata queries. Never
-        // request directory listing on the filesystem root or read raw bytes.
-        .access_mode(
-            READ_CONTROL
-                | WRITE_DAC
-                | WRITE_OWNER
-                | FILE_READ_ATTRIBUTES
-                | if raw { FILE_READ_DATA } else { 0 },
-        )
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-        .unwrap()
-}
-fn token_write_probe(
-    token: &Token,
-    path: &Path,
-    devices: &[String; 3],
-    phase: &str,
-) -> (i32, bool) {
-    struct Revert;
-    impl Drop for Revert {
-        fn drop(&mut self) {
-            if unsafe { RevertToSelf() } == 0 {
-                std::process::abort();
-            }
-        }
-    }
-    let success = unsafe { ImpersonateLoggedOnUser(token.handle().as_raw_handle()) };
-    assert_ne!(success, 0, "experiment impersonation error={}", unsafe {
-        GetLastError()
-    });
-    let _revert = Revert;
-    let status = native_open(&path.join("existing-proof"), FILE_WRITE_DATA, false)
-        .err()
-        .unwrap_or(0);
-    eprintln!(
-        "volume ACL experiment phase={phase}, file mask=0x2, status={:#x}",
-        status as u32
-    );
-    let mut denied = true;
-    for (index, device) in devices.iter().enumerate() {
-        for access in [
-            FILE_READ_DATA,
-            FILE_WRITE_DATA,
-            FILE_APPEND_DATA,
-            FILE_WRITE_ATTRIBUTES,
-            WRITE_DAC,
-            WRITE_OWNER,
-        ] {
-            // Consuming Result drops every successful handle before recording
-            // rejection. Never perform raw data I/O, even after an unexpected open.
-            let raw_status = native_open(Path::new(device), access, false)
-                .err()
-                .unwrap_or(0);
-            if raw_status as u32 != 0xc0000022 {
-                eprintln!("volume ACL experiment phase={phase}, raw object={index}, mask={access:#x}, status={:#x}", raw_status as u32);
-                denied = false;
-            }
-        }
-    }
-    eprintln!("volume ACL experiment phase={phase}, raw_refusals={denied}, cases=18");
-    (status, denied)
-}
-
-pub(super) fn volume_acl_experiment(ready: &Health, token: &Token) {
-    let devices = raw_devices(ready);
-    // Bind the actual held handles before arming any restoration authority.
-    let volume = security_handle(&devices[0], true);
-    let number = partition(&volume, ready);
-    let root = security_handle(&ready.target.volume, false);
-    let mut identity = FILE_ID_INFO::default();
-    assert_ne!(
-        unsafe {
-            GetFileInformationByHandleEx(
-                root.as_raw_handle(),
-                FileIdInfo,
-                (&mut identity as *mut FILE_ID_INFO).cast(),
-                size_of::<FILE_ID_INFO>() as u32,
-            )
-        },
-        0
-    );
-    assert!(identity.VolumeSerialNumber == ready.directory.volume);
-    let part = security_handle(&devices[2], true);
-    assert!(partition(&part, ready) == number);
-    let physical = security_handle(&devices[1], true);
-    let device: STORAGE_DEVICE_NUMBER = query(&physical, IOCTL_STORAGE_GET_DEVICE_NUMBER);
-    assert!(
-        device.DeviceType == FILE_DEVICE_DISK && device.DeviceNumber == ready.target.disk_number
-    );
-    let mut restore = RestoreSecurity {
-        objects: [volume, root, part, physical].map(SavedSecurity::new),
-        armed: false,
-    };
-    let expected = parsed_descriptor(&format!(
-        "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x1000a0;;;{})",
-        token.logon_sid()
-    ));
-    assert!(aces(&restore.objects[0].original) == aces(&expected));
-    let candidate = parsed_descriptor(&format!(
-        "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x1000a2;;;{})S:(ML;;NW;;;LW)",
-        token.logon_sid()
-    ));
-    let other = Token::new().unwrap();
-    for (name, subject) in [("baseline-intended", token), ("baseline-other", &other)] {
-        let (status, denied) = token_write_probe(subject, &ready.path, &devices, name);
-        assert!(status as u32 == 0xc0000022 && denied);
-    }
-    // Arm before SetSecurityInfo: even a reported failure could be partial.
-    restore.armed = true;
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let status = apply_dacl_label(&restore.objects[0].file, &candidate);
-        eprintln!("volume ACL experiment apply status={status:#x}");
-        assert_eq!(status, 0);
-        for saved in &restore.objects[1..] {
-            assert!(saved.unchanged());
-        }
-        let changed = read_descriptor(&restore.objects[0].file, SNAPSHOT_SECURITY).unwrap();
-        let current = security_state(&changed);
-        let wanted = security_state(&candidate);
-        assert!(aces(&changed) == aces(&candidate) && current.label == wanted.label);
-        assert!(
-            current.owner == restore.objects[0].state.owner
-                && current.group == restore.objects[0].state.group
-        );
-        assert!(
-            current.control
-                & (SE_SACL_PROTECTED | SE_SACL_AUTO_INHERITED | SE_SACL_AUTO_INHERIT_REQ)
-                == restore.objects[0].state.control
-                    & (SE_SACL_PROTECTED | SE_SACL_AUTO_INHERITED | SE_SACL_AUTO_INHERIT_REQ)
-        );
-        let (write, intended_raw) =
-            token_write_probe(token, &ready.path, &devices, "candidate-intended");
-        let (other_write, other_raw) =
-            token_write_probe(&other, &ready.path, &devices, "candidate-other");
-        assert!(
-            write == 0 && intended_raw && other_write as u32 == 0xc0000022 && other_raw,
-            "volume ACL experiment rejected candidate policy"
-        );
-    }));
-    restore.restore();
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic);
     }
 }

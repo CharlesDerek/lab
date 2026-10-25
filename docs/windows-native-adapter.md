@@ -1070,16 +1070,20 @@ with SYSTEM positive controls. These probes do not widen production data permiss
 Capacity enforcement and full worker cleanup remain unverified. Diagnostics
 report only object kinds, rights and results.
 
-A separate test-only experiment snapshots the checked volume, filesystem root,
-data-partition alias and physical device before temporarily adding only the
-scanner logon's `FILE_WRITE_DATA` right and a noninheriting low-integrity label
-to the volume descriptor. It rejects propagation to another object, owner/group
-changes, another logon's file access, or any permitted raw data/mutation open.
-The exact native probes run while impersonating the existing restricted tokens;
-they never read or write raw data. Saved descriptors are restored and verified
-before returning or reporting a rejected candidate. Restoration failure aborts
-the disposable fixture. This experiment has not yet run natively, changes no
-production grant and cannot satisfy the original disk-full/cleanup gate.
+A separate [test-only experiment at `fa19dfa`](https://github.com/CharlesDerek/lab/actions/runs/40223760777)
+snapshotted the checked volume, filesystem root, data-partition alias and physical
+device before requesting only the scanner logon's `FILE_WRITE_DATA` right and a
+noninheriting low-integrity label on the volume. Both restricted tokens first
+passed exact file-write denial and all 18 raw-access refusals. The mutation call
+succeeded, but an unchanged-other-object check failed before any candidate access
+probe. Restoration calls for the volume and partition returned success; the
+final descriptor comparison still failed, so the fixture aborted. No raw data
+I/O occurred. These results reject the assumption that this policy can be changed
+and restored independently on the volume. The logs do not establish which
+descriptor component differed or whether candidate raw access would succeed.
+The rejected mutating probe was removed from the normal fixture; all original
+raw-access, disk-full and cleanup requirements remain. Production data grants
+were never widened.
 
 Initialization creates the owned MSR when the new GPT is empty, verifies its
 arrival, then adds data. The read-only partition-device query uses numbers derived
