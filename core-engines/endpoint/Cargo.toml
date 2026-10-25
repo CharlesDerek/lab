@@ -31,7 +31,7 @@ socket2 = "0.6"
 [dev-dependencies]
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_RemoteDesktop", "Win32_System_ProcessStatus"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_RemoteDesktop", "Win32_System_ProcessStatus", "Win32_System_StationsAndDesktops"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 orchestrator = { path = "../orchestrator", default-features = false }

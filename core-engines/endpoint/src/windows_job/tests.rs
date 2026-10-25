@@ -156,6 +156,72 @@ fn wait_release(path: &Path) {
     }
 }
 
+// Opening an existing station is diagnostic only: never switch the supervisor's
+// process station or modify a shared desktop's ACL while investigating startup.
+fn log_scanner_station_access(token: &athernex_endpoint_native::windows_scanner::Token) {
+    use windows_sys::Win32::{
+        Security::{
+            GetTokenInformation, ImpersonateLoggedOnUser, RevertToSelf, TokenStatistics,
+            TOKEN_STATISTICS,
+        },
+        System::{
+            StationsAndDesktops::{CloseWindowStation, OpenWindowStationW},
+            SystemServices::MAXIMUM_ALLOWED,
+        },
+    };
+    let mut statistics = TOKEN_STATISTICS::default();
+    let mut bytes = 0;
+    if unsafe {
+        GetTokenInformation(
+            token.handle().as_raw_handle(),
+            TokenStatistics,
+            (&mut statistics as *mut TOKEN_STATISTICS).cast(),
+            size_of::<TOKEN_STATISTICS>() as u32,
+            &mut bytes,
+        )
+    } == 0
+        || bytes as usize != size_of::<TOKEN_STATISTICS>()
+    {
+        eprintln!("Scanner station probe could not query authentication identity");
+        return;
+    }
+    let station: Vec<u16> = format!(
+        "Service-0x{:x}-{:x}$",
+        statistics.AuthenticationId.HighPart as u32, statistics.AuthenticationId.LowPart
+    )
+    .encode_utf16()
+    .chain([0])
+    .collect();
+    let probe = || {
+        let handle = unsafe { OpenWindowStationW(station.as_ptr(), 0, MAXIMUM_ALLOWED) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error().raw_os_error());
+        }
+        if unsafe { CloseWindowStation(handle) } == 0 {
+            return Err(io::Error::last_os_error().raw_os_error());
+        }
+        Ok(())
+    };
+    eprintln!("Scanner default station open as SYSTEM: {:?}", probe());
+    struct Revert;
+    impl Drop for Revert {
+        fn drop(&mut self) {
+            if unsafe { RevertToSelf() } == 0 {
+                std::process::abort();
+            }
+        }
+    }
+    if unsafe { ImpersonateLoggedOnUser(token.handle().as_raw_handle()) } == 0 {
+        eprintln!("Scanner station probe could not impersonate its token");
+        return;
+    }
+    let _revert = Revert;
+    eprintln!(
+        "Scanner default station open as restricted LocalService: {:?}",
+        probe()
+    );
+}
+
 #[test]
 #[ignore = "helper process launched by Windows lifecycle tests"]
 fn helper() {
@@ -454,6 +520,8 @@ fn scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_s
         if let Some(code) = control.poll().unwrap() {
             if code as u32 == 0xc0000135 {
                 log_scanner_runtime_access(&token);
+            } else if code as u32 == 0xc0000142 {
+                log_scanner_station_access(&token);
             }
             assert_eq!(
                 code,
@@ -933,6 +1001,8 @@ fn scanner_launch_has_checked_identity_job_limits_and_owned_cleanup() {
         if let Some(code) = service.poll().unwrap() {
             if code as u32 == 0xc0000135 {
                 log_scanner_runtime_access(&token);
+            } else if code as u32 == 0xc0000142 {
+                log_scanner_station_access(&token);
             }
             panic!(
                 "scanner fixture exited with {code} (0x{:08x}): {}",
