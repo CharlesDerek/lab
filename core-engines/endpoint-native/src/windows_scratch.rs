@@ -125,7 +125,7 @@ impl Image {
         })?;
         let payload = match version {
             GET_VIRTUAL_DISK_INFO_SIZE => size_of::<GET_VIRTUAL_DISK_INFO_0_0>(),
-            GET_VIRTUAL_DISK_INFO_IDENTIFIER => size_of::<GUID>(),
+            GET_VIRTUAL_DISK_INFO_VIRTUAL_DISK_ID => size_of::<GUID>(),
             GET_VIRTUAL_DISK_INFO_VIRTUAL_STORAGE_TYPE => size_of::<VIRTUAL_STORAGE_TYPE>(),
             GET_VIRTUAL_DISK_INFO_PROVIDER_SUBTYPE | GET_VIRTUAL_DISK_INFO_IS_LOADED => 4,
             _ => return Err("Unsupported scratch information query".into()),
@@ -141,9 +141,9 @@ impl Image {
     fn verify(&self) -> Result<()> {
         self.spec.validate()?;
         let identifier = unsafe {
-            self.query(GET_VIRTUAL_DISK_INFO_IDENTIFIER)?
+            self.query(GET_VIRTUAL_DISK_INFO_VIRTUAL_DISK_ID)?
                 .Anonymous
-                .Identifier
+                .VirtualDiskId
         };
         let kind = unsafe {
             self.query(GET_VIRTUAL_DISK_INFO_VIRTUAL_STORAGE_TYPE)?
@@ -309,10 +309,20 @@ impl FreshDisk {
             directory,
             spec,
         };
-        image.verify()?;
         if image.loaded()? {
             return Err("New scratch image is unexpectedly attached".into());
         }
+        // VHDX's generic Identifier changes with payload writes. Bind its
+        // stable VirtualDiskId instead, only on this newly created, unattached
+        // image. Inspection/recovery never sets or repairs an existing ID.
+        let identity = SET_VIRTUAL_DISK_INFO {
+            Version: SET_VIRTUAL_DISK_INFO_VIRTUAL_DISK_ID,
+            Anonymous: SET_VIRTUAL_DISK_INFO_0 {
+                VirtualDiskId: guid(&image.spec, Identifier::Image),
+            },
+        };
+        check(unsafe { SetVirtualDiskInformation(image.handle.as_raw_handle(), &identity) })?;
+        image.verify()?;
         Ok(Self(image))
     }
     pub fn attach(self) -> Result<AttachedDisk> {

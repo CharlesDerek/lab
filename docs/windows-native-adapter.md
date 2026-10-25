@@ -1032,41 +1032,33 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `1c13d49`](https://github.com/CharlesDerek/lab/actions/runs/40212422060)
-passed all six original checks on Windows Server 2022 as LocalSystem in session
-zero. The source commit and manifest hash were checked against the retained
-report: scanner startup/cleanup, private-state access, both workspace cleanup
-cases, partial scratch-image recovery and WFP enforcement/removal all passed.
-The [expanded run at `887d9b2`](https://github.com/CharlesDerek/lab/actions/runs/40212737483)
-passed seven of eight, including all three owner-crash boundaries, live-owner
-refusal and idempotent network-policy recovery. The full scratch worker rejected
-its canonical verbatim DOS state path before image creation. Internal scratch
-and cleanup requests now accept that local path form while continuing to reject
-UNC/device namespaces, traversal, alternate streams and ambiguous components.
-Public response paths keep their existing syntax restrictions, and the worker
-still opens state through the pinned-directory and private-ACL checks. Native
-scratch formatting, capacity enforcement and complete cleanup remain pending.
-The [run at `cfe231b`](https://github.com/CharlesDerek/lab/actions/runs/40213187210)
-accepted the corrected request and created the image, then refused its reported
-identity/allocation/capacity metadata before attachment. Diagnostics now report
-the numeric fields and identity-match results, without image paths or random
-identifiers. The [diagnostic run at `c5d288d`](https://github.com/CharlesDerek/lab/actions/runs/40213574414)
-reported matching identity, fixed subtype, capacity and sectors, with block size
-zero. Creation now requests the fixed-disk default and verification requires
-zero, consistent with Microsoft's [fixed-VHDX sample](https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/Hyper-V/Storage/cpp/CreateVirtualDisk.cpp).
-Identity, fixed subtype, capacity, backing-size and sector checks remain exact.
-The [run at `6680d18`](https://github.com/CharlesDerek/lab/actions/runs/40214135694)
-passed nine of eleven: image identity/capacity and detached-recovery controls,
-plus attachment release after owner exit, now passed natively. Both the GPT and
-full worker tests stopped at the pre-initialization layout guard. The returned
-style/count and first-entry ranges are reported without device paths or IDs.
-The [run at `e895a42`](https://github.com/CharlesDerek/lab/actions/runs/40214514702)
-identified an empty MBR representation with zero entries. Initialization now
-accepts RAW or MBR only with zero entries, and additionally reads the first and
-last 64 KiB through the owned disk handle and requires every byte to be zero.
-The GPT fixture injects nonzero primary and backup header data into separate
-fresh images and requires refusal before running its successful-path checks.
-Partition creation and full worker capacity/cleanup remain unverified.
-This gate does not establish signed
-minifilter prevention, complete scanner confinement or hostile-administrator
-tamper resistance.
+and task cleanup using mocked commands. The [hosted run at `0e62f80`](https://github.com/CharlesDerek/lab/actions/runs/40215113681)
+passed nine of eleven checks on Windows Server 2022 as LocalSystem in session
+zero. The retained report was checked against its source commit and input-manifest
+hash. Scanner startup/cleanup, private-state access, both workspace cleanup cases,
+partial-image recovery, WFP enforcement/removal, recovery after owner crashes,
+fixed-image checks and attachment release after owner exit passed. The GPT and
+full worker tests stopped because the generic VHDX identifier changed after a
+payload write; formatting, capacity enforcement and complete cleanup remain
+unverified.
+
+Image creation and verification now use `VirtualDiskId`, matching Microsoft's
+[VHDX identity implementation](https://github.com/microsoft/go-winio/blob/main/vhd/vhd.go).
+The journal-derived identity is set only immediately after successful creation,
+before attachment or marking the image ready. Inspection and recovery only read
+and compare it; they never repair an existing identity. The native fixture checks
+that changing this metadata invalidates both live checks and detached recovery,
+and that payload writes preserve the binding. These new checks await execution.
+
+Internal worker requests accept canonical verbatim DOS paths, with pinned-directory
+and private-ACL checks, while rejecting UNC/device namespaces, traversal, alternate
+streams and ambiguous components. Fixed VHDX creation requests and verifies block
+size zero, as in Microsoft's [fixed-VHDX sample](https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/Hyper-V/Storage/cpp/CreateVirtualDisk.cpp).
+Provider, fixed subtype, capacity, backing-size and sector checks remain exact.
+Initialization requires RAW or MBR with zero entries and zero-filled first and
+last 64 KiB, read through the owned physical-disk handle. Separate fresh images
+with nonzero primary or backup header data must be refused before the GPT fixture
+exercises successful initialization and volume discovery.
+
+This gate does not establish signed minifilter prevention, complete scanner
+confinement or hostile-administrator tamper resistance.

@@ -92,6 +92,24 @@ fn fixed_image_capacity_identity_and_detached_recovery_are_verified() {
     }
     let fresh = f.create();
     fresh.0.verify().unwrap();
+    // Mutating metadata on this test-owned image must invalidate both live
+    // checks and read-only recovery. Only the fixture restores it afterward.
+    for kind in [Identifier::Disk, Identifier::Image] {
+        let identity = SET_VIRTUAL_DISK_INFO {
+            Version: SET_VIRTUAL_DISK_INFO_VIRTUAL_DISK_ID,
+            Anonymous: SET_VIRTUAL_DISK_INFO_0 {
+                VirtualDiskId: guid(&f.spec, kind),
+            },
+        };
+        check(unsafe { SetVirtualDiskInformation(fresh.0.handle.as_raw_handle(), &identity) })
+            .unwrap();
+        let expected = matches!(kind, Identifier::Image);
+        assert_eq!(fresh.0.verify().is_ok(), expected);
+        assert_eq!(
+            require_detached(f.directory(), f.spec.clone()).is_ok(),
+            expected
+        );
+    }
     let original_size = std::fs::metadata(f.directory().path().join(IMAGE))
         .unwrap()
         .len();
@@ -105,6 +123,16 @@ fn fixed_image_capacity_identity_and_detached_recovery_are_verified() {
     );
     let attached = fresh.attach().unwrap();
     no_thread_impersonation();
+    attached.verify().unwrap();
+    // A payload write changes the VHDX data identifier, but must preserve the
+    // image binding through live verification and subsequent detached recovery.
+    use std::os::windows::fs::FileExt;
+    let marker = [0x5au8; 512];
+    assert_eq!(
+        attached.physical.seek_write(&marker, 2 * MIB).unwrap(),
+        marker.len()
+    );
+    attached.physical.sync_all().unwrap();
     attached.verify().unwrap();
     assert!(require_detached(f.directory(), f.spec.clone()).is_err());
     assert!(std::fs::rename(
