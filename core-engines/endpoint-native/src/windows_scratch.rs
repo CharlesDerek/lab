@@ -330,13 +330,13 @@ impl FreshDisk {
             "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)",
         )?)
     }
-    /// Allow this logon to traverse the volume device namespace. The filesystem
-    /// root and scratch child enforce their own separate permissions. No raw
-    /// device data, attribute or security rights are granted to the scanner.
+    /// Permit namespace traversal and the read-attributes/synchronize rights
+    /// implicit in Win32 opens. The filesystem enforces separate scratch rights.
+    /// No raw device data or attribute/security mutation rights are granted.
     pub fn attach_for_scanner(self, logon: &str) -> Result<AttachedDisk> {
         validate_logon(logon)?;
         self.attach_with_security(windows_scanner::descriptor(&format!(
-            "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x20;;;{logon})"
+            "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x1000a0;;;{logon})"
         ))?)
     }
     fn attach_with_security(self, security: windows_scanner::Allocation) -> Result<AttachedDisk> {

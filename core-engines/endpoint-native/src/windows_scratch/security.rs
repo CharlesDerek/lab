@@ -10,10 +10,10 @@ use windows_sys::Win32::Security::{
 };
 pub(super) fn root(logon: &str) -> Result<windows_scanner::Allocation> {
     validate_logon(logon)?;
-    // The restricted scanner must reach its child without listing or changing
-    // the volume root. This grant applies only to the root, never descendants.
+    // Win32 opens also request READ_ATTRIBUTES and SYNCHRONIZE. Permit those
+    // with traversal, never root listing or mutation. This ACE does not inherit.
     windows_scanner::descriptor(&format!(
-        "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x20;;;{logon})S:(ML;;NW;;;ME)"
+        "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1000a0;;;{logon})S:(ML;;NW;;;ME)"
     ))
 }
 pub(super) fn scratch(logon: &str) -> Result<windows_scanner::Allocation> {
