@@ -562,16 +562,18 @@ fn scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_s
     assert_eq!(&datagram[..size], b"denied");
     fs::remove_file(&result).unwrap();
     let installer = command("network-install", &state.path().join("unused"));
+    let installed = run_with_input(
+        &installer,
+        Duration::from_secs(20),
+        8192,
+        &serde_json::to_vec(&policy).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        run_with_input(
-            &installer,
-            Duration::from_secs(20),
-            8192,
-            &serde_json::to_vec(&policy).unwrap()
-        )
-        .unwrap()
-        .0,
-        0
+        installed.0,
+        0,
+        "network installer failed: {}",
+        String::from_utf8_lossy(&installed.1)
     );
     let engine = Engine::open().unwrap();
     engine.verify(&policy).unwrap();

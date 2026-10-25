@@ -179,8 +179,12 @@ reach `main`; adding only `WINSTA_CREATEDESKTOP` or granting full desktop rights
 did not. The station now includes the observed required right, while retaining
 the desktop-creation and owner/ACL/deletion refusals. This grant applies only to
 the new private station; the scanner has no shutdown privilege, and the change
-grants no access to a shared service or interactive station. Full launch, cleanup and WFP
-validation of this correction is still required.
+grants no access to a shared service or interactive station. The subsequent
+[native run](https://github.com/CharlesDerek/lab/actions/runs/40209982809) passed the
+normal scanner launch with checked identity and job limits, assigned desktop,
+cross-logon denials, final desktop cleanup and failed ownership-callback cleanup.
+The network control also passed under the same reduced token before policy installation.
+Policy installation still fails; WFP enforcement remains unverified.
 
 A fresh workspace contains copies of the executable, adjacent DLLs and flat
 signature files, with a combined 768 MiB staging budget and at most 256 source

@@ -237,10 +237,15 @@ impl Engine {
             ..Default::default()
         };
         // A collision never adopts an existing object or commits a partial set.
-        check(unsafe { FwpmSubLayerAdd0(self.0, &layer, security.0) })?;
+        check(unsafe { FwpmSubLayerAdd0(self.0, &layer, security.0) })
+            .map_err(|error| format!("Scanner network sublayer installation: {error}"))?;
         for ordinal in 0..RULES.len() {
             with_filter(policy, ordinal, |filter| {
-                check(unsafe { FwpmFilterAdd0(self.0, filter, security.0, null_mut()) })
+                check(unsafe { FwpmFilterAdd0(self.0, filter, security.0, null_mut()) }).map_err(
+                    |error| {
+                        format!("Scanner network filter {ordinal} installation: {error}").into()
+                    },
+                )
             })?;
         }
         transaction.commit()?;
