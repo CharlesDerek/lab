@@ -10,6 +10,19 @@ use protocol::{Action, Command, EndpointEvent, Enrollment, Heartbeat, Platform, 
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
+pub(crate) fn windows_process_change(
+    change: &protocol::windows_process_events::WindowsProcessChange,
+) -> &'static str {
+    use protocol::windows_process_events::WindowsProcessChange;
+    match change {
+        WindowsProcessChange::Start => "start",
+        WindowsProcessChange::End => "end",
+        WindowsProcessChange::RundownStart => "rundown start (existing process)",
+        WindowsProcessChange::RundownEnd => "rundown end (existing process)",
+        WindowsProcessChange::Defunct => "defunct (source-specific report)",
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct Endpoint {
     pub id: String,
@@ -309,6 +322,10 @@ impl Engine {
                 Some(Telemetry::WindowsAuthentication { event }) => Some(event),
                 _ => None,
             };
+            let windows_process = match &event.telemetry {
+                Some(Telemetry::WindowsProcessEvent { event }) => Some(event),
+                _ => None,
+            };
             let authentication_outcome = authentication
                 .and_then(|a| a.service_outcome())
                 .or_else(|| windows_authentication.and_then(|a| a.service_outcome()));
@@ -368,6 +385,14 @@ impl Engine {
                     "Windows NewCredentials session; outbound credential authentication is not established. Caller and target account remain separate, and original XML is retained"
                 }.into();
             }
+            if let Some(process) = windows_process {
+                context.program = "Windows kernel ETW".into();
+                context.pid = Some(process.pid);
+                context.summary = format!(
+                    "Windows ETW {}; collector QPC estimate. Reported PID/key do not verify current process, image, lifetime or ancestry.",
+                    windows_process_change(&process.change)
+                );
+            }
             let object = match &event.telemetry {
                 Some(Telemetry::NetworkEvent { event, .. }) => {
                     format!("{}:{}", event.protocol.label(), event.original.destination)
@@ -380,6 +405,9 @@ impl Engine {
                     .source_ip
                     .map(|ip| ip.to_string())
                     .unwrap_or_else(|| "local-authentication".into()),
+                Some(Telemetry::WindowsProcessEvent { event }) => protocol::hash(
+                    format!("{id}:windows-process-observation:{}", event.event_id()).as_bytes(),
+                ),
                 Some(Telemetry::ProcessEvent {
                     boot_id,
                     stream_id,
@@ -447,7 +475,7 @@ impl Engine {
                 object,
                 kind: match event.kind.as_str() {
                     "malware" => Kind::Malware,
-                    "process" | "process_event" => Kind::Process,
+                    "process" | "process_event" | "windows_process_event" => Kind::Process,
                     "connection" | "network_event" => Kind::Network,
                     "authentication" => Kind::Authentication,
                     _ => Kind::System,

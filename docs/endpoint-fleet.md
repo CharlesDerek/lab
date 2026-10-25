@@ -669,13 +669,63 @@ session, exit status and process-key fields. Rundown cannot satisfy the lifecycl
 check. The fixture also requires zero source/callback losses, unchanged token
 state, removal of the owned session and completion of its consumer thread.
 
-This gate establishes source behavior only when it passes; it does not implement
+This gate establishes source behavior only when it passes; it does not validate
 continuous Windows process collection, durable delivery, rollout coverage or PID
 reuse tracking. The public `process-source-validation.json` keeps
 `proof_scope: "source_only"` and `production_readiness: false`. It contains fixed
 status/failure categories and structural schema fingerprints. Raw events,
 command lines, account data and kernel addresses stay on the disposable VM;
 only the public report and its input manifest are uploaded.
+
+### Windows process-event collection
+
+The separate `windows_process_events` telemetry option defaults to false. Enable
+it alongside `telemetry.enabled` only on Windows, after upgrading the server;
+`run --once` is refused. The collector uses a private named ETW system logger,
+with durable ownership intent recorded before session creation. Restart recovery
+checks the recorded session identity and original owner's process creation time
+before reclaiming an orphan. It refuses a foreign session, a live owner or an
+impersonated caller. It does not change token privileges or configure the global
+kernel logger.
+
+Start, end, rundown start, rundown end and defunct reports remain distinct
+observations. The parser accepts bounded classic process versions 2–4 with
+explicit 32/64-bit layout flags; unknown layouts and malformed records become
+visible rejection counters. The native source experiment has exercised version
+4 with 64-bit layout; the other layouts have portable synthetic coverage only.
+Reported PID, parent PID, SID, image bytes and process-object key do not establish
+verified executable identity, ancestry or a process incarnation. ANSI image bytes
+remain hexadecimal bytes rather than a guessed path or code-page conversion.
+
+Each admitted original preserves semantic ETW header/context fields, extended
+data and payload bytes, bound to a collector stream and receipt ordinal. Native
+pointers and padding are excluded; the payload itself can contain kernel
+addresses, command lines and account information. Original export therefore
+requires authenticated operator access. A bracketed local QPC/UTC sample provides
+a qualified timestamp estimate. Its displayed uncertainty describes sampling
+and quantization, not wall-clock correction, drift or cross-host accuracy.
+
+Originals and health commit together in the local durable queue. Committed events
+retain their IDs through delivery retries and restart; live ETW has no source
+replay cursor. Restart intervals, native loss counters, callback drops, rejected
+records and full-queue drops leave persistent incomplete coverage. Windows process
+health appears separately from Linux process events, and configured rollout
+requirements for agents, controllers and engines require that source to remain
+present, fresh and healthy.
+
+The independent `windows-process-events` CI gate exercises the release agent as
+well as collector components on a disposable LocalSystem/session-zero worker.
+It requires actual controlled lifecycles and rundown, native TDH agreement with
+the portable decoder for PID, parent, session, exit status, process key and pointer
+width, stalled HTTP, bounded queue loss, forced agent termination,
+orphan recovery, committed-original replay, authenticated export, portal coverage,
+server restart and checked cleanup. These requirements describe the gate; native
+acceptance is established only by a successful run on the exact source revision.
+Its public report keeps `proof_scope: "component_and_agent"` and
+`production_readiness: false`. Only fixed result categories, numeric API diagnostics
+and the exact input hashes are uploaded. Raw originals, worker reports, commands
+and logs remain on the disposable VM. This fixture does not establish sustained
+fleet reliability, lossless coverage or production signing and tamper resistance.
 
 ## Storage lifecycle and recovery
 

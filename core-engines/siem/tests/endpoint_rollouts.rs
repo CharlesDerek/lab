@@ -76,6 +76,7 @@ impl Fixture {
             collector: Some(CollectorHealth {
                 network_events: None,
                 process_events: None,
+                windows_process_events: None,
                 authentication: None,
                 windows_authentication: None,
                 mode: "snapshot".into(),
@@ -608,6 +609,95 @@ fn agent_and_controller_rollouts_keep_the_reviewed_authentication_requirement() 
                 assert_eq!(record.state, "failed");
                 assert!(record.members[1].deployment_id.is_none());
             }
+        }
+    }
+}
+
+#[test]
+fn agent_and_controller_rollouts_pin_windows_process_coverage_and_stop_after_a_gap() {
+    for component in [wire::Component::Agent, wire::Component::Controller] {
+        for failure in 0..4 {
+            let mut f = Fixture::new_component(2, component);
+            let t = f.now;
+            let windows = p::windows_process_events::WindowsProcessEventHealth {
+                stream_id: "c".repeat(64),
+                state: "active".into(),
+                started_ms: t - 60_000,
+                checked_ms: t,
+                subscriptions: 1,
+                ..Default::default()
+            };
+            f.health.collector.as_mut().unwrap().windows_process_events = Some(windows);
+            for index in 0..2 {
+                f.beat(index, "ready", t);
+            }
+            let id = f.propose();
+            assert!(f
+                .engine
+                .endpoint_rollout(&id)
+                .unwrap()
+                .plan
+                .gates
+                .iter()
+                .all(|gate| gate.windows_process_events && !gate.process_events));
+            f.review(&id, "approve", t);
+            f.engine.tick_endpoint_rollouts(t + 1000).unwrap();
+            f.complete(0, t + 2000);
+            f.beat(0, "installed", t + 3000);
+            let mut bad = f.health_at("installed", t + 4000);
+            let collector = bad.collector.as_mut().unwrap();
+            collector.process_events = Some(p::process_events::ProcessEventHealth {
+                boot_id: "a".repeat(64),
+                stream_id: "b".repeat(64),
+                state: "active".into(),
+                started_ms: t,
+                checked_ms: t + 4000,
+                subscriptions: 1,
+                received_events: 0,
+                dropped_events: 0,
+                loss_signals: 0,
+                error: String::new(),
+            });
+            if failure == 0 {
+                collector.windows_process_events = None;
+            } else {
+                let source = collector.windows_process_events.as_mut().unwrap();
+                match failure {
+                    1 => source.events_lost = 1,
+                    2 => source.checked_ms = t - 30_001,
+                    _ => {
+                        source.subscriptions = 2;
+                        source.loss_signals = 1;
+                        source.state = "active".into();
+                        source.error.clear();
+                    }
+                }
+            }
+            f.engine
+                .endpoint_heartbeat(&f.ids[0], &bad, t + 4000)
+                .unwrap();
+            let record = f.engine.endpoint_rollout(&id).unwrap();
+            assert_eq!(record.state, "failed");
+            assert!(record.members[1].deployment_id.is_none());
+            f.health
+                .collector
+                .as_mut()
+                .unwrap()
+                .windows_process_events
+                .as_mut()
+                .unwrap()
+                .checked_ms = t + 65_000;
+            for index in 0..2 {
+                f.beat(
+                    index,
+                    if index == 0 { "installed" } else { "ready" },
+                    t + 65_000,
+                );
+            }
+            f.engine.tick_endpoint_rollouts(t + 65_000).unwrap();
+            let record = f.engine.endpoint_rollout(&id).unwrap();
+            assert_eq!(record.state, "failed");
+            assert!(record.members[1].deployment_id.is_none());
         }
     }
 }

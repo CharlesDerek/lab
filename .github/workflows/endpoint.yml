@@ -46,6 +46,8 @@ on:
       - 'tools/test_windows_service_ci.py'
       - 'tools/verify_windows_isolation_ci.ps1'
       - 'tools/test_windows_isolation_ci.py'
+      - 'tools/verify_windows_process_events_ci.ps1'
+      - 'tools/test_windows_process_events_ci.py'
       - 'tools/test_verification_guards.py'
       - 'tools/verify_ecosystem_recovery.py'
       - 'Cargo.toml'
@@ -143,6 +145,50 @@ jobs:
           path: |
             ${{ runner.temp }}/native-windows-process-source/inputs.json
             ${{ runner.temp }}/native-windows-process-source/process-source-validation.json
+          if-no-files-found: warn
+  windows-process-events:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify process-event evidence and privileged task failure handling
+        run: |
+          python tools/test_windows_service_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Task runner control-flow tests failed' }
+          python tools/test_windows_process_events_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Process-event evidence tests failed' }
+      - name: Build release agent and select exact process-event test executable
+        shell: pwsh
+        env:
+          CARGO_PROFILE_TEST_DEBUG: 0
+          CARGO_PROFILE_RELEASE_DEBUG: 0
+        run: |
+          cargo build --locked --release -p athernex-endpoint
+          if ($LASTEXITCODE -ne 0) { throw 'Process-event release agent build failed' }
+          cargo test --locked --no-run --lib -p athernex-endpoint --message-format=json > "$env:RUNNER_TEMP/process-events-build.jsonl"
+          if ($LASTEXITCODE -ne 0) { throw 'Process-event test build failed' }
+          $records = Get-Content -LiteralPath "$env:RUNNER_TEMP/process-events-build.jsonl" | ForEach-Object { $_ | ConvertFrom-Json }
+          $matches = @($records | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -ceq 'athernex_endpoint' -and $_.profile.test -eq $true -and $_.executable })
+          if ($matches.Count -ne 1) { throw 'Expected one endpoint test executable' }
+          ('PROCESS_EVENTS_ENDPOINT_TESTS=' + $matches[0].executable) >> $env:GITHUB_ENV
+      - name: Verify process-event capture, agent crash recovery and original export as LocalSystem
+        timeout-minutes: 15
+        shell: pwsh
+        run: tools/verify_windows_process_events_ci.ps1 -AgentExecutable target/release/athernex-endpoint.exe -EndpointTests "$env:PROCESS_EVENTS_ENDPOINT_TESTS" -OutputDirectory "$env:RUNNER_TEMP/native-windows-process-events" -DisposableHost
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-windows-process-events
+          # Exact public projection only. Commands, original events, addresses,
+          # logger names, private reports and captured streams stay on the VM.
+          path: |
+            ${{ runner.temp }}/native-windows-process-events/inputs.json
+            ${{ runner.temp }}/native-windows-process-events/process-events-validation.json
           if-no-files-found: warn
   windows-isolation:
     runs-on: windows-2022

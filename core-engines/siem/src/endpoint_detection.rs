@@ -103,7 +103,7 @@ fn identity(endpoint: &str, boot: &str, pid: u32, started: u64) -> String {
 fn boot(item: &Telemetry) -> Option<&str> {
     match item {
         Telemetry::Authentication { event } => Some(&event.journal.boot_id),
-        Telemetry::WindowsAuthentication { .. } => None,
+        Telemetry::WindowsAuthentication { .. } | Telemetry::WindowsProcessEvent { .. } => None,
         Telemetry::Process { boot_id, .. }
         | Telemetry::Connection { boot_id, .. }
         | Telemetry::ProcessEvent { boot_id, .. }

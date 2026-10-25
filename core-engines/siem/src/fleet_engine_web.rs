@@ -482,6 +482,16 @@ async fn portal(
                     .unwrap_or(0)
             )
             .unwrap();
+            if plan
+                .request
+                .endpoint_ids
+                .iter()
+                .position(|id| id == &member.endpoint_id)
+                .and_then(|index| plan.gates.get(index))
+                .is_some_and(|gate| gate.windows_process_events)
+            {
+                html.push_str("<p>Required: healthy Windows ETW process coverage; Linux process coverage cannot replace this source.</p>");
+            }
         }
         if permitted {
             let actions: &[&str] = match rollout.state.as_str() {

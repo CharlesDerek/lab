@@ -746,7 +746,7 @@ class IsolationRunnerTests(unittest.TestCase):
 
     def test_process_workflow_uploads_only_bound_source_proof_projection(self):
         workflow = SCRIPT.parent.parent/'.github/workflows/endpoint.yml'
-        job = workflow.read_text().split('  windows-process-source:\n', 1)[1].split('  windows-isolation:\n', 1)[0]
+        job = workflow.read_text().split('  windows-process-source:\n', 1)[1].split('  windows-process-events:\n', 1)[0]
         self.assertIn('-Suite ProcessSource', job)
         self.assertIn('Source proof only: no production collector or replay support claim.', job)
         self.assertIn('-DisposableHost', job)

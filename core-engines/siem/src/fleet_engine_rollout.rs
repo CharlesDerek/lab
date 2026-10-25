@@ -206,6 +206,10 @@ impl Engine {
                     .collector
                     .as_ref()
                     .is_some_and(|c| c.process_events.is_some()),
+                windows_process_events: health
+                    .collector
+                    .as_ref()
+                    .is_some_and(|c| c.windows_process_events.is_some()),
                 authentication: health
                     .collector
                     .as_ref()

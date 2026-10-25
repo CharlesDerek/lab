@@ -133,7 +133,7 @@ async fn portal(
                 .zip(member.last_healthy_ms)
                 .map(|(first, last)| last.saturating_sub(first) / 1000)
                 .unwrap_or(0);
-            write!(html,"<article><h3>{} · group {}</h3><p>{} · observed healthy {} / {} seconds</p><p>Required: {}{}{}{} and update health</p><a href='/endpoints/{}'>Device evidence</a><details><summary>Device identity</summary><code>{}</code></details></article>",escape(name),member.cohort+1,escape(member.deployment_state.as_deref().unwrap_or("waiting for group")),observed,request.observe_secs,if plan.gates[index].protection_fingerprint.is_some(){"native protection, "}else{""},if plan.gates[index].collector{"collection, "}else{""},if plan.gates[index].signatures{"signatures, "}else{""},plan.component.label(),member.endpoint_id,member.endpoint_id).unwrap();
+            write!(html,"<article><h3>{} · group {}</h3><p>{} · observed healthy {} / {} seconds</p><p>Required: {}{}{}{}{} and update health</p><a href='/endpoints/{}'>Device evidence</a><details><summary>Device identity</summary><code>{}</code></details></article>",escape(name),member.cohort+1,escape(member.deployment_state.as_deref().unwrap_or("waiting for group")),observed,request.observe_secs,if plan.gates[index].protection_fingerprint.is_some(){"native protection, "}else{""},if plan.gates[index].collector{"collection, "}else{""},if plan.gates[index].windows_process_events{"Windows ETW process coverage, "}else{""},if plan.gates[index].signatures{"signatures, "}else{""},plan.component.label(),member.endpoint_id,member.endpoint_id).unwrap();
         }
         html.push_str("</details>");
         let actions: &[(&str, &str)] = match record.state.as_str() {

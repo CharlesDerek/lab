@@ -258,6 +258,26 @@ async fn observations_page(
                     ),
                 ]);
             }
+            if let protocol::telemetry::Telemetry::WindowsProcessEvent { event } = telemetry {
+                facts.extend([
+                    ("Windows ETW change", crate::fleet::windows_process_change(&event.change).into()),
+                    ("Reported PID", event.pid.to_string()),
+                    ("Reported parent PID", event.parent_pid.to_string()),
+                    ("Reported session", event.session_id.to_string()),
+                    ("Reported process key", event.unique_process_key.to_string()),
+                    ("Reported exit status", event.exit_status.to_string()),
+                    ("Reported SID", event.user_sid.clone().unwrap_or_else(|| "Not reported".into())),
+                    ("Reported image bytes (hex)", event.image_name_bytes_hex.clone()),
+                    ("Reported command line", event.command_line.clone()),
+                    ("Subscription", event.original.stream_id.clone()),
+                    ("Collector receipt sequence", event.original.receipt_sequence.to_string()),
+                    ("Source QPC ticks", event.original.header.timestamp_qpc.to_string()),
+                    ("QPC frequency (Hz)", event.original.clock.frequency_hz.to_string()),
+                    ("Time qualification", format!("Collector QPC estimate; sample-bracket and rounding uncertainty {} ms, excluding wall-clock changes or drift. Not a kernel UTC timestamp or verified process start time", event.time_uncertainty_ms)),
+                    ("Attribution", "Reported PID, parent, SID, key and image bytes do not establish current process identity, executable path/hash, ancestry or a verified process lifetime".into()),
+                    ("Original EVENT_RECORD", "Retained header, buffer context, extended data, payload and QPC clock anchor are included in the original observation JSON".into()),
+                ]);
+            }
             if let protocol::telemetry::Telemetry::Connection { connection, .. } = telemetry {
                 facts.extend([
                     ("Protocol", connection.protocol.to_uppercase()),
@@ -482,6 +502,9 @@ async fn portal(State(app): State<App>) -> Result<Html<String>, WebError> {
             }
             if let Some(events) = &c.process_events {
                 write!(content,"<p>Kernel process events: {} · {} received · {} dropped · {} loss notifications · {} subscriptions</p><p>Current subscription began {} UTC. Activity outside subscription windows is not observed.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_events,events.dropped_events,events.loss_signals,events.subscriptions,crate::render::time(events.started_ms),escape(&events.error)).unwrap();
+            }
+            if let Some(events) = &c.windows_process_events {
+                write!(content,"<p>Windows ETW process events: {} · {} received · {} admitted · {} rejected · {} loss notifications</p><p>Collection began {} UTC. Live source only; collector restarts and gaps have no ETW source replay. Reported identifiers do not establish verified process lifetimes.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_records,events.admitted_records,events.rejected_records,events.loss_signals,crate::render::time(events.started_ms),escape(&events.error)).unwrap();
             }
         }
         if let Some(p) = &endpoint.health.protection {

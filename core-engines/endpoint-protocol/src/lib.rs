@@ -11,6 +11,7 @@ pub mod protection;
 pub mod telemetry;
 pub mod update;
 pub mod windows_authentication;
+pub mod windows_process_events;
 
 pub const PROTOCOL: u32 = 1;
 pub const MAX_EVENTS: usize = 64;
@@ -330,6 +331,7 @@ impl EndpointEvent {
                 "process_event",
                 "network_event",
                 "authentication",
+                "windows_process_event",
             ]
             .contains(&self.kind.as_str())
             || self.path.len() > 1024
@@ -355,6 +357,13 @@ impl EndpointEvent {
                     );
                 }
             }
+            if let telemetry::Telemetry::WindowsProcessEvent { event } = telemetry {
+                if self.id != event.event_id() || self.time_ms != event.time_ms {
+                    return Err(
+                        "Windows process envelope does not match original identity/time".into(),
+                    );
+                }
+            }
             if telemetry.kind() != self.kind {
                 return Err("Telemetry kind does not match event".into());
             }
@@ -371,6 +380,7 @@ impl EndpointEvent {
             "process_event",
             "network_event",
             "authentication",
+            "windows_process_event",
         ]
         .contains(&self.kind.as_str())
         {

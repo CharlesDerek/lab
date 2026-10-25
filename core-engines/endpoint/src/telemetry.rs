@@ -3,6 +3,7 @@ mod authentication;
 mod network_events;
 mod process_events;
 mod windows_authentication;
+mod windows_process_events;
 #[cfg(all(test, windows))]
 mod windows_process_events_probe;
 use crate::Process as Command;
@@ -32,6 +33,8 @@ pub struct TelemetryConfig {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub windows_authentication: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub windows_process_events: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linux_network_events: bool,
 }
 impl Default for TelemetryConfig {
@@ -42,12 +45,16 @@ impl Default for TelemetryConfig {
             linux_process_events: false,
             linux_authentication: false,
             windows_authentication: false,
+            windows_process_events: false,
             linux_network_events: false,
         }
     }
 }
 impl TelemetryConfig {
     pub fn validate(&self) -> Result<()> {
+        if self.windows_process_events && (!self.enabled || !cfg!(windows)) {
+            return Err("Windows process collection requires enabled telemetry on Windows".into());
+        }
         if self.windows_authentication && (!self.enabled || !cfg!(windows)) {
             return Err("Windows Security collection requires enabled telemetry on Windows".into());
         }
@@ -331,6 +338,27 @@ pub fn health(store: &Store, config: &TelemetryConfig) -> Result<CollectorHealth
                 "Windows Security collector is unavailable, stale or catching up".into()
             });
     }
+    status.windows_process_events = if config.windows_process_events {
+        windows_process_events::health(store)?
+    } else {
+        None
+    };
+    if config.windows_process_events
+        && !status
+            .windows_process_events
+            .as_ref()
+            .is_some_and(|h| h.healthy(now_ms()))
+    {
+        status.incomplete = true;
+        status.error = status
+            .windows_process_events
+            .as_ref()
+            .map(|h| h.error.clone())
+            .filter(|error| !error.is_empty())
+            .unwrap_or_else(|| {
+                "Windows process collection is unavailable, stale or has a coverage gap".into()
+            });
+    }
     status.network_events = if config.linux_network_events {
         network_events::health(store)?
     } else {
@@ -360,6 +388,7 @@ fn item_key(item: &Telemetry) -> Result<String> {
         Telemetry::NetworkEvent { .. }
         | Telemetry::ProcessEvent { .. }
         | Telemetry::WindowsAuthentication { .. }
+        | Telemetry::WindowsProcessEvent { .. }
         | Telemetry::Authentication { .. } => {
             return Err("Kernel events must not enter the snapshot comparison cache".into())
         }
@@ -492,6 +521,7 @@ pub fn commit_snapshot(store: &Store, snapshot: &Snapshot) -> Result<CollectorHe
         process_events: None,
         authentication: None,
         windows_authentication: None,
+        windows_process_events: None,
         mode: "snapshot".into(),
         last_attempt_ms: now,
         last_success_ms: if snapshot.process_complete && snapshot.connection_complete {
@@ -647,6 +677,7 @@ pub struct ContinuousCollector<'a> {
     events: Option<process_events::Collector<'a>>,
     authentication: Option<authentication::Collector<'a>>,
     windows_authentication: Option<windows_authentication::Collector<'a>>,
+    windows_process_events: Option<windows_process_events::Collector<'a>>,
     network: Option<network_events::Collector<'a>>,
     owner: PhantomData<&'a Store>,
 }
@@ -676,6 +707,11 @@ impl<'a> ContinuousCollector<'a> {
         } else {
             None
         };
+        let windows_process_events = if policy.windows_process_events {
+            Some(windows_process_events::Collector::start(store)?)
+        } else {
+            None
+        };
         let events = if policy.linux_process_events {
             Some(process_events::Collector::start(store)?)
         } else {
@@ -701,6 +737,7 @@ impl<'a> ContinuousCollector<'a> {
             events,
             authentication,
             windows_authentication,
+            windows_process_events,
             network,
             owner: PhantomData,
         })
@@ -717,6 +754,9 @@ impl<'a> ContinuousCollector<'a> {
             authentication.check()?;
         }
         if let Some(events) = &self.events {
+            events.check()?;
+        }
+        if let Some(events) = &self.windows_process_events {
             events.check()?;
         }
         if self.worker.as_ref().is_some_and(|w| w.is_finished()) {
