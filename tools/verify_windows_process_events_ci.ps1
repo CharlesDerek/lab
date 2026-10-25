@@ -22,7 +22,10 @@ function Get-ProcessEventsStageNames {
 function Get-ProcessEventsFailureNames {
     @('configuration','ownership','source_start','source_stopped','native_loss','callback_loss',
       'normalization','durable_admission','controlled_lifecycle','rundown','tdh_mismatch','transport',
-      'replay','authorization','original_export','portal','cleanup','timeout','other')
+      'replay','authorization','original_export','portal','cleanup','timeout','other',
+      'tdh_schema_provenance','tdh_schema_identity','tdh_schema_bounds','tdh_schema_shape',
+      'tdh_property_missing','tdh_property_type','tdh_property_scalar','tdh_property_size',
+      'tdh_record_provenance','tdh_api','tdh_other','tdh_scalar_mismatch','tdh_expected_shape')
 }
 
 function Get-ProcessEventsMarkers([string]$Log, [string]$Prefix, [string[]]$Allowed) {
@@ -56,7 +59,7 @@ function Get-ProcessEventsDiagnostics([string]$Log) {
     $count = 0
     foreach ($line in $lines) {
         foreach ($operation in @('start_trace','open_trace','process_trace','query_trace','stop_trace',
-                                  'close_trace','token_query')) {
+                                  'close_trace','token_query','tdh_information','tdh_size','tdh_property')) {
             $pattern = '\A' + [regex]::Escape('ATHERNEX_PROCESS_EVENTS_DIAGNOSTIC=' + $operation + ':') + '(0|[1-9][0-9]{0,9})\z'
             $match = [regex]::Match($line, $pattern, [Text.RegularExpressions.RegexOptions]::CultureInvariant)
             [uint32]$code = 0
@@ -67,6 +70,30 @@ function Get-ProcessEventsDiagnostics([string]$Log) {
                 if ($count -ge 32) { return }
                 break
             }
+        }
+    }
+}
+
+function Get-ProcessEventsSchema([string]$Log) {
+    if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
+    try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
+    catch { return }
+    $count = 0
+    foreach ($line in $lines) {
+        $match = [regex]::Match($line,
+            '\AATHERNEX_PROCESS_EVENTS_SCHEMA=(1|2|3|4|39):(0|[1-9][0-9]{0,2}):(32|64):([1-9][0-9]?)\z',
+            [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        [byte]$version = 0
+        [byte]$properties = 0
+        if ($match.Success -and [byte]::TryParse($match.Groups[2].Value,
+            [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$version) -and
+            [byte]::TryParse($match.Groups[4].Value,
+            [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$properties) -and
+            $properties -ge 1 -and $properties -le 64) {
+            @{ opcode=[int]$match.Groups[1].Value; version=$version; pointer_bits=[int]$match.Groups[3].Value;
+                property_count=$properties }
+            $count += 1
+            if ($count -ge 16) { return }
         }
     }
 }
@@ -152,6 +179,7 @@ function Invoke-ProcessEventsWorkerChecks([string]$ProofDirectory, $Report) {
             $Report.process_events_stages = @(Get-ProcessEventsStages $log)
             $Report.process_events_failures = @(Get-ProcessEventsFailures $log)
             $Report.process_events_diagnostics = @(Get-ProcessEventsDiagnostics $log)
+            $Report.process_events_schema = @(Get-ProcessEventsSchema $log)
         } catch {
             $Report.error = 'native_worker_failed'
             throw 'Native process-event diagnostics could not be verified'
@@ -176,7 +204,7 @@ function Invoke-ProcessEventsWorker([string]$ProofDirectory, [bool]$AllowDisposa
     $report = @{ schema=1; suite='ProcessEvents'; native_windows_executed=$true; production_readiness=$false;
         proof_scope='component_and_agent'; manifest_sha256=$digest; user_sid='S-1-5-18'; session_id=0;
         windows_version=[Environment]::OSVersion.Version.ToString(); checks=[ordered]@{}; error=$null;
-        process_events_stages=@(); process_events_failures=@(); process_events_diagnostics=@() }
+        process_events_stages=@(); process_events_failures=@(); process_events_diagnostics=@(); process_events_schema=@() }
     $report.checks[(Get-ProcessEventsTest)] = 'not_verified'
     try { Invoke-ProcessEventsWorkerChecks $ProofDirectory $report }
     finally {
@@ -194,6 +222,7 @@ function Invoke-ProcessEventsEvidence([string]$ProofDirectory, [string]$ProofTas
     $public = @{ schema=1; suite='ProcessEvents'; proof_scope='component_and_agent'; production_readiness=$false;
         manifest_sha256=$ManifestSha256; native_process_events_validation_passed=$false;
         stages=@(); process_events_stages=@(); process_events_failures=@(); process_events_diagnostics=@();
+        process_events_schema=@();
         checks=[ordered]@{}; error='native_process_events_not_verified' }
     $public.checks[(Get-ProcessEventsTest)] = 'not_verified'
     try {
@@ -220,6 +249,7 @@ function Invoke-ProcessEventsEvidence([string]$ProofDirectory, [string]$ProofTas
     $public.process_events_stages = @(Get-ProcessEventsStages $log)
     $public.process_events_failures = @(Get-ProcessEventsFailures $log)
     $public.process_events_diagnostics = @(Get-ProcessEventsDiagnostics $log)
+    $public.process_events_schema = @(Get-ProcessEventsSchema $log)
     if ($public.native_process_events_validation_passed) {
         try { Assert-ProcessEventsMarkers $public }
         catch {

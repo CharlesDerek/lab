@@ -722,8 +722,8 @@ orphan recovery, committed-original replay, authenticated export, portal coverag
 server restart and checked cleanup. These requirements describe the gate; native
 acceptance is established only by a successful run on the exact source revision.
 Its public report keeps `proof_scope: "component_and_agent"` and
-`production_readiness: false`. Only fixed result categories, numeric API diagnostics
-and the exact input hashes are uploaded. Raw originals, worker reports, commands
+`production_readiness: false`. Only fixed result categories, numeric API diagnostics,
+bounded structural schema metadata and the exact input hashes are uploaded. Raw originals, worker reports, commands
 and logs remain on the disposable VM. This fixture does not establish sustained
 fleet reliability, lossless coverage or production signing and tamper resistance.
 

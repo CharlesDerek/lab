@@ -28,10 +28,98 @@ fn api(operation: &'static str, code: u32) -> Result<()> {
     if code == 0 {
         return Ok(());
     }
-    if operation == "token_query" {
-        println!("\nATHERNEX_PROCESS_EVENTS_DIAGNOSTIC=token_query:{code}");
+    if matches!(
+        operation,
+        "token_query" | "tdh_information" | "tdh_size" | "tdh_property"
+    ) {
+        println!("\nATHERNEX_PROCESS_EVENTS_DIAGNOSTIC={operation}:{code}");
     }
     Err("Native fixture API failed")
+}
+fn tdh_failure(error: &str) -> &'static str {
+    match error {
+        "TDH schema provenance differs" => "tdh_schema_provenance",
+        "TDH schema event identity differs" => "tdh_schema_identity",
+        "TDH metadata size probe invalid"
+        | "TDH metadata exceeds bounds"
+        | "TDH metadata result invalid"
+        | "TDH property array exceeds buffer"
+        | "Invalid schema property name offset"
+        | "Schema property name empty"
+        | "Schema property name encoding invalid"
+        | "Schema property name invalid"
+        | "Schema property name unterminated"
+        | "Schema property name overlaps metadata array" => "tdh_schema_bounds",
+        "TDH property count exceeds flat schema budget"
+        | "Unsupported structured process schema"
+        | "Duplicate process property"
+        | "Schema fingerprint failed" => "tdh_schema_shape",
+        "Required process schema property missing" => "tdh_property_missing",
+        "Process schema property type differs" => "tdh_property_type",
+        "Process schema property is not scalar" => "tdh_property_scalar",
+        "TDH scalar property size differs"
+        | "Invalid scalar bytes"
+        | "Invalid pointer scalar bytes" => "tdh_property_size",
+        "Invalid native process provenance" | "Native process pointer width is ambiguous" => {
+            "tdh_record_provenance"
+        }
+        "Native fixture API failed" => "tdh_api",
+        _ => "tdh_other",
+    }
+}
+#[test]
+fn tdh_rejections_export_only_closed_categories() {
+    for (error, expected) in [
+        ("TDH schema provenance differs", "tdh_schema_provenance"),
+        ("TDH schema event identity differs", "tdh_schema_identity"),
+        ("TDH metadata result invalid", "tdh_schema_bounds"),
+        ("Duplicate process property", "tdh_schema_shape"),
+        (
+            "Required process schema property missing",
+            "tdh_property_missing",
+        ),
+        ("Process schema property type differs", "tdh_property_type"),
+        (
+            "Process schema property is not scalar",
+            "tdh_property_scalar",
+        ),
+        ("TDH scalar property size differs", "tdh_property_size"),
+        (
+            "Native process pointer width is ambiguous",
+            "tdh_record_provenance",
+        ),
+        ("Native fixture API failed", "tdh_api"),
+        ("unexpected\nprivate-value", "tdh_other"),
+        ("TDH schema provenance differs appended text", "tdh_other"),
+    ] {
+        assert_eq!(tdh_failure(error), expected);
+    }
+}
+fn differential(event: &WindowsProcessEvent, report: &schema::Report) {
+    let scalar_matches = event.pid == report.pid
+        && event.parent_pid == report.parent
+        && event.session_id == report.session
+        && event.exit_status == report.exit
+        && event.unique_process_key == report.key
+        && event.pointer_bits == report.pointer_bits;
+    let shape_matches = event.original.header.descriptor.version == 4
+        && event.pointer_bits == 64
+        && report.property_count == 12
+        && report.schema_hash.len() == 64;
+    if !scalar_matches || !shape_matches {
+        // Only bounded structural metadata is public. No payload values,
+        // PID, key, SID, command line or raw original enters this marker.
+        let descriptor = &event.original.header.descriptor;
+        println!(
+            "\nATHERNEX_PROCESS_EVENTS_SCHEMA={}:{}:{}:{}",
+            descriptor.opcode, descriptor.version, event.pointer_bits, report.property_count
+        );
+        fail(if !scalar_matches {
+            "tdh_scalar_mismatch"
+        } else {
+            "tdh_expected_shape"
+        });
+    }
 }
 fn safe<T, E>(value: std::result::Result<T, E>, category: &'static str) -> T {
     match value {
@@ -293,7 +381,8 @@ fn component(path: &Path) {
             safe(reader.check(), "source_stopped");
             for record in reader.batch() {
                 // Differential checks use native TDH before portable normalization.
-                let report = safe(schema::decode(&record), "tdh_mismatch");
+                let report =
+                    schema::decode(&record).unwrap_or_else(|error| fail(tdh_failure(error)));
                 if pids.contains(&report.pid) || report.pid == preexisting_pid {
                     let event = safe(
                         WindowsProcessEvent::from_original(
@@ -302,22 +391,7 @@ fn component(path: &Path) {
                         ),
                         "normalization",
                     );
-                    ensure(
-                        event.pid == report.pid
-                            && event.parent_pid == report.parent
-                            && event.session_id == report.session
-                            && event.exit_status == report.exit
-                            && event.unique_process_key == report.key
-                            && event.pointer_bits == report.pointer_bits,
-                        "tdh_mismatch",
-                    );
-                    ensure(
-                        event.original.header.descriptor.version == 4
-                            && event.pointer_bits == 64
-                            && report.property_count == 12
-                            && report.schema_hash.len() == 64,
-                        "tdh_mismatch",
-                    );
+                    differential(&event, &report);
                     if event.pid == preexisting_pid
                         && event.change == WindowsProcessChange::RundownStart
                     {
@@ -473,6 +547,7 @@ fn fill(state: &Path, remove: bool) {
 fn process_lifecycles_replay_with_visible_capture_gaps() {
     guard();
     println!("\nATHERNEX_PROCESS_EVENTS_STAGE=guard_verified");
+    tdh_rejections_export_only_closed_categories();
     let token_before = safe(token::snapshot(), "ownership");
     ensure(token_before.unimpersonated(), "ownership");
     let exe = PathBuf::from(
