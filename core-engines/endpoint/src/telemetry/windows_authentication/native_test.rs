@@ -6,6 +6,7 @@ use athernex_siem::{
     engine::Engine,
     web::{router, App},
 };
+use rusqlite::OptionalExtension;
 use std::{
     collections::BTreeMap,
     net::TcpListener,
@@ -17,14 +18,61 @@ use std::{
 mod host;
 
 #[track_caller]
-fn until(mut check: impl FnMut() -> bool) {
+fn until(check: impl FnMut() -> bool) {
+    until_or(check, || {});
+}
+#[track_caller]
+fn until_or(mut check: impl FnMut() -> bool, timeout: impl FnOnce()) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !check() {
-        assert!(
-            Instant::now() < deadline,
-            "Native Security fixture condition timed out"
-        );
+        if Instant::now() >= deadline {
+            timeout();
+            panic!("Native Security fixture condition timed out");
+        }
         thread::sleep(Duration::from_millis(20));
+    }
+}
+fn diagnose_capture_health(path: &Path) {
+    let status = (|| -> Result<Option<AuthenticationHealth>> {
+        let db = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        db.busy_timeout(Duration::from_secs(2))?;
+        let raw: Option<String> = db
+            .query_row(
+                "SELECT value FROM telemetry_metadata WHERE key='windows_authentication_health'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(raw.map(|value| serde_json::from_str(&value)).transpose()?)
+    })();
+    let status = match status {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            diagnostics::source("health_missing");
+            return;
+        }
+        Err(_) => {
+            diagnostics::source("health_read_failed");
+            return;
+        }
+    };
+    for (present, category) in [
+        (status.rejected_records > 0, "health_has_rejections"),
+        (status.loss_signals > 0, "health_has_loss"),
+        (!status.error.is_empty(), "health_has_error"),
+        (
+            !matches!(status.state.as_str(), "active" | "degraded"),
+            "health_state_inactive",
+        ),
+        (status.backpressure, "health_backpressure"),
+        (!status.caught_up, "health_not_caught_up"),
+    ] {
+        if present {
+            diagnostics::source(category);
+        }
     }
 }
 fn queued(path: &Path, account: &str) -> Vec<EndpointEvent> {
@@ -163,8 +211,10 @@ fn run(policy: &host::Policy, account: &host::Account) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
+    println!("\nATHERNEX_AUTH_STAGE=listener_ready");
     let config:Config=serde_json::from_value(serde_json::json!({"server":format!("http://{address}/"),"endpoint_id":"a".repeat(64),"credential":"b".repeat(64),"enrollment_token":null,"scanner":temp.path().join("absent-scanner"),"updater":temp.path().join("absent-updater"),"scan_roots":[temp.path()],"allow_scripts":false,"telemetry":{"enabled":true,"interval_secs":30,"windows_authentication":true}})).unwrap();
     let client = Client::new(config.clone()).unwrap();
+    println!("\nATHERNEX_AUTH_STAGE=client_ready");
     let listener = thread::scope(|scope| {
         let queue = &db;
         let controlled = scope.spawn(move || {
@@ -181,11 +231,29 @@ fn run(policy: &host::Policy, account: &host::Account) {
                     Err(_) => panic!("Controlled heartbeat did not arrive"),
                 }
             };
+            println!("\nATHERNEX_AUTH_STAGE=heartbeat_accepted");
             account.attempt(true);
+            println!("\nATHERNEX_AUTH_STAGE=allowed_attempt_verified");
             for _ in 0..8 {
                 account.attempt(false);
             }
-            until(|| queued(queue, &account.name).len() == 9);
+            println!("\nATHERNEX_AUTH_STAGE=denied_attempts_verified");
+            until_or(
+                || queued(queue, &account.name).len() == 9,
+                || {
+                    diagnostics::source("queue_wait_timeout");
+                    let count = queued(queue, &account.name).len();
+                    if count != 9 {
+                        diagnostics::source(match count {
+                            0 => "controlled_queue_empty",
+                            1..=8 => "controlled_queue_partial",
+                            _ => "controlled_queue_extra",
+                        });
+                    }
+                    diagnose_capture_health(queue);
+                },
+            );
+            println!("\nATHERNEX_AUTH_STAGE=controlled_queue_ready");
             drop(request);
             listener
         });
@@ -193,9 +261,17 @@ fn run(policy: &host::Policy, account: &host::Account) {
             client.cycle(&store).is_err(),
             "Controlled stalled heartbeat unexpectedly succeeded"
         );
+        println!("\nATHERNEX_AUTH_STAGE=stalled_cycle_verified");
         controlled.join().unwrap()
     });
-    until(|| health(&store).unwrap().unwrap().healthy(now_ms()));
+    until_or(
+        || health(&store).unwrap().unwrap().healthy(now_ms()),
+        || {
+            diagnostics::source("capture_health_timeout");
+            diagnose_capture_health(&db);
+        },
+    );
+    println!("\nATHERNEX_AUTH_STAGE=capture_health_verified");
     let preserved = queued(&db, &account.name);
     assert!(preserved.iter().filter(|e|matches!(&e.telemetry,Some(Telemetry::WindowsAuthentication {event}) if event.event_code==4624)).count()==1,"Native successful logon count differs");
     for event in &preserved {

@@ -474,9 +474,9 @@ fn native_sustained_delivery_outage_and_restart_are_measured() {
             .get(&event.id)
             .expect("Locally retained event was not delivered")
             .event;
-        assert_eq!(
-            serde_json::to_value(event).unwrap(),
-            serde_json::to_value(delivered).unwrap()
+        assert!(
+            serde_json::to_value(event).unwrap() == serde_json::to_value(delivered).unwrap(),
+            "Delivered tracker event differed from its exact locally retained original"
         );
     }
     assert!(!engine

@@ -4,8 +4,8 @@ Dot-sourcing defines the helpers without creating files, tasks or services.
 #>
 param([string]$Agent, [string]$OutputDirectory, [switch]$DisposableHost)
 
-function Assert-ServiceFixtureReport($Report, [string]$AgentSha256) {
-    $expected = @(
+function Get-ServiceChecks {
+    @(
         'registration_is_stopped_local_system_and_exactly_bound',
         'scm_host_owns_actual_launcher_controller_and_agent',
         'live_host_retains_installer_exclusion',
@@ -13,6 +13,10 @@ function Assert-ServiceFixtureReport($Report, [string]$AgentSha256) {
         'explicit_restart_creates_a_new_owned_tree',
         'host_crash_cleans_descendants_and_scm_recovers'
     )
+}
+
+function Assert-ServiceFixtureReport($Report, [string]$AgentSha256) {
+    $expected = @(Get-ServiceChecks)
     if ($Report.schema -ne 1 -or $Report.native_windows_executed -cne $true -or
         $Report.production_readiness -cne $false -or $Report.agent_sha256 -cne $AgentSha256 -or
         $Report.user_sid -cne 'S-1-5-18' -or $Report.session_id -cne 0 -or $Report.error -or
@@ -69,6 +73,60 @@ function Invoke-ServiceFixtureTask([string]$TaskName, $Action, [string]$ResultFi
     }
 }
 
+function Assert-ServiceInputs([string]$OutputDirectory, [string]$ManifestSha256) {
+    $path = Join-Path $OutputDirectory 'inputs.json'
+    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ManifestSha256) {
+        throw 'Service input manifest changed'
+    }
+    $manifest = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    $expected = @('agent.exe', 'tools/verify_windows_service.ps1', 'core-engines/endpoint/src/installer/register.ps1')
+    if ($manifest.schema -ne 1 -or $manifest.suite -cne 'Service' -or
+        $manifest.github_sha -cnotmatch '\A[0-9a-f]{40}\z' -or
+        $manifest.runner_sha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
+        @($manifest.sha256.PSObject.Properties.Name).Count -ne $expected.Count) { throw 'Invalid service input manifest' }
+    foreach ($name in $expected) {
+        if ($manifest.sha256.$name -cnotmatch '\A[0-9a-f]{64}\z' -or
+            (Get-FileHash -LiteralPath (Join-Path $OutputDirectory $name) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $manifest.sha256.$name) {
+            throw 'Staged service input changed'
+        }
+    }
+    $manifest
+}
+
+function Invoke-ServiceFixtureEvidence([string]$OutputDirectory, [string]$TaskName, $Action,
+                                       [string]$ManifestSha256, [string]$AgentSha256) {
+    # The fixture report and every captured stream remain private. Public output
+    # is constructed from constants and validated hashes, never copied fields.
+    if ($ManifestSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $AgentSha256 -cnotmatch '\A[0-9a-f]{64}\z') {
+        throw 'Invalid service evidence binding'
+    }
+    $result = Join-Path $OutputDirectory 'service-validation.private.json'
+    $log = Join-Path $OutputDirectory 'service-validation.log'
+    $public = @{ schema=1; suite='Service'; manifest_sha256=$ManifestSha256; agent_sha256=$AgentSha256;
+        native_service_validation_passed=$false; production_readiness=$false;
+        stages=@(); checks=[ordered]@{}; error='native_service_validation_failed' }
+    foreach ($name in Get-ServiceChecks) { $public.checks[$name] = 'not_verified' }
+    try {
+        $manifest = Assert-ServiceInputs $OutputDirectory $ManifestSha256
+        if ($manifest.sha256.'agent.exe' -cne $AgentSha256) { throw 'Service executable binding differs' }
+        $public.stages += 'inputs_verified'
+        Invoke-ServiceFixtureTask $TaskName $Action $result $AgentSha256
+        $public.stages += 'task_completed'
+        $null = Assert-ServiceInputs $OutputDirectory $ManifestSha256
+        $report = Get-Content -LiteralPath $result -Raw | ConvertFrom-Json
+        Assert-ServiceFixtureReport $report $AgentSha256
+        $public.stages += 'report_verified'
+        foreach ($name in Get-ServiceChecks) { $public.checks[$name] = 'passed' }
+        $public.native_service_validation_passed = $true
+        $public.error = $null
+    } catch {
+        # Even an I/O exception can contain a path or arbitrary fixture content.
+        try { $_ | Out-File -LiteralPath $log -Append -ErrorAction Stop } catch { }
+    }
+    $public | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'service-validation.json') -Encoding UTF8
+    if (-not $public.native_service_validation_passed) { throw 'Native service validation failed; private evidence retained on worker' }
+}
+
 function Invoke-ServiceFixtureCi([string]$Agent, [string]$OutputDirectory, [bool]$DisposableHost) {
     $ErrorActionPreference = 'Stop'
     if (-not $DisposableHost -or $env:GITHUB_ACTIONS -cne 'true' -or
@@ -95,17 +153,27 @@ function Invoke-ServiceFixtureCi([string]$Agent, [string]$OutputDirectory, [bool
     # Stage the exact executable and scripts below the same private directory.
     # SYSTEM never executes a script from a user-writable checkout.
     $sourceRoot = Split-Path -Parent $PSScriptRoot
+    if ($env:GITHUB_SHA -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Invalid service source revision' }
+    $manifest = @{ schema=1; suite='Service'; github_sha=$env:GITHUB_SHA;
+        runner_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant(); sha256=@{} }
     foreach ($relative in @('tools/verify_windows_service.ps1', 'core-engines/endpoint/src/installer/register.ps1')) {
+        $source = Join-Path $sourceRoot $relative
+        $manifest.sha256[$relative] = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
         $destination = Join-Path $OutputDirectory $relative
         $null = [IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
-        Copy-Item -LiteralPath (Join-Path $sourceRoot $relative) -Destination $destination
+        Copy-Item -LiteralPath $source -Destination $destination
     }
     $stagedAgent = Join-Path $OutputDirectory 'agent.exe'
     Copy-Item -LiteralPath $Agent -Destination $stagedAgent
     $digest = (Get-FileHash -LiteralPath $Agent -Algorithm SHA256).Hash.ToLowerInvariant()
     if ((Get-FileHash -LiteralPath $stagedAgent -Algorithm SHA256).Hash.ToLowerInvariant() -cne $digest) { throw 'Staged agent hash differs' }
+    $manifest.sha256['agent.exe'] = $digest
+    $manifestPath = Join-Path $OutputDirectory 'inputs.json'
+    $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+    $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $null = Assert-ServiceInputs $OutputDirectory $manifestHash
     $fixture = Join-Path $OutputDirectory 'tools/verify_windows_service.ps1'
-    $result = Join-Path $OutputDirectory 'service-validation.json'
+    $result = Join-Path $OutputDirectory 'service-validation.private.json'
     $log = Join-Path $OutputDirectory 'service-validation.log'
     # JSON is data inside a quoted PowerShell string; quotes in paths remain literal.
     $arguments = @{ Agent=$stagedAgent; AgentSha256=$digest; ResultFile=$result; Fixture=$fixture; Log=$log } | ConvertTo-Json -Compress
@@ -125,19 +193,10 @@ try {
     $powershell = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell/v1.0/powershell.exe'
     $action = New-ScheduledTaskAction -Execute $powershell -Argument ('-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encoded)
     $taskName = 'AthernexServiceValidation-' + [Guid]::NewGuid().ToString('N')
-    $runner = @{ schema=1; task=$taskName; agent_sha256=$digest; github_sha=$env:GITHUB_SHA;
-        github_run_id=$env:GITHUB_RUN_ID; native_service_validation_passed=$false; error=$null }
-    try {
-        Invoke-ServiceFixtureTask $taskName $action $result $digest
-        $runner.native_service_validation_passed = $true
-    } catch {
-        $runner.error = $_.Exception.Message
-        throw
-    } finally {
-        $runner | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'runner.json') -Encoding UTF8
-        if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
-        Write-Host ('Retained native service evidence: ' + $OutputDirectory)
-    }
+    Invoke-ServiceFixtureEvidence $OutputDirectory $taskName $action $manifestHash $digest
 }
 
-if ($MyInvocation.InvocationName -ne '.') { Invoke-ServiceFixtureCi $Agent $OutputDirectory $DisposableHost.IsPresent }
+if ($MyInvocation.InvocationName -ne '.') {
+    try { Invoke-ServiceFixtureCi $Agent $OutputDirectory $DisposableHost.IsPresent }
+    catch { throw 'Native service validation failed; private evidence retained on worker when available' }
+}

@@ -139,9 +139,10 @@ jobs:
         if: always()
         with:
           name: native-windows-isolation
+          # Native logs and recovery state remain on the disposable worker.
           path: |
-            ${{ runner.temp }}/native-windows-isolation/*.json
-            ${{ runner.temp }}/native-windows-isolation/*.log
+            ${{ runner.temp }}/native-windows-isolation/inputs.json
+            ${{ runner.temp }}/native-windows-isolation/isolation-validation.json
           if-no-files-found: warn
   windows-filter-build:
     runs-on: windows-2022
@@ -176,6 +177,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Verify native network evidence privacy with mocked execution
+        run: python tools/test_network_events.py -v
       - name: Build agent and control plane
         run: cargo build --locked --release -p athernex-endpoint -p athernex-siem -p athernex-endpoint-native
       - name: Prepare verified native AV engine
@@ -367,9 +370,10 @@ jobs:
         if: always() && runner.os == 'Windows'
         with:
           name: native-windows-service
+          # Publish only the hash manifest and allowlisted check results.
           path: |
-            ${{ runner.temp }}/native-windows-service/*.json
-            ${{ runner.temp }}/native-windows-service/*.log
+            ${{ runner.temp }}/native-windows-service/inputs.json
+            ${{ runner.temp }}/native-windows-service/service-validation.json
           if-no-files-found: warn
       - name: Assemble development catalog
         run: python tools/package_endpoint.py --binary '${{ matrix.binary }}' --target '${{ matrix.target }}' --output endpoint-artifacts

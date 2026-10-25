@@ -34,9 +34,50 @@ pub(super) fn source(category: &str) {
             | "invalid_bookmark"
             | "empty_baseline"
             | "source_error_other"
+            | "controlled_queue_empty"
+            | "controlled_queue_partial"
+            | "controlled_queue_extra"
+            | "queue_wait_timeout"
+            | "capture_health_timeout"
+            | "health_has_rejections"
+            | "health_has_loss"
+            | "health_has_error"
+            | "health_state_inactive"
+            | "health_backpressure"
+            | "health_not_caught_up"
+            | "rejected_xml"
+            | "rejected_provenance"
+            | "rejected_missing_field"
+            | "rejected_numeric_field"
+            | "rejected_text_field"
+            | "rejected_identity_mismatch"
+            | "rejected_other"
     ) {
         println!("\nATHERNEX_AUTH_SOURCE={category}");
     }
+}
+pub(super) fn rejection(error: &dyn std::error::Error) {
+    // Classification inspects the private error locally. Only a fixed category
+    // is printed, never the error, field name, XML or source value.
+    let text = error.to_string();
+    let category = match text.as_str() {
+        "Windows logon XML differs from its native System identity" => "rejected_identity_mismatch",
+        "Unsupported Windows authentication provenance or version"
+        | "Unsupported Windows logon type" => "rejected_provenance",
+        "Missing Windows authentication field"
+        | "Missing Windows XML field"
+        | "Missing Windows XML attribute" => "rejected_missing_field",
+        "Invalid Windows decimal field"
+        | "Windows decimal field overflow"
+        | "Invalid Windows hexadecimal field"
+        | "Windows hexadecimal field overflow"
+        | "Invalid Windows caller PID"
+        | "Invalid Windows authentication status" => "rejected_numeric_field",
+        "Invalid Windows event text field" => "rejected_text_field",
+        _ if text.contains("XML") => "rejected_xml",
+        _ => "rejected_other",
+    };
+    source(category);
 }
 pub(super) fn native(operation: &str, code: u32) {
     if matches!(

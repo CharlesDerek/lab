@@ -104,6 +104,54 @@ catch { $failure = $_.Exception.Message }
 if ($failure) { exit 1 }
 '''
 
+EVIDENCE_WRAPPER = r'''
+param([string]$Script, [string]$Case, [string]$Root)
+$ErrorActionPreference = 'Stop'
+. $Script
+$manifest = @{ schema=1; suite='Service'; github_sha=('c'*40); runner_sha256=('d'*64); sha256=@{} }
+foreach ($name in @('agent.exe','tools/verify_windows_service.ps1','core-engines/endpoint/src/installer/register.ps1')) {
+    $path = Join-Path $Root $name
+    $null = [IO.Directory]::CreateDirectory((Split-Path -Parent $path))
+    Set-Content -LiteralPath $path -Value 'private_fixture_payload, never executed'
+    $manifest.sha256[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+$manifestPath = Join-Path $Root 'inputs.json'
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
+$hash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$digest = $manifest.sha256.'agent.exe'
+if ($Case -eq 'changed-manifest') { Add-Content -LiteralPath $manifestPath -Value ' ' }
+if ($Case -eq 'changed-script') { Add-Content -LiteralPath (Join-Path $Root 'tools/verify_windows_service.ps1') -Value 'changed' }
+if ($Case -eq 'wrong-agent-binding') { $digest = 'e'*64 }
+$global:executed = $false
+function Invoke-ServiceFixtureTask($TaskName,$Action,$ResultFile,$AgentSha256) {
+    $global:executed = $true
+    $report = @{ schema=1; native_windows_executed=$true; production_readiness=$false;
+        agent_sha256=$AgentSha256; user_sid='S-1-5-18'; session_id=0; error=$null;
+        windows_version='private_fixture_payload'; fixture='private_fixture_payload';
+        process_trees=@(@{ pid=999999; created=123456789; path='private_fixture_payload' });
+        credential='private_fixture_payload'; raw_xml='<Event>private_fixture_payload</Event>'; checks=[ordered]@{} }
+    foreach ($name in Get-ServiceChecks) { $report.checks[$name] = 'passed' }
+    switch ($Case) {
+        'skipped-check' { $report.checks['explicit_restart_creates_a_new_owned_tree'] = 'skipped' }
+        'raw-check' { $report.checks['explicit_restart_creates_a_new_owned_tree'] = 'private_fixture_payload' }
+        'extra-check' { $report.checks['private_fixture_payload'] = 'passed' }
+        'raw-error' { $report.error = 'private_fixture_payload' }
+        'wrong-identity' { $report.user_sid = 'private_fixture_payload' }
+        'changed-after-task' { Add-Content -LiteralPath (Join-Path $Root 'agent.exe') -Value 'changed' }
+    }
+    $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ResultFile
+    'private_fixture_payload' | Set-Content -LiteralPath (Join-Path $Root 'service-validation.log')
+    if ($Case -eq 'raw-exception') { throw 'private_fixture_payload' }
+    if ($Case -eq 'missing-report') { Remove-Item -LiteralPath $ResultFile }
+}
+$failure = $null
+try { Invoke-ServiceFixtureEvidence $Root 'private_fixture_payload' @{} $hash $digest }
+catch { $failure = $_.Exception.Message }
+@{ failed=($null -ne $failure); error=$failure; executed=$global:executed;
+   manifest_sha256=$hash; agent_sha256=$digest } |
+    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Root 'trace.json')
+'''
+
 
 class ServiceRunnerTests(unittest.TestCase):
     powershell = None
@@ -187,6 +235,58 @@ class ServiceRunnerTests(unittest.TestCase):
                 value = self.run_case(case, dict(custom_hash='a'*64))
                 self.assertEqual(value['failed'], case == 'custom-fails', value)
                 self.assertEqual(value['trace'], ['register', 'start', 'validate-custom', 'disable', 'unregister'])
+
+    def run_evidence_case(self, case):
+        with tempfile.TemporaryDirectory(prefix='athernex-service-evidence-') as temporary:
+            root = Path(temporary)
+            wrapper = root/'wrapper.ps1'
+            wrapper.write_text(EVIDENCE_WRAPPER, encoding='utf-8')
+            completed = subprocess.run(
+                [self.powershell, '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
+                 str(wrapper), str(SCRIPT), case, str(root)], capture_output=True, text=True, timeout=20,
+                env=dict(os.environ, POWERSHELL_TELEMETRY_OPTOUT='1', POWERSHELL_UPDATECHECK='Off'))
+            self.assertEqual(completed.returncode, 0, completed.stdout+completed.stderr)
+            trace = json.loads((root/'trace.json').read_text(encoding='utf-8-sig'))
+            public = json.loads((root/'service-validation.json').read_text(encoding='utf-8-sig'))
+            self.assertNotIn('private_fixture_payload', json.dumps(public)+json.dumps(trace)+completed.stdout+completed.stderr)
+            self.assertEqual(set(public), {'schema', 'suite', 'manifest_sha256', 'agent_sha256',
+                                          'native_service_validation_passed', 'production_readiness',
+                                          'stages', 'checks', 'error'})
+            self.assertEqual(public['manifest_sha256'], trace['manifest_sha256'])
+            self.assertEqual(public['agent_sha256'], trace['agent_sha256'])
+            self.assertEqual(set(public['checks']), set(CHECKS))
+            self.assertFalse(public['production_readiness'])
+            if trace['executed']:
+                self.assertIn('private_fixture_payload', (root/'service-validation.log').read_text(encoding='utf-8-sig'))
+            return trace, public
+
+    def test_public_evidence_excludes_fixture_metadata_and_raw_logs(self):
+        trace, public = self.run_evidence_case('passed')
+        self.assertFalse(trace['failed'], trace)
+        self.assertTrue(public['native_service_validation_passed'])
+        self.assertIsNone(public['error'])
+        self.assertEqual(public['checks'], dict.fromkeys(CHECKS, 'passed'))
+        self.assertEqual(public['stages'], ['inputs_verified', 'task_completed', 'report_verified'])
+
+    def test_public_failures_are_fixed_and_cannot_hide_invalid_native_evidence(self):
+        for case in ['skipped-check', 'raw-check', 'extra-check', 'raw-error', 'wrong-identity',
+                     'raw-exception', 'missing-report', 'changed-after-task']:
+            with self.subTest(case=case):
+                trace, public = self.run_evidence_case(case)
+                self.assertTrue(trace['failed'], trace)
+                self.assertTrue(trace['executed'])
+                self.assertFalse(public['native_service_validation_passed'])
+                self.assertEqual(public['error'], 'native_service_validation_failed')
+                self.assertEqual(public['checks'], dict.fromkeys(CHECKS, 'not_verified'))
+
+    def test_manifest_source_and_executable_binding_fail_before_native_execution(self):
+        for case in ['changed-manifest', 'changed-script', 'wrong-agent-binding']:
+            with self.subTest(case=case):
+                trace, public = self.run_evidence_case(case)
+                self.assertTrue(trace['failed'], trace)
+                self.assertFalse(trace['executed'])
+                self.assertFalse(public['native_service_validation_passed'])
+                self.assertEqual(public['error'], 'native_service_validation_failed')
 
 
 if __name__ == '__main__':

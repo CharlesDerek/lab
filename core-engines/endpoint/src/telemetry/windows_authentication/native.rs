@@ -299,7 +299,13 @@ impl Reader {
                 })();
                 match normalized {
                     Ok(value) => result.events.push(value),
-                    Err(_) => result.rejected_records += 1,
+                    Err(error) => {
+                        #[cfg(test)]
+                        super::diagnostics::rejection(error.as_ref());
+                        #[cfg(not(test))]
+                        let _ = error;
+                        result.rejected_records += 1;
+                    }
                 }
             } else if identity.provider_name == "Microsoft-Windows-Security-Auditing"
                 && [4624, 4625].contains(&identity.event_code)

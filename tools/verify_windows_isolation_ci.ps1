@@ -73,7 +73,9 @@ function Get-AuthenticationStages([string]$Log) {
         'policy_capture_starting','policy_captured',
         'policy_clear_starting','policy_cleared','policy_apply_starting','policy_applied',
         'policy_readback_verified','policy_ready','account_ready','source_starting',
-        'source_ready','stalled_http_verified','backpressure_verified','crash_replay_verified',
+        'source_ready','listener_ready','client_ready','heartbeat_accepted','allowed_attempt_verified',
+        'denied_attempts_verified','controlled_queue_ready','stalled_cycle_verified','capture_health_verified',
+        'stalled_http_verified','backpressure_verified','crash_replay_verified',
         'policy_gap_verified','anchor_mismatch_verified','http_delivery_verified',
         'original_export_verified','detection_verified','cleanup_verified')
     if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
@@ -123,7 +125,12 @@ function Get-AuthenticationSource([string]$Log) {
         'baseline_committed','worker_ready','collector_started','startup_timeout','startup_disconnected',
         'startup_failed','health_read_failed','health_missing','health_incomplete','worker_failed',
         'invalid_property_type','invalid_native_identity','invalid_render_size','invalid_render_text',
-        'invalid_log_metadata','invalid_bookmark','empty_baseline','source_error_other')
+        'invalid_log_metadata','invalid_bookmark','empty_baseline','source_error_other',
+        'controlled_queue_empty','controlled_queue_partial','controlled_queue_extra','queue_wait_timeout',
+        'capture_health_timeout','health_has_rejections','health_has_loss','health_has_error',
+        'health_state_inactive','health_backpressure','health_not_caught_up',
+        'rejected_xml','rejected_provenance','rejected_missing_field','rejected_numeric_field',
+        'rejected_text_field','rejected_identity_mismatch','rejected_other')
     if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
     try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
     catch { return }
@@ -188,7 +195,8 @@ function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report,
             $Report.checks[$check.test] = 'passed'
         } catch {
             $Report.checks[$check.test] = 'failed'
-            $Report.failures[$check.test] = $_.Exception.Message
+            $Report.failures[$check.test] = 'native_check_failed'
+            try { $_ | Out-File -LiteralPath ($log + '.failure') -Append -ErrorAction Stop } catch { }
         } finally {
             if ($Suite -ceq 'Authentication') {
                 $Report.authentication_stages = @(Get-AuthenticationStages $log)
@@ -202,6 +210,26 @@ function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report,
         $position += 1
     }
     if ($Report.failures.Count) { throw 'One or more native isolation checks failed' }
+}
+
+function Invoke-IsolationWorkerChecks([string]$OutputDirectory, $Manifest, $Report,
+                                      [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
+    $authenticationOptIn = 'ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST'
+    $previousOptIn = [Environment]::GetEnvironmentVariable($authenticationOptIn, 'Process')
+    try {
+        if ($manifest.schema -ne 1 -or $manifest.suite -cne $Suite) { throw 'Invalid native check input manifest suite' }
+        # Set this only after the disposable LocalSystem worker and its suite
+        # manifest have been verified. The native fixture repeats identity checks.
+        $optIn = if ($Suite -ceq 'Authentication') { '1' } else { $null }
+        [Environment]::SetEnvironmentVariable($authenticationOptIn, $optIn, 'Process')
+        Invoke-IsolationChecks $OutputDirectory $manifest $report $Suite
+    } catch {
+        $Report.error = 'native_worker_failed'
+        try { $_ | Out-File -LiteralPath (Join-Path $OutputDirectory 'worker.log') -Append -ErrorAction Stop } catch { }
+        throw 'Native worker failed; private evidence retained on worker'
+    } finally {
+        [Environment]::SetEnvironmentVariable($authenticationOptIn, $previousOptIn, 'Process')
+    }
 }
 
 function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost,
@@ -225,20 +253,8 @@ function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost,
         $report.authentication_source = @()
         $report.authentication_render = @()
     }
-    $authenticationOptIn = 'ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST'
-    $previousOptIn = [Environment]::GetEnvironmentVariable($authenticationOptIn, 'Process')
-    try {
-        if ($manifest.schema -ne 1 -or $manifest.suite -cne $Suite) { throw 'Invalid native check input manifest suite' }
-        # Set this only after the disposable LocalSystem worker and its suite
-        # manifest have been verified. The native fixture repeats identity checks.
-        $optIn = if ($Suite -ceq 'Authentication') { '1' } else { $null }
-        [Environment]::SetEnvironmentVariable($authenticationOptIn, $optIn, 'Process')
-        Invoke-IsolationChecks $OutputDirectory $manifest $report $Suite
-    } catch {
-        $report.error = $_.Exception.Message
-        throw
-    } finally {
-        [Environment]::SetEnvironmentVariable($authenticationOptIn, $previousOptIn, 'Process')
+    try { Invoke-IsolationWorkerChecks $OutputDirectory $manifest $report $Suite }
+    finally {
         $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDirectory ($Suite.ToLowerInvariant() + '-validation.json')) -Encoding UTF8
     }
 }
@@ -309,5 +325,11 @@ catch { $_ | Out-File -LiteralPath (Join-Path $p.OutputDirectory 'worker.log') -
 
 if ($MyInvocation.InvocationName -ne '.') {
     if ($Worker) { Invoke-IsolationWorker $OutputDirectory $DisposableHost.IsPresent $Suite }
-    else { Invoke-IsolationCi $EndpointTests $NativeTests $OutputDirectory $DisposableHost.IsPresent $Suite }
+    else {
+        try { Invoke-IsolationCi $EndpointTests $NativeTests $OutputDirectory $DisposableHost.IsPresent $Suite }
+        catch {
+            try { $_ | Out-File -LiteralPath (Join-Path $OutputDirectory 'runner.log') -Append -ErrorAction Stop } catch { }
+            throw 'Native suite validation failed; private evidence retained on worker when available'
+        }
+    }
 }

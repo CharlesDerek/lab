@@ -983,13 +983,15 @@ disables and removes only the owned task; changed or unconfirmed task ownership
 is retained as a failure. A timeout can leave the service fixture behind on the
 disposable VM and never proves successful service cleanup.
 
-The workflow uploads `service-validation.json`, `service-validation.log` and
-`runner.json` even when the step fails. The first report also remains in the
-fixture's private ProgramData directory. The runner report records the build
-hash and GitHub run/commit identity. These reports cover service registration,
-the owned process tree, installer exclusion, stop, restart and crash recovery;
-they do not certify minifilter enforcement, signing or hostile-administrator
-resistance.
+The workflow uploads only `inputs.json` and `service-validation.json`, including
+on failure. The input manifest records the source commit and executable/script
+hashes. The public result contains fixed check outcomes and stages, validated
+hashes and a fixed failure category. The full fixture report, process metadata,
+paths, logs and exceptions stay in the private directory on the disposable VM.
+Public success requires validation of that private report, successful task exit
+and confirmed task cleanup. These checks cover service registration, the owned
+process tree, installer exclusion, stop, restart and crash recovery; they do not
+certify minifilter enforcement, signing or hostile-administrator resistance.
 
 The [hosted Windows platform job](https://github.com/CharlesDerek/lab/actions/runs/40205131600/job/121204327964)
 passed all six native SCM checks at commit `62a4e27d` on 2026-10-25. The retained
@@ -1034,8 +1036,9 @@ cannot satisfy the gate. A bounded owned task and disposable VM contain a stalle
 fixture; failures retain scoped WFP/workspace journals for inspection and do not
 prove successful cleanup.
 
-Only fixture reports and logs are uploaded; staged executables and private
-workspace contents are excluded. Local runner tests validate evidence rejection
+Only `inputs.json` and `isolation-validation.json` are uploaded. The report uses
+fixed failure categories; raw logs, exceptions, staged executables and workspace
+contents stay on the disposable VM. Local runner tests validate evidence rejection
 and task cleanup using mocked commands. The [hosted run at `5d6b0cc`](https://github.com/CharlesDerek/lab/actions/runs/40222345499)
 passed ten of eleven checks on Windows Server 2022 as LocalSystem in session
 zero. The retained report was checked against its source commit and input-manifest

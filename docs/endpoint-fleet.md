@@ -850,6 +850,9 @@ python tools/verify_network_events.py --manifest /tmp/network-tests.jsonl \
 
 Measured runs require an optimized test server; the runner refuses an unoptimized
 test manifest. Supply the optimized agent build as shown above.
+The runner prints fixed outcomes and keeps captured native output in a private
+`athernex-network-diagnostics-*` directory under the system temporary directory.
+Those diagnostic files are excluded from the uploaded measurement artifact.
 Each online/recovery phase accepts 60–600 seconds at a target of 1–16 flows per
 second. The report pins the executable and container image hashes and records
 actual phase durations, queue high-water samples, agent peak resident memory,

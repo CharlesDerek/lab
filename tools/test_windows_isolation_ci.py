@@ -107,14 +107,23 @@ function Invoke-IsolationCheck([string]$Executable, [string]$Name, [string]$Log)
         throw 'Authentication must execute the compiled endpoint test binary'
     }
     if ($Case -eq 'first-fails' -and $global:executed -eq 1) { throw 'First independent check failed' }
+    if ($Case -eq 'raw-check-failure' -and $global:executed -eq 1) { throw 'private_fixture_payload' }
 }
-$report = @{ checks=[ordered]@{}; failures=[ordered]@{} }
+if ($Case -eq 'raw-input-failure') {
+    function Get-FileHash { param($LiteralPath,$Algorithm); throw 'private_fixture_payload' }
+}
+$report = @{ checks=[ordered]@{}; failures=[ordered]@{}; error=$null }
+$env:ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST = 'previous_fixture_value'
 $failure = $null
-try { Invoke-IsolationChecks $Root $manifest $report $SelectedSuite }
+try { Invoke-IsolationWorkerChecks $Root $manifest $report $SelectedSuite }
 catch { $failure = $_.Exception.Message }
 @{ failed=($null -ne $failure); error=$failure; executed=$global:executed;
    passed=@($report.checks.Values | Where-Object { $_ -ceq 'passed' }).Count;
-   failures=$report.failures.Count; names=$global:executedNames } |
+   failures=$report.failures.Count; names=$global:executedNames;
+   failure_reasons=@($report.failures.Values); worker_error=$report.error;
+   opt_in=$env:ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST;
+   private_log_exists=((Test-Path -LiteralPath (Join-Path $Root 'check-0.log.failure')) -or
+                       (Test-Path -LiteralPath (Join-Path $Root 'worker.log'))) } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
 '''
 STAGES_WRAPPER = r'''
@@ -238,6 +247,34 @@ catch { $failure = $_.Exception.Message }
     ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
 '''
 
+PHASES_WRAPPER = r'''
+param([string]$Script, [string]$Case, [string]$Root, [string]$SelectedSuite)
+$ErrorActionPreference = 'Stop'
+. $Script
+$stages = @('listener_ready','client_ready','heartbeat_accepted','allowed_attempt_verified',
+    'denied_attempts_verified','controlled_queue_ready','stalled_cycle_verified','capture_health_verified')
+$source = @('controlled_queue_empty','controlled_queue_partial','controlled_queue_extra','queue_wait_timeout',
+    'capture_health_timeout','health_has_rejections','health_has_loss','health_has_error',
+    'health_state_inactive','health_backpressure','health_not_caught_up',
+    'rejected_xml','rejected_provenance','rejected_missing_field','rejected_numeric_field',
+    'rejected_text_field','rejected_identity_mismatch','rejected_other')
+$log = Join-Path $Root 'fixture.log'
+$lines = @($stages | ForEach-Object { 'ATHERNEX_AUTH_STAGE=' + $_ }) +
+         @($source | ForEach-Object { 'ATHERNEX_AUTH_SOURCE=' + $_ })
+if ($Case -ceq 'injected') {
+    $lines = @($lines | ForEach-Object {
+        $_ + ':private_fixture_payload'
+        $_ + ' private_fixture_payload'
+        $_ + [char]0x00ad
+        ' ' + $_
+        $_.ToUpperInvariant()
+    })
+}
+$lines | Set-Content -LiteralPath $log
+@{ stages=@(Get-AuthenticationStages $log); source=@(Get-AuthenticationSource $log) } |
+    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
+'''
+
 
 class IsolationRunnerTests(unittest.TestCase):
     powershell = None
@@ -304,6 +341,32 @@ class IsolationRunnerTests(unittest.TestCase):
                 self.assertEqual((value['executed'], value['passed'], value['failures'], value['failed']),
                                  (executed, passed, failures, failed), value)
                 self.assertEqual(value['names'], [AUTHENTICATION_TEST] if executed else [])
+
+    def test_native_and_io_failures_remain_private_in_both_suite_reports(self):
+        for suite in ['Isolation', 'Authentication']:
+            for case in ['raw-check-failure', 'raw-input-failure']:
+                with self.subTest(suite=suite, case=case):
+                    value = self.run_case(case, WORKER_WRAPPER, suite)
+                    self.assertTrue(value['failed'], value)
+                    self.assertEqual(value['worker_error'], 'native_worker_failed')
+                    self.assertNotIn('private_fixture_payload', json.dumps(value))
+                    self.assertEqual(value['failure_reasons'], ['native_check_failed'] if case == 'raw-check-failure' else [])
+                    self.assertEqual(value['executed'], (11 if suite == 'Isolation' else 1) if case == 'raw-check-failure' else 0)
+                    self.assertTrue(value['private_log_exists'])
+                    self.assertEqual(value['opt_in'], 'previous_fixture_value')
+
+    def test_controlled_capture_categories_accept_only_exact_fixed_lines(self):
+        value = self.run_case('valid', PHASES_WRAPPER, 'Authentication')
+        self.assertEqual(value['stages'], [
+            'listener_ready', 'client_ready', 'heartbeat_accepted', 'allowed_attempt_verified',
+            'denied_attempts_verified', 'controlled_queue_ready', 'stalled_cycle_verified', 'capture_health_verified'])
+        self.assertEqual(value['source'], [
+            'controlled_queue_empty', 'controlled_queue_partial', 'controlled_queue_extra', 'queue_wait_timeout',
+            'capture_health_timeout', 'health_has_rejections', 'health_has_loss', 'health_has_error',
+            'health_state_inactive', 'health_backpressure', 'health_not_caught_up',
+            'rejected_xml', 'rejected_provenance', 'rejected_missing_field', 'rejected_numeric_field',
+            'rejected_text_field', 'rejected_identity_mismatch', 'rejected_other'])
+        self.assertEqual(self.run_case('injected', PHASES_WRAPPER, 'Authentication'), {'stages': [], 'source': []})
 
     def test_isolation_rejects_unbound_or_other_suite_inputs(self):
         for case in ['wrong-suite', 'missing-suite']:

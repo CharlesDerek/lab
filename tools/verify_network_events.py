@@ -40,6 +40,27 @@ def fixture_script(name, timeout):
     ])
 
 
+def run_fixture(command, timeout, diagnostics):
+    # Keep complete native output in a private local file, never in CI output or
+    # the measured report artifact. File-backed capture also bounds Python memory.
+    with tempfile.NamedTemporaryFile(mode='w+', encoding='utf-8', dir=diagnostics,
+                                     prefix='native-', suffix='.log', delete=False) as output:
+        try:
+            subprocess.run(command, check=True, timeout=timeout,
+                           stdout=output, stderr=subprocess.STDOUT)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            raise RuntimeError('Native network fixture failed; diagnostics retained privately') from None
+        output.seek(0)
+        reports = []
+        try:
+            for line in output:
+                if line.startswith('ATHERNEX_NETWORK_SOAK_REPORT='):
+                    reports.append(json.loads(line.partition('=')[2]))
+        except (ValueError, UnicodeError):
+            raise RuntimeError('Native network fixture produced an invalid measured report') from None
+        return reports
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', type=Path, required=True,
@@ -86,7 +107,14 @@ def main():
                 raise RuntimeError(f'Required native test is absent: {name}')
         inputs = dict(validation_inputs={key: hashlib.sha256((root/key).read_bytes()).hexdigest()
                                          for key in paths}, image=image, tests=tests, test_profile=test_profile)
-        print(json.dumps(inputs), flush=True)
+        # mkdtemp creates a mode-0700 directory outside the selected report path.
+        # It intentionally survives success/failure for local diagnosis only.
+        diagnostics = Path(tempfile.mkdtemp(prefix='athernex-network-diagnostics-'))
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=diagnostics,
+                                         prefix='inputs-', suffix='.json', delete=False) as saved_inputs:
+            json.dump(inputs, saved_inputs)
+            saved_inputs.write('\n')
+        print(f'Native network validation: {len(tests)} tests', flush=True)
         for index, name in enumerate(tests):
             cid = root/f'container-{index}.cid'
             timeout = 2 * args.soak_seconds + 180 if args.soak_seconds is not None else 120
@@ -108,29 +136,23 @@ def main():
                 command += ['--mount', f'type=bind,source={root/key},target=/test/{key},readonly']
             command += [image, 'python3', '-u', '-c', script]
             try:
-                # File-backed output preserves bounded Python memory during long
-                # runs. The caller receives the complete log even on test failure.
-                with tempfile.TemporaryFile(mode='w+') as output:
-                    try:
-                        subprocess.run(command, check=True, timeout=timeout+30,
-                                       stdout=output, stderr=subprocess.STDOUT)
-                    finally:
-                        output.seek(0)
-                        reports = []
-                        for line in output:
-                            print(line, end='', flush=True)
-                            if line.startswith('ATHERNEX_NETWORK_SOAK_REPORT='):
-                                reports.append(json.loads(line.partition('=')[2]))
+                reports = run_fixture(command, timeout+30, diagnostics)
                 if args.soak_seconds is not None:
                     if len(reports) != 1 or reports[0].get('passed') is not True:
                         raise RuntimeError('Successful load check did not produce exactly one measured report')
                     if args.report:
                         args.report.parent.mkdir(parents=True, exist_ok=True)
                         args.report.write_text(json.dumps(dict(inputs=inputs, measurement=reports[0]), indent=2)+'\n')
+            except Exception:
+                print(f'Native network test {index+1}/{len(tests)}: failed', flush=True)
+                raise
+            else:
+                print(f'Native network test {index+1}/{len(tests)}: passed', flush=True)
             finally:
                 if cid.exists() and re.fullmatch(r'[0-9a-f]{64}', identifier := cid.read_text().strip()):
                     subprocess.run(DOCKER + ['rm', '-f', identifier], stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, check=False, timeout=30)
+        print(f'Native network validation passed: {len(tests)} tests', flush=True)
 
 
 if __name__ == '__main__':
