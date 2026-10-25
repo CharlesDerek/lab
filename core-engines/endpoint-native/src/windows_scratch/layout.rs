@@ -226,7 +226,19 @@ impl AttachedDisk {
         self.verify()?;
         let before = Layout::get(&self.physical)?;
         if before.style != PARTITION_STYLE_RAW as u32 || before.count != 0 {
-            return Err("New scratch disk already contains a partition layout".into());
+            // Report only shape/range metadata, never disk/partition IDs or
+            // device paths. Preserve refusal until the exact layout is known.
+            let first = before.entries[0];
+            let first_type = if first.PartitionStyle == PARTITION_STYLE_MBR {
+                u32::from(unsafe { first.Anonymous.Mbr }.PartitionType)
+            } else {
+                0
+            };
+            return Err(format!(
+                "New scratch disk already contains a partition layout: style={}, count={}, first_style={}, first_start={}, first_length={}, first_number={}, first_mbr_type={first_type}",
+                before.style, before.count, first.PartitionStyle, first.StartingOffset,
+                first.PartitionLength, first.PartitionNumber
+            ).into());
         }
         let create = CREATE_DISK {
             PartitionStyle: PARTITION_STYLE_GPT,

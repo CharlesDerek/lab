@@ -1055,7 +1055,12 @@ reported matching identity, fixed subtype, capacity and sectors, with block size
 zero. Creation now requests the fixed-disk default and verification requires
 zero, consistent with Microsoft's [fixed-VHDX sample](https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/Hyper-V/Storage/cpp/CreateVirtualDisk.cpp).
 Identity, fixed subtype, capacity, backing-size and sector checks remain exact.
-The expanded storage checks and complete worker lifecycle remain pending.
+The [run at `6680d18`](https://github.com/CharlesDerek/lab/actions/runs/40214135694)
+passed nine of eleven: image identity/capacity and detached-recovery controls,
+plus attachment release after owner exit, now passed natively. Both the GPT and
+full worker tests stopped at the pre-initialization layout guard. The returned
+style/count and first-entry ranges are now reported without device paths or IDs;
+partition creation and full worker capacity/cleanup remain unverified.
 This gate does not establish signed
 minifilter prevention, complete scanner confinement or hostile-administrator
 tamper resistance.
