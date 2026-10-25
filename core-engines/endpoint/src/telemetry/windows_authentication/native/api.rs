@@ -24,6 +24,9 @@ impl Drop for Handle {
 }
 pub(super) fn failure(operation: &str) -> Box<dyn std::error::Error + Send + Sync> {
     let code = unsafe { GetLastError() };
+    failure_code(operation, code)
+}
+fn failure_code(operation: &str, code: u32) -> Box<dyn std::error::Error + Send + Sync> {
     #[cfg(test)]
     super::super::diagnostics::native("source_api", code);
     format!("{operation} failed with Windows error {code}").into()
@@ -69,6 +72,8 @@ pub(super) fn text(event: &Handle, flags: u32, max_bytes: usize) -> Result<Strin
     };
     let code = unsafe { GetLastError() };
     #[cfg(test)]
+    let probe = (rendered != 0, required, count);
+    #[cfg(test)]
     if rendered == 0 && code != ERROR_INSUFFICIENT_BUFFER {
         super::super::diagnostics::native("source_render_probe", code);
     }
@@ -78,11 +83,13 @@ pub(super) fn text(event: &Handle, flags: u32, max_bytes: usize) -> Result<Strin
         || required as usize > max_bytes * 2 + 2
         || required % 2 != 0
     {
+        #[cfg(test)]
+        super::super::diagnostics::render("bookmark_probe", flags, probe.0, probe.1, 0, probe.2);
         return Err("Windows Security text exceeds its rendering budget".into());
     }
     let mut buffer = vec![0u16; required as usize / 2];
     let capacity = required;
-    if unsafe {
+    let rendered = unsafe {
         EvtRender(
             0,
             event.0,
@@ -92,19 +99,40 @@ pub(super) fn text(event: &Handle, flags: u32, max_bytes: usize) -> Result<Strin
             &mut required,
             &mut count,
         )
-    } == 0
-    {
-        return Err(failure("Windows Security text rendering"));
+    };
+    let code = unsafe { GetLastError() };
+    #[cfg(test)]
+    let diagnose = || {
+        super::super::diagnostics::render("bookmark_probe", flags, probe.0, probe.1, 0, probe.2);
+        super::super::diagnostics::render(
+            "bookmark_result",
+            flags,
+            rendered != 0,
+            required,
+            capacity,
+            count,
+        );
+    };
+    if rendered == 0 {
+        #[cfg(test)]
+        diagnose();
+        return Err(failure_code("Windows Security text rendering", code));
     }
     if count != 0 || required < 2 || required > capacity || required % 2 != 0 {
+        #[cfg(test)]
+        diagnose();
         return Err("Invalid Windows Security rendered text size".into());
     }
     let words = &buffer[..required as usize / 2];
     if words.last() != Some(&0) || words[..words.len() - 1].contains(&0) {
+        #[cfg(test)]
+        diagnose();
         return Err("Invalid Windows Security text termination".into());
     }
     let value = String::from_utf16(&words[..words.len() - 1])?;
     if value.len() > max_bytes {
+        #[cfg(test)]
+        diagnose();
         return Err("Windows Security text exceeds its UTF-8 budget".into());
     }
     Ok(value)

@@ -137,6 +137,41 @@ function Get-AuthenticationSource([string]$Log) {
     }
 }
 
+function Get-AuthenticationRender([string]$Log) {
+    # Each record describes one bookmark-render API call. Only the exact stages,
+    # bookmark flag, success bit and bounded numeric metadata can be published.
+    if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
+    try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
+    catch { return }
+    $number = '(0|[1-9][0-9]{0,9})'
+    $count = 0
+    foreach ($line in $lines) {
+        foreach ($stage in @('bookmark_probe','bookmark_result')) {
+            $pattern = '\A' + [regex]::Escape('ATHERNEX_AUTH_RENDER=' + $stage + ':2:') + '([01]):' + $number + ':' + $number + ':' + $number + '\z'
+            $match = [regex]::Match($line, $pattern, [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+            if (-not $match.Success) { continue }
+            $values = @()
+            $valid = $true
+            foreach ($index in 2..4) {
+                [uint32]$value = 0
+                if (-not [uint32]::TryParse($match.Groups[$index].Value,
+                    [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$value)) {
+                    $valid = $false
+                    break
+                }
+                $values += $value
+            }
+            if ($valid) {
+                @{ stage=$stage; flags=2; succeeded=[int]$match.Groups[1].Value;
+                    used_bytes=$values[0]; capacity_bytes=$values[1]; property_count=$values[2] }
+                $count += 1
+                if ($count -ge 16) { return }
+                break
+            }
+        }
+    }
+}
+
 function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report,
                                 [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
     if ($Manifest.schema -ne 1 -or $Manifest.suite -cne $Suite) { throw 'Invalid native check input manifest suite' }
@@ -159,6 +194,7 @@ function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report,
                 $Report.authentication_stages = @(Get-AuthenticationStages $log)
                 $Report.authentication_diagnostics = @(Get-AuthenticationDiagnostics $log)
                 $Report.authentication_source = @(Get-AuthenticationSource $log)
+                $Report.authentication_render = @(Get-AuthenticationRender $log)
             }
         }
         # Each test runs in a separate process with fresh fixture paths. WFP
@@ -187,6 +223,7 @@ function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost,
         $report.authentication_stages = @()
         $report.authentication_diagnostics = @()
         $report.authentication_source = @()
+        $report.authentication_render = @()
     }
     $authenticationOptIn = 'ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST'
     $previousOptIn = [Environment]::GetEnvironmentVariable($authenticationOptIn, 'Process')

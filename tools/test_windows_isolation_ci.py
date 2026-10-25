@@ -187,10 +187,34 @@ function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [
         'test fixture ... ATHERNEX_AUTH_SOURCE=reader_opened',
         "ATHERNEX_AUTH_SOURCE=reader_opened$([char]0x00ad)",
         "ATHERNEX_AUTH_SOURCE=reader_opened$([char]0)",
+        'ATHERNEX_AUTH_RENDER=bookmark_probe:2:0:128:0:0',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:128:1',
+        'ATHERNEX_AUTH_RENDER=unknown_private_payload:2:1:128:128:1',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:1:1:128:128:1',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:2:128:128:1',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:128:1 private_payload',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:128:1:private_payload',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:128',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:1:-1:128:1',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:+128:1',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:0128:1',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:0x80:1',
+        'ATHERNEX_AUTH_RENDER=BOOKMARK_RESULT:2:1:128:128:1',
+        ' ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:128:1',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:1:4294967296:128:1',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:4294967296:1',
+        'ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:128:4294967296',
+        "ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:128:1$([char]0x00ad)",
+        "ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:128:1$([char]0)",
+        "ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:128:$([char]0x0661)",
         'ATHERNEX_AUTH_STAGE=cleanup_verified'
     ) | Set-Content -LiteralPath $Log
     if ($Case -ceq 'diagnostic-flood') {
         0..63 | ForEach-Object { 'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:' + $_ } |
+            Set-Content -LiteralPath $Log
+    }
+    if ($Case -ceq 'render-flood') {
+        0..31 | ForEach-Object { 'ATHERNEX_AUTH_RENDER=bookmark_probe:2:0:' + $_ + ':4294967295:0' } |
             Set-Content -LiteralPath $Log
     }
     if ($Case -ceq 'exit-failure') { throw 'Fixture executable failed' }
@@ -208,6 +232,7 @@ catch { $failure = $_.Exception.Message }
    has_diagnostics=$report.ContainsKey('authentication_diagnostics');
    diagnostics=@($report.authentication_diagnostics);
    has_source=$report.ContainsKey('authentication_source'); source=@($report.authentication_source);
+   has_render=$report.ContainsKey('authentication_render'); render=@($report.authentication_render);
    stages=@($report.authentication_stages); failures=$report.failures.Count;
    passed=@($report.checks.Values | Where-Object { $_ -ceq 'passed' }).Count } |
     ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
@@ -336,12 +361,14 @@ class IsolationRunnerTests(unittest.TestCase):
                 self.assertEqual(value['source'], [] if case == 'missing-log' else [
                     'connection_ready', 'worker_entered', 'startup_failed', 'invalid_property_type'
                 ])
+                self.assertEqual(len(value['render']), 0 if case == 'missing-log' else 2)
         value = self.run_case('passed', STAGES_WRAPPER, 'Isolation')
         self.assertFalse(value['failed'], value)
         self.assertEqual(value['passed'], 11)
         self.assertFalse(value['has_stages'])
         self.assertFalse(value['has_diagnostics'])
         self.assertFalse(value['has_source'])
+        self.assertFalse(value['has_render'])
 
     def test_authentication_diagnostics_allow_only_fixed_operations_and_bounded_decimal_codes(self):
         value = self.run_case('passed', STAGES_WRAPPER, 'Authentication')
@@ -373,6 +400,24 @@ class IsolationRunnerTests(unittest.TestCase):
             'connection_ready', 'worker_entered', 'startup_failed', 'invalid_property_type'
         ])
         self.assertNotIn('private_payload', json.dumps(value))
+
+    def test_bookmark_render_evidence_preserves_only_bounded_exact_numeric_call_metadata(self):
+        value = self.run_case('passed', STAGES_WRAPPER, 'Authentication')
+        self.assertFalse(value['failed'], value)
+        self.assertTrue(value['has_render'])
+        self.assertEqual(value['render'], [
+            {'stage': 'bookmark_probe', 'flags': 2, 'succeeded': 0, 'used_bytes': 128,
+             'capacity_bytes': 0, 'property_count': 0},
+            {'stage': 'bookmark_result', 'flags': 2, 'succeeded': 1, 'used_bytes': 128,
+             'capacity_bytes': 128, 'property_count': 1},
+        ])
+        self.assertNotIn('private_payload', json.dumps(value))
+        value = self.run_case('render-flood', STAGES_WRAPPER, 'Authentication')
+        self.assertFalse(value['failed'], value)
+        self.assertEqual(value['render'], [
+            {'stage': 'bookmark_probe', 'flags': 2, 'succeeded': 0, 'used_bytes': count,
+             'capacity_bytes': 4294967295, 'property_count': 0} for count in range(16)
+        ])
 
 
 if __name__ == '__main__':

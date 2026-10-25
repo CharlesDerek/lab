@@ -46,6 +46,21 @@ pub(super) fn native(operation: &str, code: u32) {
         println!("\nATHERNEX_AUTH_DIAGNOSTIC={operation}:{code}");
     }
 }
+pub(super) fn render(
+    stage: &str,
+    flags: u32,
+    succeeded: bool,
+    used: u32,
+    capacity: u32,
+    count: u32,
+) {
+    if flags == 2 && matches!(stage, "bookmark_probe" | "bookmark_result") {
+        println!(
+            "\nATHERNEX_AUTH_RENDER={stage}:{flags}:{}:{used}:{capacity}:{count}",
+            u32::from(succeeded)
+        );
+    }
+}
 pub(super) fn classify(error: &dyn std::error::Error) {
     let text = error.to_string();
     let category = match text.as_str() {
