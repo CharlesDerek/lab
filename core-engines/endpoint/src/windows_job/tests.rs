@@ -242,6 +242,7 @@ fn network_probe(result: &Path, control: bool) {
         match listener.accept() {
             Ok((mut stream, address)) => {
                 assert!(address.ip().is_loopback());
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(1)))
                     .unwrap();

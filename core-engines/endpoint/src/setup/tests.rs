@@ -51,6 +51,9 @@ fn enrollment_retry_preserves_identity_and_token_until_server_acceptance() {
                     Err(e) => panic!("{e}"),
                 }
             };
+            // Accepted sockets inherit nonblocking mode on Windows. Reads below
+            // must wait for fragmented HTTP requests within the bounded timeout.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
