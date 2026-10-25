@@ -27,6 +27,10 @@ use windows_sys::Win32::{
     },
 };
 thread_local! { static ENABLED: Cell<bool> = const { Cell::new(false) }; }
+thread_local! { static UI_PROBE: Cell<u8> = const { Cell::new(0) }; }
+pub(super) fn ui_probe() -> u8 {
+    UI_PROBE.get()
+}
 pub(super) fn enabled() -> bool {
     ENABLED.get()
 }
@@ -247,4 +251,51 @@ pub(super) fn capture_startup(service: &mut Service) -> io::Result<()> {
         String::from_utf8_lossy(&trace).replace('\0', "")
     );
     result
+}
+
+pub(super) fn compare_private_ui_access(
+    command: &super::Command,
+    token: &athernex_endpoint_native::windows_scanner::Token,
+) {
+    // Every candidate has its own fresh private station/desktop. The privileged
+    // creation helper exits before the synthetic scanner is resumed. These
+    // diagnostic launches cannot turn the original failing test into a pass.
+    for mode in 1..=7 {
+        UI_PROBE.set(mode);
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                UI_PROBE.set(0);
+            }
+        }
+        let reset = Reset;
+        let started = Service::start_scanner(command, token, 4096, |_, _| Ok(()));
+        drop(reset);
+        let result: io::Result<String> = (|| {
+            let mut service = started?;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let exit = service.poll()?;
+                if service
+                    .output()
+                    .windows(b"SCANNER_READY".len())
+                    .any(|s| s == b"SCANNER_READY")
+                {
+                    service.stop()?;
+                    return Ok("helper reached main; owned job stopped".into());
+                }
+                if let Some(code) = exit {
+                    return Ok(format!("exit 0x{:08x}", code as u32));
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "private UI comparison deadline",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })();
+        eprintln!("Private USER object access candidate {mode}: {result:?}");
+    }
 }

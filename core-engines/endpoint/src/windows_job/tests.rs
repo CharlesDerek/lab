@@ -1055,6 +1055,9 @@ fn scanner_launch_has_checked_identity_job_limits_and_owned_cleanup() {
                 })
                 .unwrap();
                 super::debug::capture_startup(&mut diagnostic).unwrap();
+                drop(diagnostic);
+                drop(_loader_snaps);
+                super::debug::compare_private_ui_access(&invocation, &token);
             }
             panic!(
                 "scanner fixture exited with {code} (0x{:08x}): {}",
