@@ -28,17 +28,16 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = std::path::absolute(temp.path()).unwrap();
         let state = root.join("state");
         let watched = root.join("watched");
-        fs::create_dir(&state).unwrap();
+        let private =
+            athernex_endpoint_native::windows_state::Directory::create_under(&root, "state")
+                .unwrap();
         fs::create_dir(&watched).unwrap();
-        // A normal user fixture gets the same private-owner invariant as the
-        // installer. No host services, global policy, or real user files change.
-        let (code, output) = run_bounded(Process::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
-            .env("ATHERNEX_FIXTURE_STATE", &state)
-            .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $id=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[System.Security.AccessControl.DirectorySecurity]::new(); $acl.SetOwner($id); $acl.SetAccessRuleProtection($true,$false); $rule=[System.Security.AccessControl.FileSystemAccessRule]::new($id,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($rule); Set-Acl -LiteralPath $env:ATHERNEX_FIXTURE_STATE -AclObject $acl"]), 15).unwrap();
-        assert_eq!(code, 0, "{output}");
+        // Use the actual private-directory primitive; fixture ACLs must not
+        // depend on the runner shell's PowerShell module search path.
+        drop(private);
         drop(Store::open(&state).unwrap());
         let config = Config {
             engine_updates: Default::default(),
@@ -105,6 +104,7 @@ impl Fixture {
                     }
                     Err(e) => panic!("{e}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -312,9 +312,11 @@ fn actual_windows_recovery_adopts_committed_work_without_replay_or_rewriting_rec
             "quarantined"
         );
         if acknowledged {
-            assert!(f.events.lock().unwrap().iter().any(|v| v["detail"]
-                .as_str()
-                .is_some_and(|s| s.contains("native_mutation_recovery"))));
+            assert!(f.events.lock().unwrap().iter().any(|v| {
+                v["detail"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("native_mutation_recovery"))
+            }));
         }
     }
 }

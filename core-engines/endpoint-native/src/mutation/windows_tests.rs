@@ -8,13 +8,14 @@ const CONTENTS: &[u8] = b"approved Windows response fixture";
 fn windows_source_capture_needs_metadata_and_delete_access_without_content_access() {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_WRITE,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_WRITE, FILE_WRITE_DATA,
     };
     let f = Fixture::new();
-    // This handle permits rename but deliberately refuses shared content reads.
+    // This writer permits rename but deliberately refuses shared content reads.
+    // Metadata-only opens do not reserve a Windows data-access sharing mode.
     // The former DELETE|GENERIC_READ capture open would fail with error 32.
     let held = stdfs::OpenOptions::new()
-        .access_mode(FILE_READ_ATTRIBUTES)
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_DATA)
         .share_mode(FILE_SHARE_DELETE | FILE_SHARE_WRITE)
         .open(&f.intent.path)
         .unwrap();

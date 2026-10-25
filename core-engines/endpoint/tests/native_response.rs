@@ -81,6 +81,8 @@ impl Fixture {
                     }
                     Err(e) => panic!("{e}"),
                 };
+                // Darwin inherits the listening socket's nonblocking flag.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -189,6 +191,7 @@ impl Fixture {
                     }
                     Err(e) => panic!("{e}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -733,7 +736,11 @@ fn agent_death_stops_automation_and_descendants_without_replaying_the_script() {
     let marker = f.config.scan_roots[0].join("automation-pids");
     let launches = f.config.scan_roots[0].join("automation-launches");
     let quote = |p: &std::path::Path| format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"));
-    let script = format!("printf 'started\\n' >> {}; trap '' TERM; sleep 30 & printf '%s %s %s\\n' \"$PPID\" \"$$\" \"$!\" > {}; wait",quote(&launches),quote(&marker));
+    let script = format!(
+        "printf 'started\\n' >> {}; trap '' TERM; sleep 30 & printf '%s %s %s\\n' \"$PPID\" \"$$\" \"$!\" > {}; wait",
+        quote(&launches),
+        quote(&marker)
+    );
     let command = f.command(Action::Script {
         interpreter: "sh".into(),
         sha256: hash(script.as_bytes()),

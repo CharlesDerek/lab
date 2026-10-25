@@ -92,6 +92,7 @@ fn proof(plan: &service::Plan, m: &Manifest) -> Proof {
 }
 #[test]
 fn all_roots_need_complete_fresh_operation_specific_proof() {
+    let _serial = child::TEST_SERIAL.lock().unwrap();
     let (_temp, mut plan) = fixture();
     let second = plan.policy.roots[0].parent().unwrap().join("second");
     fs::create_dir(&second).unwrap();
@@ -138,6 +139,7 @@ fn all_roots_need_complete_fresh_operation_specific_proof() {
 }
 #[test]
 fn synthetic_routing_never_uses_just_a_name_or_path_prefix() {
+    let _serial = child::TEST_SERIAL.lock().unwrap();
     let (_temp, plan) = fixture();
     let prepared = prepare(&plan).unwrap();
     let m = &prepared.manifest;
@@ -159,6 +161,7 @@ fn synthetic_routing_never_uses_just_a_name_or_path_prefix() {
 }
 #[test]
 fn preparation_refuses_links_preserves_foreign_bytes_and_binds_restart_samples() {
+    let _serial = child::TEST_SERIAL.lock().unwrap();
     let (_temp, plan) = fixture();
     let first = prepare(&plan).unwrap();
     let old = first.manifest.clone();
@@ -193,6 +196,7 @@ fn preparation_refuses_links_preserves_foreign_bytes_and_binds_restart_samples()
 }
 #[test]
 fn probe_directory_symlink_cannot_redirect_writes() {
+    let _serial = child::TEST_SERIAL.lock().unwrap();
     let (_temp, plan) = fixture();
     let folder = format!(
         ".athernex-native-check-{}",
@@ -205,6 +209,7 @@ fn probe_directory_symlink_cannot_redirect_writes() {
 
 #[test]
 fn immutable_proofs_survive_status_transition_but_authorization_gaps_invalidate_them() {
+    let _serial = child::TEST_SERIAL.lock().unwrap();
     let (_temp, plan) = fixture();
     let prepared = prepare(&plan).unwrap();
     let mut p = proof(&plan, &prepared.manifest);

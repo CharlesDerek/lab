@@ -25,7 +25,7 @@ fn request_pipe_is_bounded_and_deadline_applies_when_child_does_not_read() {
     assert!(error.to_string().contains("time budget"));
     assert!(start.elapsed() < Duration::from_secs(1));
     assert!(run_with_input(
-        &mut Command::new("/bin/true"),
+        &mut Command::new("/usr/bin/true"),
         Duration::from_secs(1),
         1024,
         &vec![0; 65537]
@@ -110,21 +110,27 @@ fn unreaped_children_hold_capacity_until_the_cleanup_worker_confirms_exit() {
         });
     }
     r.pending.lock().unwrap().extend(entries);
-    assert!(
-        run(&mut Command::new("/bin/true"), Duration::from_secs(1), 1024)
-            .unwrap_err()
-            .to_string()
-            .contains("budget exhausted")
-    );
+    assert!(run(
+        &mut Command::new("/usr/bin/true"),
+        Duration::from_secs(1),
+        1024
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("budget exhausted"));
     let deadline = Instant::now() + Duration::from_secs(3);
     while ACTIVE.load(Ordering::SeqCst) != 0 {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(
-        run(&mut Command::new("/bin/true"), Duration::from_secs(1), 1024)
-            .unwrap()
-            .0,
+        run(
+            &mut Command::new("/usr/bin/true"),
+            Duration::from_secs(1),
+            1024
+        )
+        .unwrap()
+        .0,
         0
     );
 }

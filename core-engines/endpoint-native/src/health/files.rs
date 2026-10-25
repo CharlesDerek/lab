@@ -265,45 +265,50 @@ fn signed_images(state: &Path, session: &str) -> Result<(Vec<u8>, Vec<u8>)> {
     let original = bounded_bytes(&source)?;
     #[cfg(target_os = "macos")]
     {
-        let path = state.join("image-template");
-        service::write(&path, &original, 0o700)?;
-        let (code, output) = child::run(
-            Command::new("/usr/bin/codesign")
-                .args([
-                    "--force",
-                    "--sign",
-                    "-",
-                    "--identifier",
-                    &format!("com.athernex.health.{session}"),
-                    "--options",
-                    "0",
-                ])
-                .arg(&path),
-            Duration::from_secs(10),
-            4096,
-        )?;
-        if code != 0 {
-            return Err(format!(
-                "Cannot prepare native health executable: {}",
-                String::from_utf8_lossy(&output)
-            )
-            .into());
-        }
-        let (code, _) = child::run(
-            Command::new("/usr/bin/codesign")
-                .args(["--verify", "--strict"])
-                .arg(&path),
-            Duration::from_secs(5),
-            4096,
-        )?;
-        if code != 0 {
-            return Err("Native health executable signature is invalid".into());
-        }
-        let changed = bounded_bytes(&path)?;
-        if changed == original {
-            return Err("Native health executable must have unique bytes".into());
-        }
-        Ok((original, changed))
+        // Both relocated images need their own ad-hoc signature. A copied
+        // Apple platform binary is not a reliable executable clean control.
+        let sign = |label: &str| -> Result<Vec<u8>> {
+            let path = state.join(format!("image-template-{label}"));
+            service::write(&path, &original, 0o700)?;
+            let (code, output) = child::run(
+                Command::new("/usr/bin/codesign")
+                    .args([
+                        "--force",
+                        "--sign",
+                        "-",
+                        "--identifier",
+                        &format!("com.athernex.health.{session}.{label}"),
+                        "--options",
+                        "0",
+                    ])
+                    .arg(&path),
+                Duration::from_secs(10),
+                4096,
+            )?;
+            if code != 0 {
+                return Err(format!(
+                    "Cannot prepare native health executable: {}",
+                    String::from_utf8_lossy(&output)
+                )
+                .into());
+            }
+            let (code, _) = child::run(
+                Command::new("/usr/bin/codesign")
+                    .args(["--verify", "--strict"])
+                    .arg(&path),
+                Duration::from_secs(5),
+                4096,
+            )?;
+            if code != 0 {
+                return Err("Native health executable signature is invalid".into());
+            }
+            let changed = bounded_bytes(&path)?;
+            if changed == original {
+                return Err("Native health executable must have unique bytes".into());
+            }
+            Ok(changed)
+        };
+        Ok((sign("clean")?, sign("blocked")?))
     }
     #[cfg(target_os = "linux")]
     {

@@ -239,18 +239,25 @@ pub fn query_limited(
         max_bytes: MAX_FILE.min(byte_budget),
         timeout_ms: timeout.as_millis().max(1) as u64,
     };
-    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
-    socket.connect_timeout(
-        &socket2::SockAddr::unix(state.join(SOCKET))?,
-        remaining(deadline)?,
-    )?;
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+        .map_err(|e| format!("Create native response socket: {e}"))?;
+    socket
+        .connect_timeout(
+            &socket2::SockAddr::unix(state.join(SOCKET))?,
+            remaining(deadline)?,
+        )
+        .map_err(|e| format!("Connect native response socket: {e}"))?;
     let descriptor: std::os::fd::OwnedFd = socket.into();
     let mut stream = UnixStream::from(descriptor);
-    if peer_uid(&stream)? != unsafe { libc::geteuid() } {
+    if peer_uid(&stream).map_err(|e| format!("Read native response peer identity: {e}"))?
+        != unsafe { libc::geteuid() }
+    {
         return Err("Native response server identity differs from its owner".into());
     }
-    write_frame(&mut stream, &request, deadline)?;
-    let reply: Reply = read_frame(&mut stream, deadline)?;
+    write_frame(&mut stream, &request, deadline)
+        .map_err(|e| format!("Write native response request: {e}"))?;
+    let reply: Reply = read_frame(&mut stream, deadline)
+        .map_err(|e| format!("Read native response reply: {e}"))?;
     if reply.schema != 1
         || reply.nonce != request.nonce
         || reply.policy_sha256 != request.policy_sha256
@@ -302,6 +309,9 @@ impl Service {
         Ok(())
     }
     fn handle(&self, mut job: Job) -> Result<()> {
+        // Accepted sockets inherit O_NONBLOCK on Darwin. Framed I/O below uses
+        // per-operation deadlines on a blocking socket on every platform.
+        job.stream.set_nonblocking(false)?;
         let request: Request = read_frame(&mut job.stream, job.accepted + Duration::from_secs(2))?;
         if request.schema != 1
             || !hex_id(&request.nonce)

@@ -21,7 +21,11 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        // Keep nested broker sockets within macOS's sockaddr_un path limit.
+        let temp = tempfile::Builder::new()
+            .prefix("ax-mutation-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let root = temp.path().canonicalize().unwrap();
         stdfs::set_permissions(&root, stdfs::Permissions::from_mode(0o700)).unwrap();
         let state = root.join("state");
@@ -392,10 +396,12 @@ fn protected_reader_lease_blocks_recovery_after_supervisor_drops_its_context() {
 
 #[test]
 fn original_broker_intents_keep_their_persisted_digest() {
-    let raw=concat!("{\"schema\":1,\"command_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
-    "\"quarantine_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"operation\":\"quarantine\",",
-    "\"state\":\"/private/state\",\"path\":\"/watched/sample\",\"roots\":[\"/watched\"],",
-    "\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}");
+    let raw = concat!(
+        "{\"schema\":1,\"command_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
+        "\"quarantine_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"operation\":\"quarantine\",",
+        "\"state\":\"/private/state\",\"path\":\"/watched/sample\",\"roots\":[\"/watched\"],",
+        "\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+    );
     let intent: Intent = serde_json::from_str(raw).unwrap();
     intent.validate().unwrap();
     assert!(intent.verifier.is_none());

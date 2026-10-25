@@ -81,7 +81,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Match the compiler used for the local release and strict lint checks.
+      - uses: dtolnay/rust-toolchain@1.91.1
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
@@ -177,7 +178,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.91.1
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2

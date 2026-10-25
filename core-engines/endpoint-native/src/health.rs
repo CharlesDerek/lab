@@ -147,7 +147,12 @@ fn attempt(
     let (code, output) = child::run(&mut command, remaining, 8192)?;
     let lines = std::str::from_utf8(&output)?.lines().collect::<Vec<_>>();
     if code != if denied { 10 } else { 0 } || lines.is_empty() {
-        return Err(format!("Native {} health probe returned {code}", name(op)).into());
+        return Err(format!(
+            "Native {} health probe returned {code} for {}",
+            name(op),
+            sample.path.display()
+        )
+        .into());
     }
     let attempt: Attempt = serde_json::from_str(lines[0])?;
     if attempt.schema != 1
