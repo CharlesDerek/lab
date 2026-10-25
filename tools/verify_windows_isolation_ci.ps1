@@ -1,14 +1,19 @@
 <#
-Run the existing opt-in isolation checks as LocalSystem on a disposable hosted VM.
+Run fixed opt-in native checks as LocalSystem on a disposable hosted VM.
 No driver is loaded. Scratch tests create only private 256 MiB VHDX files; the
 worker test formats and fills its own new volume. No existing disk is adopted. WFP rules are scoped
 to fresh fixture images. Failed checks retain their private recovery journals.
-Dot-sourcing defines helpers only.
+The Authentication suite temporarily changes logon auditing and creates a private
+fixture account; its test owns restoration. Dot-sourcing defines helpers only.
 #>
 param([string]$EndpointTests, [string]$NativeTests, [string]$OutputDirectory,
-      [switch]$DisposableHost, [switch]$Worker)
+      [switch]$DisposableHost, [switch]$Worker,
+      [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation')
 
-function Get-IsolationChecks {
+function Get-IsolationChecks([ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
+    if ($Suite -ceq 'Authentication') {
+        return @{ binary='endpoint.exe'; test='telemetry::windows_authentication::native_test::security_logon_delivery_replays_and_reports_policy_gaps' }
+    }
     @(
         @{ binary='endpoint.exe'; test='windows_job::tests::scanner_launch_has_checked_identity_job_limits_and_owned_cleanup' },
         @{ binary='native.exe'; test='windows_scanner::tests::scanner_reads_copies_writes_scratch_and_cannot_read_private_state_or_change_engine' },
@@ -24,12 +29,14 @@ function Get-IsolationChecks {
     )
 }
 
-function Assert-IsolationReport($Report, [string]$ManifestSha256) {
+function Assert-IsolationReport($Report, [string]$ManifestSha256,
+                                [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
     if ($Report.schema -ne 1 -or $Report.native_windows_executed -cne $true -or
+        $Report.suite -cne $Suite -or
         $Report.production_readiness -cne $false -or $Report.manifest_sha256 -cne $ManifestSha256 -or
         $Report.user_sid -cne 'S-1-5-18' -or $Report.session_id -cne 0 -or $Report.error -or
         -not $Report.windows_version) { throw 'Native isolation report identity or result is invalid' }
-    $expected = @(Get-IsolationChecks | ForEach-Object { $_.test })
+    $expected = @(Get-IsolationChecks $Suite | ForEach-Object { $_.test })
     $names = @($Report.checks.PSObject.Properties.Name)
     if ($names.Count -ne $expected.Count) { throw 'Native isolation report has an incomplete check set' }
     foreach ($name in $expected) {
@@ -59,9 +66,31 @@ function Invoke-IsolationCheck([string]$Executable, [string]$Name, [string]$Log)
     }
 }
 
-function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report) {
+function Get-AuthenticationStages([string]$Log) {
+    # Only return constants whose complete marker line occurred. Never copy a
+    # captured line, suffix, exception, XML value, or account into public evidence.
+    $allowed = @('guard_verified','policy_ready','account_ready','source_starting',
+        'source_ready','stalled_http_verified','backpressure_verified','crash_replay_verified',
+        'policy_gap_verified','anchor_mismatch_verified','http_delivery_verified',
+        'original_export_verified','detection_verified','cleanup_verified')
+    if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
+    try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
+    catch { return }
+    foreach ($stage in $allowed) {
+        foreach ($line in $lines) {
+            if ([string]::Equals($line, ('ATHERNEX_AUTH_STAGE=' + $stage), [StringComparison]::Ordinal)) {
+                $stage
+                break
+            }
+        }
+    }
+}
+
+function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report,
+                                [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
+    if ($Manifest.schema -ne 1 -or $Manifest.suite -cne $Suite) { throw 'Invalid native check input manifest suite' }
     $position = 0
-    foreach ($check in Get-IsolationChecks) {
+    foreach ($check in Get-IsolationChecks $Suite) {
         $executable = Join-Path $OutputDirectory $check.binary
         # A changed input is a trust failure: stop before executing anything else.
         if ((Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Manifest.sha256.($check.binary)) {
@@ -74,6 +103,10 @@ function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report) {
         } catch {
             $Report.checks[$check.test] = 'failed'
             $Report.failures[$check.test] = $_.Exception.Message
+        } finally {
+            if ($Suite -ceq 'Authentication') {
+                $Report.authentication_stages = @(Get-AuthenticationStages $log)
+            }
         }
         # Each test runs in a separate process with fresh fixture paths. WFP
         # rules name only that test's private image, never the runner binary.
@@ -82,7 +115,8 @@ function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report) {
     if ($Report.failures.Count) { throw 'One or more native isolation checks failed' }
 }
 
-function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost) {
+function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost,
+                                [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
     $ErrorActionPreference = 'Stop'
     if (-not $DisposableHost -or [Environment]::OSVersion.Platform -ne 'Win32NT' -or
         [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18' -or
@@ -92,22 +126,31 @@ function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost)
     $manifestPath = Join-Path $OutputDirectory 'inputs.json'
     $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $report = @{ schema=1; native_windows_executed=$true; production_readiness=$false;
+    $report = @{ schema=1; suite=$Suite; native_windows_executed=$true; production_readiness=$false;
         manifest_sha256=$manifestHash; user_sid='S-1-5-18'; session_id=0;
         windows_version=[Environment]::OSVersion.Version.ToString(); checks=[ordered]@{};
         failures=[ordered]@{}; error=$null }
+    if ($Suite -ceq 'Authentication') { $report.authentication_stages = @() }
+    $authenticationOptIn = 'ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST'
+    $previousOptIn = [Environment]::GetEnvironmentVariable($authenticationOptIn, 'Process')
     try {
-        if ($manifest.schema -ne 1) { throw 'Invalid isolation input manifest' }
-        Invoke-IsolationChecks $OutputDirectory $manifest $report
+        if ($manifest.schema -ne 1 -or $manifest.suite -cne $Suite) { throw 'Invalid native check input manifest suite' }
+        # Set this only after the disposable LocalSystem worker and its suite
+        # manifest have been verified. The native fixture repeats identity checks.
+        $optIn = if ($Suite -ceq 'Authentication') { '1' } else { $null }
+        [Environment]::SetEnvironmentVariable($authenticationOptIn, $optIn, 'Process')
+        Invoke-IsolationChecks $OutputDirectory $manifest $report $Suite
     } catch {
         $report.error = $_.Exception.Message
         throw
     } finally {
-        $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'isolation-validation.json') -Encoding UTF8
+        [Environment]::SetEnvironmentVariable($authenticationOptIn, $previousOptIn, 'Process')
+        $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDirectory ($Suite.ToLowerInvariant() + '-validation.json')) -Encoding UTF8
     }
 }
 
-function Invoke-IsolationCi([string]$EndpointTests, [string]$NativeTests, [string]$OutputDirectory, [bool]$DisposableHost) {
+function Invoke-IsolationCi([string]$EndpointTests, [string]$NativeTests, [string]$OutputDirectory, [bool]$DisposableHost,
+                            [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
     $ErrorActionPreference = 'Stop'
     if (-not $DisposableHost -or $env:GITHUB_ACTIONS -cne 'true' -or
         $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
@@ -132,7 +175,7 @@ function Invoke-IsolationCi([string]$EndpointTests, [string]$NativeTests, [strin
             [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
     }
     Set-Acl -LiteralPath $OutputDirectory -AclObject $acl
-    $manifest = @{ schema=1; github_sha=$env:GITHUB_SHA; sha256=@{} }
+    $manifest = @{ schema=1; suite=$Suite; github_sha=$env:GITHUB_SHA; sha256=@{} }
     foreach ($name in $sources.Keys) {
         $digest = (Get-FileHash -LiteralPath $sources[$name] -Algorithm SHA256).Hash.ToLowerInvariant()
         Copy-Item -LiteralPath $sources[$name] -Destination (Join-Path $OutputDirectory $name)
@@ -146,31 +189,31 @@ function Invoke-IsolationCi([string]$EndpointTests, [string]$NativeTests, [strin
     $digest = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $fixture = Join-Path $OutputDirectory 'verify_windows_isolation_ci.ps1'
     Copy-Item -LiteralPath $PSCommandPath -Destination $fixture
-    $parameters = @{ Fixture=$fixture; OutputDirectory=$OutputDirectory } | ConvertTo-Json -Compress
+    $parameters = @{ Fixture=$fixture; OutputDirectory=$OutputDirectory; Suite=$Suite } | ConvertTo-Json -Compress
     $literal = $parameters.Replace("'", "''")
     $code = @'
 $ErrorActionPreference = 'Stop'
 $p = ConvertFrom-Json '__PARAMETERS__'
-try { & $p.Fixture -OutputDirectory $p.OutputDirectory -Worker -DisposableHost; exit 0 }
+try { & $p.Fixture -OutputDirectory $p.OutputDirectory -Suite $p.Suite -Worker -DisposableHost; exit 0 }
 catch { $_ | Out-File -LiteralPath (Join-Path $p.OutputDirectory 'worker.log') -Append; exit 1 }
 '@.Replace('__PARAMETERS__', $literal)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
     $powershell = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell/v1.0/powershell.exe'
     $action = New-ScheduledTaskAction -Execute $powershell -Argument ('-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encoded)
-    $taskName = 'AthernexIsolationValidation-' + [Guid]::NewGuid().ToString('N')
+    $taskName = 'Athernex' + $Suite + 'Validation-' + [Guid]::NewGuid().ToString('N')
     # Import into a child scope so the service script's parameters cannot replace
     # this runner's paths or switches when it is dot-sourced.
     & {
-        param($IsolationTask, $IsolationAction, $IsolationResult, $IsolationDigest, $Helper)
+        param($IsolationTask, $IsolationAction, $IsolationResult, $IsolationDigest, $IsolationSuite, $Helper)
         . $Helper
         Invoke-ServiceFixtureTask $IsolationTask $IsolationAction $IsolationResult $IsolationDigest 540 {
             param($Report, $ManifestSha256)
-            Assert-IsolationReport $Report $ManifestSha256
+            Assert-IsolationReport $Report $ManifestSha256 $IsolationSuite
         }
-    } $taskName $action (Join-Path $OutputDirectory 'isolation-validation.json') $digest (Join-Path $PSScriptRoot 'verify_windows_service_ci.ps1')
+    } $taskName $action (Join-Path $OutputDirectory ($Suite.ToLowerInvariant() + '-validation.json')) $digest $Suite (Join-Path $PSScriptRoot 'verify_windows_service_ci.ps1')
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    if ($Worker) { Invoke-IsolationWorker $OutputDirectory $DisposableHost.IsPresent }
-    else { Invoke-IsolationCi $EndpointTests $NativeTests $OutputDirectory $DisposableHost.IsPresent }
+    if ($Worker) { Invoke-IsolationWorker $OutputDirectory $DisposableHost.IsPresent $Suite }
+    else { Invoke-IsolationCi $EndpointTests $NativeTests $OutputDirectory $DisposableHost.IsPresent $Suite }
 }

@@ -210,6 +210,10 @@ impl Engine {
                     .collector
                     .as_ref()
                     .is_some_and(|c| c.authentication.is_some()),
+                windows_authentication: health
+                    .collector
+                    .as_ref()
+                    .is_some_and(|c| c.windows_authentication.is_some()),
                 protection_fingerprint: protection_scope(&health),
                 collector: health
                     .collector

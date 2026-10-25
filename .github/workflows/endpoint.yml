@@ -57,6 +57,49 @@ on:
 permissions:
   contents: read
 jobs:
+  windows-authentication:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify privileged runner failure handling and suite-bound evidence
+        run: |
+          python tools/test_windows_service_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Task runner control-flow tests failed' }
+          python tools/test_windows_isolation_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Native suite evidence tests failed' }
+      - name: Build and select exact native authentication test executable
+        shell: pwsh
+        env:
+          CARGO_PROFILE_TEST_DEBUG: 0
+        run: |
+          cargo test --locked --no-run --lib -p athernex-endpoint -p athernex-endpoint-native --message-format=json > "$env:RUNNER_TEMP/authentication-build.jsonl"
+          if ($LASTEXITCODE -ne 0) { throw 'Native authentication build failed' }
+          $records = Get-Content -LiteralPath "$env:RUNNER_TEMP/authentication-build.jsonl" | ForEach-Object { $_ | ConvertFrom-Json }
+          foreach ($entry in @(@('athernex_endpoint','AUTHENTICATION_ENDPOINT_TESTS'), @('athernex_endpoint_native','AUTHENTICATION_NATIVE_TESTS'))) {
+            $matches = @($records | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -ceq $entry[0] -and $_.profile.test -eq $true -and $_.executable })
+            if ($matches.Count -ne 1) { throw ('Expected one test executable for ' + $entry[0]) }
+            ($entry[1] + '=' + $matches[0].executable) >> $env:GITHUB_ENV
+          }
+      - name: Verify Security-log authentication delivery and policy gaps as LocalSystem
+        timeout-minutes: 10
+        shell: pwsh
+        run: tools/verify_windows_isolation_ci.ps1 -Suite Authentication -EndpointTests "$env:AUTHENTICATION_ENDPOINT_TESTS" -NativeTests "$env:AUTHENTICATION_NATIVE_TESTS" -OutputDirectory "$env:RUNNER_TEMP/native-windows-authentication" -DisposableHost
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-windows-authentication
+          # Captured native output stays on the disposable worker. Upload only
+          # suite-bound status and executable hashes, never event XML or accounts.
+          path: |
+            ${{ runner.temp }}/native-windows-authentication/inputs.json
+            ${{ runner.temp }}/native-windows-authentication/authentication-validation.json
+          if-no-files-found: warn
   windows-isolation:
     runs-on: windows-2022
     timeout-minutes: 30

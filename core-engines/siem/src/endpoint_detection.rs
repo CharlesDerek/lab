@@ -100,13 +100,14 @@ fn external(ip: IpAddr) -> bool {
 fn identity(endpoint: &str, boot: &str, pid: u32, started: u64) -> String {
     format!("endpoint-process:{endpoint}:{boot}:{pid}:{started}")
 }
-fn boot(item: &Telemetry) -> &str {
+fn boot(item: &Telemetry) -> Option<&str> {
     match item {
-        Telemetry::Authentication { event } => &event.journal.boot_id,
+        Telemetry::Authentication { event } => Some(&event.journal.boot_id),
+        Telemetry::WindowsAuthentication { .. } => None,
         Telemetry::Process { boot_id, .. }
         | Telemetry::Connection { boot_id, .. }
         | Telemetry::ProcessEvent { boot_id, .. }
-        | Telemetry::NetworkEvent { boot_id, .. } => boot_id,
+        | Telemetry::NetworkEvent { boot_id, .. } => Some(boot_id),
     }
 }
 
@@ -130,17 +131,17 @@ impl Engine {
         let Some(p) = item.process().filter(|p| p.started_ms != 0) else {
             return Ok(());
         };
-        let key = identity(endpoint, boot(item), p.pid, p.started_ms);
+        let Some(boot_id) = boot(item) else {
+            return Ok(());
+        };
+        let key = identity(endpoint, boot_id, p.pid, p.started_ms);
         self.connection.execute(
             "INSERT OR IGNORE INTO graph_links VALUES(?1,?2,?3)",
             params![key, evidence, event.time_ms],
         )?;
         if let (Some(parent), Some(started)) = (p.parent_pid, p.parent_started_ms) {
             if started != 0 && started <= p.started_ms {
-                let key = format!(
-                    "children:{}",
-                    identity(endpoint, boot(item), parent, started)
-                );
+                let key = format!("children:{}", identity(endpoint, boot_id, parent, started));
                 self.connection.execute(
                     "INSERT OR IGNORE INTO graph_links VALUES(?1,?2,?3)",
                     params![key, evidence, event.time_ms],
@@ -196,12 +197,15 @@ impl Engine {
         let Some(p) = item.process().filter(|p| p.started_ms != 0) else {
             return Ok(());
         };
-        let key = identity(endpoint, boot(item), p.pid, p.started_ms);
+        let Some(boot_id) = boot(item) else {
+            return Ok(());
+        };
+        let key = identity(endpoint, boot_id, p.pid, p.started_ms);
         let enabled = self.enabled_rules()?;
         if interpreter(p) && enabled.iter().any(|r| r == "AX-006") {
             if let (Some(pid), Some(started)) = (p.parent_pid, p.parent_started_ms) {
                 if started != 0 && started <= p.started_ms {
-                    let parent_key = identity(endpoint, boot(item), pid, started);
+                    let parent_key = identity(endpoint, boot_id, pid, started);
                     for id in self.graph_neighbors(&parent_key, evidence, event.time_ms, FANOUT)? {
                         let Some(parent) = self.endpoint_observation(id)? else {
                             continue;

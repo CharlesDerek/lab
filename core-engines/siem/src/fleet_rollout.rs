@@ -37,6 +37,8 @@ pub struct HealthGate {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authentication: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub windows_authentication: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub network_events: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -137,6 +139,17 @@ pub(crate) fn healthy(health: &Heartbeat, gate: &HealthGate, now: u64) -> bool {
             .collector
             .as_ref()
             .and_then(|c| c.authentication.as_ref())
+            .is_none_or(|h| h.healthy(now))
+        && (!gate.windows_authentication
+            || health
+                .collector
+                .as_ref()
+                .and_then(|c| c.windows_authentication.as_ref())
+                .is_some_and(|h| h.healthy(now)))
+        && health
+            .collector
+            .as_ref()
+            .and_then(|c| c.windows_authentication.as_ref())
             .is_none_or(|h| h.healthy(now))
         && (!gate.process_events
             || health
@@ -354,6 +367,10 @@ impl Engine {
                     .collector
                     .as_ref()
                     .is_some_and(|c| c.authentication.is_some()),
+                windows_authentication: health
+                    .collector
+                    .as_ref()
+                    .is_some_and(|c| c.windows_authentication.is_some()),
                 protection_fingerprint: protection_scope(&health),
                 collector: health
                     .collector
@@ -717,6 +734,7 @@ mod native_coverage_tests {
             signatures: false,
             process_events: false,
             authentication: false,
+            windows_authentication: false,
             network_events: false,
         };
         assert_eq!(
@@ -868,6 +886,54 @@ mod native_coverage_tests {
         ] {
             health.collector.as_mut().unwrap().authentication = Some(degraded);
             assert!(!healthy(&health, &gate, now));
+            assert!(!healthy(&health, &legacy, now));
+        }
+        health.collector.as_mut().unwrap().authentication = None;
+        let windows_gate = HealthGate {
+            windows_authentication: true,
+            ..legacy.clone()
+        };
+        let windows = protocol::authentication::AuthenticationHealth {
+            state: "active".into(),
+            started_ms: now,
+            checked_ms: now,
+            caught_up: true,
+            ..Default::default()
+        };
+        // A different platform's healthy source cannot replace the pinned one.
+        health.collector.as_mut().unwrap().authentication = Some(windows.clone());
+        assert!(!healthy(&health, &windows_gate, now));
+        health.collector.as_mut().unwrap().authentication = None;
+        health.collector.as_mut().unwrap().windows_authentication = Some(windows.clone());
+        assert!(healthy(&health, &windows_gate, now));
+        assert!(!healthy(&health, &windows_gate, now + 30_001));
+        health.collector.as_mut().unwrap().windows_authentication = None;
+        assert!(!healthy(&health, &windows_gate, now));
+        for degraded in [
+            protocol::authentication::AuthenticationHealth {
+                backpressure: true,
+                ..windows.clone()
+            },
+            protocol::authentication::AuthenticationHealth {
+                loss_signals: 1,
+                ..windows.clone()
+            },
+            protocol::authentication::AuthenticationHealth {
+                rejected_records: 1,
+                received_records: 1,
+                ..windows.clone()
+            },
+            protocol::authentication::AuthenticationHealth {
+                error: "Logon auditing policy is unavailable".into(),
+                ..windows.clone()
+            },
+            protocol::authentication::AuthenticationHealth {
+                caught_up: false,
+                ..windows
+            },
+        ] {
+            health.collector.as_mut().unwrap().windows_authentication = Some(degraded);
+            assert!(!healthy(&health, &windows_gate, now));
             assert!(!healthy(&health, &legacy, now));
         }
     }

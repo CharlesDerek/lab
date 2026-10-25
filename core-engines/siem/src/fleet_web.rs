@@ -139,6 +139,83 @@ async fn observations_page(
                     ("Original report", event.journal.message.clone()),
                 ]);
             }
+            if let protocol::telemetry::Telemetry::WindowsAuthentication { event } = telemetry {
+                facts.extend([
+                    (
+                        "Windows logon",
+                        event
+                            .service_outcome()
+                            .map(|value| format!("{value:?}"))
+                            .unwrap_or_else(|| {
+                                "NewCredentials session; outbound authentication not established"
+                                    .into()
+                            }),
+                    ),
+                    (
+                        "Target account",
+                        event
+                            .target_user
+                            .clone()
+                            .unwrap_or_else(|| "Not reported".into()),
+                    ),
+                    (
+                        "Target domain",
+                        event
+                            .target_domain
+                            .clone()
+                            .unwrap_or_else(|| "Not reported".into()),
+                    ),
+                    (
+                        "Target SID",
+                        event
+                            .target_sid
+                            .clone()
+                            .unwrap_or_else(|| "Not reported".into()),
+                    ),
+                    ("Logon type", event.logon_type.to_string()),
+                    (
+                        "Authentication package",
+                        event.authentication_package.clone(),
+                    ),
+                    (
+                        "Source address",
+                        event
+                            .source_ip
+                            .map(|ip| ip.to_string())
+                            .unwrap_or_else(|| "Not reported".into()),
+                    ),
+                    (
+                        "Source port",
+                        event
+                            .source_port
+                            .map(|port| port.to_string())
+                            .unwrap_or_else(|| "Not reported".into()),
+                    ),
+                    (
+                        "Reported caller PID",
+                        event
+                            .caller_pid
+                            .map(|pid| pid.to_string())
+                            .unwrap_or_else(|| "Not reported".into()),
+                    ),
+                    (
+                        "Reported caller image",
+                        event
+                            .caller_image
+                            .clone()
+                            .unwrap_or_else(|| "Not reported".into()),
+                    ),
+                    (
+                        "Security record",
+                        format!(
+                            "{} · event {} · version {}",
+                            event.record_id, event.event_code, event.version
+                        ),
+                    ),
+                    ("Reported computer", event.computer.clone()),
+                    ("Original XML", event.xml.clone()),
+                ]);
+            }
             if let protocol::telemetry::Telemetry::NetworkEvent {
                 stream_id,
                 namespace,
@@ -395,6 +472,9 @@ async fn portal(State(app): State<App>) -> Result<Html<String>, WebError> {
         if let Some(c) = &endpoint.health.collector {
             if let Some(authentication) = &c.authentication {
                 write!(content,"<p>Authentication journal: {} · {} reports · {} unsupported records · {} loss notifications</p><p>Collection began {} UTC; earlier journal history is outside its scope.</p><p>{}</p>",if stale || !authentication.healthy(now_ms()) {"coverage incomplete / catching up"} else {"active"},authentication.authentication_events,authentication.rejected_records,authentication.loss_signals,crate::render::time(authentication.started_ms),escape(&authentication.error)).unwrap();
+            }
+            if let Some(authentication) = &c.windows_authentication {
+                write!(content,"<p>Windows Security logons: {} · {} reports · {} unsupported records · {} loss notifications</p><p>Collection began {} UTC; earlier records and authentication providers outside Windows Security events 4624/4625 are outside its scope.</p><p>{}</p>",if stale || !authentication.healthy(now_ms()) {"coverage incomplete / catching up"} else {"active"},authentication.authentication_events,authentication.rejected_records,authentication.loss_signals,crate::render::time(authentication.started_ms),escape(&authentication.error)).unwrap();
             }
             write!(content,"<p>Telemetry: {} · {} processes · {} connections · {} pending changes · {}</p><p>{}</p>",escape(&c.mode),c.process_count,c.connection_count,c.pending_changes,if c.incomplete{"collection gaps / delivery pending"}else{"last snapshot collected"},escape(&c.error)).unwrap();
             if let Some(events) = &c.network_events {

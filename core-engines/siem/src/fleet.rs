@@ -305,6 +305,13 @@ impl Engine {
                 Some(Telemetry::Authentication { event }) => Some(event),
                 _ => None,
             };
+            let windows_authentication = match &event.telemetry {
+                Some(Telemetry::WindowsAuthentication { event }) => Some(event),
+                _ => None,
+            };
+            let authentication_outcome = authentication
+                .and_then(|a| a.service_outcome())
+                .or_else(|| windows_authentication.and_then(|a| a.service_outcome()));
             let mut context = EventContext {
                 host: id.into(),
                 program: process
@@ -352,11 +359,24 @@ impl Engine {
                     "PAM module failure; service authentication outcome is not established. PID/UID identify the reporter, while the claimed account remains separate"
                 }.into();
             }
+            if let Some(authentication) = windows_authentication {
+                context.program = "Microsoft-Windows-Security-Auditing".into();
+                context.pid = authentication.caller_pid;
+                context.summary = if authentication.service_outcome().is_some() {
+                    "Windows Security logon report; PID identifies the reported caller, while target account/domain and original XML remain separate. No Unix UID or process lifetime is inferred"
+                } else {
+                    "Windows NewCredentials session; outbound credential authentication is not established. Caller and target account remain separate, and original XML is retained"
+                }.into();
+            }
             let object = match &event.telemetry {
                 Some(Telemetry::NetworkEvent { event, .. }) => {
                     format!("{}:{}", event.protocol.label(), event.original.destination)
                 }
                 Some(Telemetry::Authentication { event }) => event
+                    .source_ip
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "local-authentication".into()),
+                Some(Telemetry::WindowsAuthentication { event }) => event
                     .source_ip
                     .map(|ip| ip.to_string())
                     .unwrap_or_else(|| "local-authentication".into()),
@@ -400,6 +420,24 @@ impl Engine {
                             })
                             .unwrap_or_else(|| event.id.clone())
                     })
+                    .or_else(|| {
+                        windows_authentication.map(|a| {
+                            a.target_user
+                                .as_ref()
+                                .map(|user| {
+                                    protocol::hash(
+                                        &serde_json::to_vec(&(
+                                            "windows-authentication-account",
+                                            id,
+                                            &a.target_domain,
+                                            user,
+                                        ))
+                                        .expect("Serializable account scope"),
+                                    )
+                                })
+                                .unwrap_or_else(|| event.id.clone())
+                        })
+                    })
                     .unwrap_or_else(|| {
                         process
                             .and_then(|p| p.user_id.as_ref())
@@ -414,8 +452,7 @@ impl Engine {
                     "authentication" => Kind::Authentication,
                     _ => Kind::System,
                 },
-                outcome: authentication
-                    .and_then(|a| a.service_outcome())
+                outcome: authentication_outcome
                     .map(|outcome| match outcome {
                         protocol::authentication::AuthenticationOutcome::Allowed => Outcome::Allow,
                         protocol::authentication::AuthenticationOutcome::Denied => Outcome::Deny,
@@ -423,10 +460,9 @@ impl Engine {
                     .unwrap_or(Outcome::Observe),
                 severity: if event.kind == "malware" {
                     5
-                } else if authentication.is_some_and(|a| {
-                    a.service_outcome()
-                        == Some(protocol::authentication::AuthenticationOutcome::Denied)
-                }) {
+                } else if authentication_outcome
+                    == Some(protocol::authentication::AuthenticationOutcome::Denied)
+                {
                     3
                 } else {
                     1

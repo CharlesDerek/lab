@@ -21,7 +21,7 @@ Athernex now includes a portable Rust endpoint agent, portal-generated installer
 | Response | Inventory, scan, signature update, exact-hash quarantine, restore, and explicitly permitted shell/PowerShell automation |
 | SOAR | Malware → investigation → exact-hash quarantine, disabled/review/automatic modes per endpoint; policy revision and result preserved in the investigation |
 | Evidence | Full endpoint/event identities, file paths, detection names and SHA-256 values survive durable receipt and replay; malware has its own event kind |
-| Endpoint telemetry | Native process metadata and TCP/UDP socket snapshots, plus opt-in Linux kernel process events and supported SSH/PAM authentication reports, collected independently of management requests and endpoint actions; typed originals, delivery backlog and collection gaps are visible in the portal; evidence is scoped to the device |
+| Endpoint telemetry | Native process metadata and TCP/UDP socket snapshots, plus opt-in Linux kernel process events, supported SSH/PAM authentication reports and Windows Security logon reports, collected independently of management requests and endpoint actions; typed originals, delivery backlog and collection gaps are visible in the portal; evidence is scoped to the device |
 | Endpoint detections | Browser/document interpreter children, interpreter external TCP connections, observed privilege changes and repeated authentication denials; process correlations retain device/boot/process identities, authentication accounts remain device-scoped, and originals survive investigation/replay |
 | Investigation correlation | Malware cases include up to eight prior observations from the same endpoint and executable path within one hour; case exports retain their full typed payloads |
 | Storage | Configurable live ledger budget, disk headroom admission, sealed cold-evidence segments, historical retrieval/correlation, persistent replay checks, complete verified backup |
@@ -589,6 +589,52 @@ docker build -t athernex-native-auth-fixture:local infrastructure/endpoint/auth-
 cargo test --locked -p athernex-endpoint --lib --test authentication --no-run --message-format=json > /tmp/authentication-tests.jsonl
 python3 tools/verify_auth_events.py --manifest /tmp/authentication-tests.jsonl --agent target/release/athernex-endpoint
 ```
+
+### Optional Windows Security logons
+
+Set `"windows_authentication": true` alongside `"enabled": true` in the private
+`telemetry` configuration, upgrade the server first, and restart the Windows
+agent. The default is off; `run --once` is refused. The service needs access to the
+local Security channel and audit-policy inspection. Production collection only
+reads policy: Logon success/failure and Account Lockout failure auditing must
+already be enabled. Disabled or uninspectable policy, per-user exclusions and a
+disabled/full channel make coverage incomplete.
+
+The collector preserves original XML for Security provider event 4624 versions
+0–2 and event 4625 version 0, with bounded parsing and explicit rejection of
+unsupported logon types or malformed candidate records. Target account/domain/SID,
+reported caller PID/image and source address remain separate fields. A successful
+type 9 NewCredentials session normalizes as an observation because it does not
+establish outbound authentication; cached logons do not establish a fresh domain
+controller check. See Microsoft's [4624 field contract](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4624)
+and [4625 field contract](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4625).
+The server neither infers a process lifetime from a caller PID nor merges the
+same account spelling across devices or reported domains. Eight denied reports
+for one such account within two minutes feed AX-001; originals remain available
+to authenticated operators and exports.
+
+First enablement records the current tail as its collection boundary. Subsequent
+starts resume from a durable bookmark bound to the log's creation time and a hash
+of the native System identity at that position. Every Security position is read
+so unrelated events do not create apparent sequence gaps; unrelated payloads are
+not retained. Original reports, bookmark and health commit together. Full queues
+pause reading without advancing the bookmark. Missing/reused positions, sequence
+gaps, supported source-loss/policy-change markers and rejected candidate records
+leave persistent incomplete coverage. The portal reports this source separately
+from Linux authentication, and rollout plans require configured Windows coverage
+to remain present, fresh and healthy. Source-side omissions and a compromised
+administrator remain outside this evidence's guarantees.
+
+The independent `windows-authentication` CI job runs an explicitly disposable
+LocalSystem/session-zero component fixture. It creates one owned account and
+temporarily configures the two audit subcategories, with checked account deletion
+and exact policy restoration. It exercises real successful/failed logons, stalled
+HTTP, full queues, forced collector-process termination, replay, authenticated
+original export, controlled AX-001 evidence and an observed policy gap. It checks
+anchor mismatch without clearing the host Security log. This is not the full SCM
+agent lifecycle or a measured production coverage result. Native execution of
+this new gate remains pending. Uploaded artifacts contain only suite-bound status
+and executable hashes; account details and event XML stay on the disposable host.
 
 ## Storage lifecycle and recovery
 

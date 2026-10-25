@@ -10,6 +10,7 @@ pub mod process_events;
 pub mod protection;
 pub mod telemetry;
 pub mod update;
+pub mod windows_authentication;
 
 pub const PROTOCOL: u32 = 1;
 pub const MAX_EVENTS: usize = 64;
@@ -344,6 +345,13 @@ impl EndpointEvent {
                 if self.id != event.event_id() || self.time_ms != event.journal.realtime_us / 1000 {
                     return Err(
                         "Authentication envelope does not match journal identity/time".into(),
+                    );
+                }
+            }
+            if let telemetry::Telemetry::WindowsAuthentication { event } = telemetry {
+                if self.id != event.event_id() || self.time_ms != event.time_ms {
+                    return Err(
+                        "Windows authentication envelope does not match XML identity/time".into(),
                     );
                 }
             }

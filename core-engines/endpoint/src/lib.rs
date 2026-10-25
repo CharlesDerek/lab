@@ -162,6 +162,7 @@ pub struct Store {
     pub(crate) network_events_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) process_events_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) authentication_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) windows_authentication_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
     _lock: Option<StateLock>,
 }
 impl Store {
@@ -199,6 +200,7 @@ impl Store {
             network_events_live: Default::default(),
             process_events_live: Default::default(),
             authentication_live: Default::default(),
+            windows_authentication_live: Default::default(),
             _lock: Some(lock),
         })
     }
@@ -218,6 +220,7 @@ impl Store {
             network_events_live: self.network_events_live.clone(),
             process_events_live: self.process_events_live.clone(),
             authentication_live: self.authentication_live.clone(),
+            windows_authentication_live: self.windows_authentication_live.clone(),
             _lock: None,
         })
     }

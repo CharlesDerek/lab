@@ -80,6 +80,10 @@ impl Engine {
                     .collector
                     .as_ref()
                     .is_some_and(|c| c.authentication.is_some()),
+                windows_authentication: endpoint_health
+                    .collector
+                    .as_ref()
+                    .is_some_and(|c| c.windows_authentication.is_some()),
                 protection_fingerprint: crate::fleet_rollout::protection_scope(&endpoint_health),
                 collector: endpoint_health
                     .collector

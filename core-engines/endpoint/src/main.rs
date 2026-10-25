@@ -453,6 +453,7 @@ fn main() -> Result<()> {
                 config.telemetry.interval_secs.min(
                     if config.telemetry.linux_process_events
                         || config.telemetry.linux_authentication
+                        || config.telemetry.windows_authentication
                         || config.telemetry.linux_network_events
                     {
                         5
@@ -473,6 +474,7 @@ fn main() -> Result<()> {
             if once
                 && (telemetry_policy.linux_process_events
                     || telemetry_policy.linux_authentication
+                    || telemetry_policy.windows_authentication
                     || telemetry_policy.linux_network_events)
             {
                 return Err("Native event collection requires continuous run mode".into());

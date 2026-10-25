@@ -247,49 +247,90 @@ fn engine_canary_requires_receipt_and_two_fresh_health_streams_across_restart() 
 
 #[test]
 fn engine_rollouts_keep_the_reviewed_authentication_requirement() {
-    for missing in [true, false] {
-        let mut f = Fixture::new();
-        f.health.collector = Some(p::telemetry::CollectorHealth {
-            authentication: Some(p::authentication::AuthenticationHealth {
+    for windows in [false, true] {
+        for missing in [true, false] {
+            let mut f = Fixture::new();
+            let healthy = p::authentication::AuthenticationHealth {
                 state: "active".into(),
                 started_ms: NOW,
                 checked_ms: NOW,
                 caught_up: true,
                 ..Default::default()
-            }),
-            network_events: None,
-            process_events: None,
-            mode: "snapshot".into(),
-            last_attempt_ms: NOW,
-            last_success_ms: NOW,
-            process_count: 1,
-            connection_count: 0,
-            pending_changes: 0,
-            incomplete: false,
-            error: String::new(),
-        });
-        for index in 0..3 {
-            f.beat(index, false, NOW);
+            };
+            f.health.collector = Some(p::telemetry::CollectorHealth {
+                authentication: (!windows).then_some(healthy.clone()),
+                network_events: None,
+                process_events: None,
+                windows_authentication: windows.then_some(healthy.clone()),
+                mode: "snapshot".into(),
+                last_attempt_ms: NOW,
+                last_success_ms: NOW,
+                process_count: 1,
+                connection_count: 0,
+                pending_changes: 0,
+                incomplete: false,
+                error: String::new(),
+            });
+            for index in 0..3 {
+                f.beat(index, false, NOW);
+            }
+            let id = f.propose();
+            let gates = f.engine.engine_rollout(&id).unwrap().plan.gates;
+            assert_eq!(gates.len(), f.ids.len());
+            assert!(gates.iter().all(
+                |gate| gate.authentication != windows && gate.windows_authentication == windows
+            ));
+            f.review(&id, "approve", NOW);
+            f.engine.tick_engine_rollouts(NOW).unwrap();
+            f.install(0, "installed", NOW + 1);
+            f.beat(0, true, NOW + 2);
+            let mut bad = f.health.clone();
+            let collector = bad.collector.as_mut().unwrap();
+            let (auth, other) = if windows {
+                (
+                    &mut collector.windows_authentication,
+                    &mut collector.authentication,
+                )
+            } else {
+                (
+                    &mut collector.authentication,
+                    &mut collector.windows_authentication,
+                )
+            };
+            // A healthy different source cannot replace the one reviewed.
+            *other = Some(healthy);
+            if missing {
+                *auth = None;
+            } else {
+                auth.as_mut().unwrap().loss_signals = 1;
+            }
+            f.engine
+                .endpoint_heartbeat(&f.ids[0], &bad, NOW + 3)
+                .unwrap();
+            let record = f.engine.engine_rollout(&id).unwrap();
+            assert_eq!(record.state, "failed");
+            assert!(record.members[1..]
+                .iter()
+                .all(|member| member.deployment_id.is_none()));
+            let collector = f.health.collector.as_mut().unwrap();
+            collector.last_attempt_ms = NOW + 60_010;
+            collector.last_success_ms = NOW + 60_010;
+            let auth = if windows {
+                &mut collector.windows_authentication
+            } else {
+                &mut collector.authentication
+            };
+            auth.as_mut().unwrap().checked_ms = NOW + 60_010;
+            for index in 0..3 {
+                f.beat(index, index == 0, NOW + 60_010);
+            }
+            f.engine.tick_engine_rollouts(NOW + 60_010).unwrap();
+            let record = f.engine.engine_rollout(&id).unwrap();
+            assert_eq!(record.state, "failed");
+            assert!(record.members[1..]
+                .iter()
+                .all(|member| member.deployment_id.is_none()));
         }
-        let id = f.propose();
-        assert!(f.engine.engine_rollout(&id).unwrap().plan.gates[0].authentication);
-        f.review(&id, "approve", NOW);
-        f.engine.tick_engine_rollouts(NOW).unwrap();
-        f.install(0, "installed", NOW + 1);
-        f.beat(0, true, NOW + 2);
-        let mut bad = f.health.clone();
-        let auth = &mut bad.collector.as_mut().unwrap().authentication;
-        if missing {
-            *auth = None;
-        } else {
-            auth.as_mut().unwrap().loss_signals = 1;
-        }
-        f.engine
-            .endpoint_heartbeat(&f.ids[0], &bad, NOW + 3)
-            .unwrap();
-        let record = f.engine.engine_rollout(&id).unwrap();
-        assert_eq!(record.state, "failed");
-        assert!(record.members[1].deployment_id.is_none());
     }
 }
 #[test]
