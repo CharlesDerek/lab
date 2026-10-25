@@ -52,6 +52,14 @@ pub(super) fn source(category: &str) {
             | "rejected_text_field"
             | "rejected_identity_mismatch"
             | "rejected_other"
+            | "loss_policy_health_transition"
+            | "loss_log_identity_changed"
+            | "loss_bookmark_anchor_missing"
+            | "loss_record_sequence"
+            | "loss_eventlog_marker"
+            | "loss_per_user_policy_marker"
+            | "loss_system_policy_marker"
+            | "loss_policy_scope_unknown"
     ) {
         println!("\nATHERNEX_AUTH_SOURCE={category}");
     }

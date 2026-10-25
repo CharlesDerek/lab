@@ -257,7 +257,10 @@ $source = @('controlled_queue_empty','controlled_queue_partial','controlled_queu
     'capture_health_timeout','health_has_rejections','health_has_loss','health_has_error',
     'health_state_inactive','health_backpressure','health_not_caught_up',
     'rejected_xml','rejected_provenance','rejected_missing_field','rejected_numeric_field',
-    'rejected_text_field','rejected_identity_mismatch','rejected_other')
+    'rejected_text_field','rejected_identity_mismatch','rejected_other',
+    'loss_policy_health_transition','loss_log_identity_changed','loss_bookmark_anchor_missing',
+    'loss_record_sequence','loss_eventlog_marker','loss_per_user_policy_marker',
+    'loss_system_policy_marker','loss_policy_scope_unknown')
 $log = Join-Path $Root 'fixture.log'
 $lines = @($stages | ForEach-Object { 'ATHERNEX_AUTH_STAGE=' + $_ }) +
          @($source | ForEach-Object { 'ATHERNEX_AUTH_SOURCE=' + $_ })
@@ -365,7 +368,10 @@ class IsolationRunnerTests(unittest.TestCase):
             'capture_health_timeout', 'health_has_rejections', 'health_has_loss', 'health_has_error',
             'health_state_inactive', 'health_backpressure', 'health_not_caught_up',
             'rejected_xml', 'rejected_provenance', 'rejected_missing_field', 'rejected_numeric_field',
-            'rejected_text_field', 'rejected_identity_mismatch', 'rejected_other'])
+            'rejected_text_field', 'rejected_identity_mismatch', 'rejected_other',
+            'loss_policy_health_transition', 'loss_log_identity_changed', 'loss_bookmark_anchor_missing',
+            'loss_record_sequence', 'loss_eventlog_marker', 'loss_per_user_policy_marker',
+            'loss_system_policy_marker', 'loss_policy_scope_unknown'])
         self.assertEqual(self.run_case('injected', PHASES_WRAPPER, 'Authentication'), {'stages': [], 'source': []})
 
     def test_isolation_rejects_unbound_or_other_suite_inputs(self):

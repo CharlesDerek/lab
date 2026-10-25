@@ -130,7 +130,10 @@ function Get-AuthenticationSource([string]$Log) {
         'capture_health_timeout','health_has_rejections','health_has_loss','health_has_error',
         'health_state_inactive','health_backpressure','health_not_caught_up',
         'rejected_xml','rejected_provenance','rejected_missing_field','rejected_numeric_field',
-        'rejected_text_field','rejected_identity_mismatch','rejected_other')
+        'rejected_text_field','rejected_identity_mismatch','rejected_other',
+        'loss_policy_health_transition','loss_log_identity_changed','loss_bookmark_anchor_missing',
+        'loss_record_sequence','loss_eventlog_marker','loss_per_user_policy_marker',
+        'loss_system_policy_marker','loss_policy_scope_unknown')
     if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
     try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
     catch { return }

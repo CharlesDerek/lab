@@ -255,6 +255,8 @@ impl Reader {
         result.checkpoint.log_created_filetime = created;
         result.checkpoint.policy_healthy = result.source_error.is_empty();
         if previous.policy_healthy && !result.checkpoint.policy_healthy {
+            #[cfg(test)]
+            super::diagnostics::source("loss_policy_health_transition");
             result.loss_signals += 1;
         }
         let mut query = Self::query(false)?;
@@ -262,6 +264,12 @@ impl Reader {
         let resumed = same_log && !previous.cursor_missing && self.seek_anchor(&query, previous)?;
         if !resumed {
             if !previous.cursor_missing || !same_log {
+                #[cfg(test)]
+                super::diagnostics::source(if same_log {
+                    "loss_bookmark_anchor_missing"
+                } else {
+                    "loss_log_identity_changed"
+                });
                 result.loss_signals += 1;
             }
             result.checkpoint.cursor_missing = true;
@@ -275,6 +283,8 @@ impl Reader {
             };
             let identity = Identity::read(&self.context, &event)?;
             if last_id.is_some_and(|last| last.checked_add(1) != Some(identity.record_id)) {
+                #[cfg(test)]
+                super::diagnostics::source("loss_record_sequence");
                 result.loss_signals += 1;
             }
             last_id = Some(identity.record_id);
@@ -316,10 +326,27 @@ impl Reader {
                 || (identity.auditing() && identity.event_code == 4912)
                 || (identity.auditing()
                     && identity.event_code == 4719
-                    && Self::policy_marker(&event).unwrap_or(true))
+                    && Self::policy_marker(&event).unwrap_or_else(|error| {
+                        #[cfg(test)]
+                        {
+                            super::diagnostics::source("loss_policy_scope_unknown");
+                            super::diagnostics::classify(error.as_ref());
+                        }
+                        #[cfg(not(test))]
+                        let _ = error;
+                        true
+                    }))
             {
                 // Unknown policy-change scope is uncertainty, never evidence of
                 // unchanged logon coverage. No unrelated event payload is saved.
+                #[cfg(test)]
+                super::diagnostics::source(if identity.eventlog() {
+                    "loss_eventlog_marker"
+                } else if identity.event_code == 4912 {
+                    "loss_per_user_policy_marker"
+                } else {
+                    "loss_system_policy_marker"
+                });
                 result.loss_signals += 1;
             }
             result.checkpoint =
