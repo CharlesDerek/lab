@@ -24,6 +24,45 @@ fn owned_worker_fixture() {
     worker_main(parent.parse().unwrap()).unwrap();
 }
 
+// On failure, distinguish a volume/device denial from scratch ACL/inheritance.
+// Probe only this fixture's checked path; report masks/error codes, never names.
+fn scratch_access_probe(path: &Path) {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::*;
+    for access in [
+        READ_CONTROL,
+        FILE_READ_ATTRIBUTES,
+        FILE_LIST_DIRECTORY,
+        FILE_TRAVERSE,
+    ] {
+        let result = std::fs::OpenOptions::new()
+            .access_mode(access)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path);
+        eprintln!(
+            "scratch directory access mask={access:#x}, error={:?}",
+            result.err().and_then(|e| e.raw_os_error())
+        );
+    }
+    eprintln!(
+        "scratch metadata error={:?}",
+        std::fs::metadata(path).err().and_then(|e| e.raw_os_error())
+    );
+    eprintln!(
+        "existing scratch file read error={:?}",
+        std::fs::read(path.join("existing-proof"))
+            .err()
+            .and_then(|e| e.raw_os_error())
+    );
+    eprintln!(
+        "existing scratch file write error={:?}",
+        std::fs::write(path.join("existing-proof"), b"scanner fixture bytes")
+            .err()
+            .and_then(|e| e.raw_os_error())
+    );
+}
+
 #[test]
 #[ignore = "internal restricted scratch filesystem fixture"]
 fn restricted_io_fixture() {
@@ -42,6 +81,9 @@ fn restricted_io_fixture() {
         );
         println!("other-logon-denied");
         return;
+    }
+    if file.is_err() {
+        scratch_access_probe(&path);
     }
     let mut file = file.unwrap();
     let block = vec![0x4a; 4 * 1024 * 1024];
@@ -230,6 +272,9 @@ fn owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit() {
     assert!(validate_observation(&state, &changed, token.logon_sid()).is_err());
     assert!(recovery::clean(&state).is_err());
     run_scanner(&state, &Token::new().unwrap(), &ready.path, true);
+    // Inherited access on an existing SYSTEM-created child is an independent
+    // diagnostic of the scanner's create-file permissions on the directory.
+    std::fs::write(ready.path.join("existing-proof"), b"system fixture bytes").unwrap();
     run_scanner(&state, &token, &ready.path, false);
     health(&state, &id, token.logon_sid()).unwrap();
     let network = state.directory("network").unwrap();

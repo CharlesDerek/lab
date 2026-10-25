@@ -1032,17 +1032,19 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `f000bc8`](https://github.com/CharlesDerek/lab/actions/runs/40217271761)
+and task cleanup using mocked commands. The [hosted run at `e115ccb`](https://github.com/CharlesDerek/lab/actions/runs/40217647569)
 passed ten of eleven checks on Windows Server 2022 as LocalSystem in session
 zero. The retained report was checked against its source commit and input-manifest
 hash. Scanner startup/cleanup, private-state access, both workspace cleanup cases,
 partial-image recovery, WFP enforcement/removal, recovery after owner crashes,
 fixed-image checks, GPT/volume binding and attachment release after owner exit
-passed. The full worker reaches the formatter but Storage module import fails
-because its cleared environment lacks `windir`. The formatter now supplies that
-value from `GetWindowsDirectoryW`, as it already does for `SystemRoot`; no inherited
-user environment is trusted. Formatting, capacity enforcement and full worker
-cleanup remain unverified.
+passed. The formatter now supplies `windir` from `GetWindowsDirectoryW`, as it
+already does for `SystemRoot`. Native formatting, filesystem preparation and
+worker readiness pass. The unrelated logon is denied access as expected, but the
+intended scanner logon also receives access denied on its first file creation.
+Test-only probes now distinguish directory access from access to an inherited
+fixture file, reporting masks and error codes without paths or identities.
+Capacity enforcement and full worker cleanup remain unverified.
 
 Initialization creates the owned MSR when the new GPT is empty, verifies its
 arrival, then adds data. The read-only partition-device query uses numbers derived
@@ -1058,8 +1060,8 @@ access denied. State persistence now retries only access/sharing/lock errors for
 up to two seconds, using the same synchronized temporary file. It never unlinks
 the old destination or changes permissions; persistent denial still fails. Two
 native tests cover transient reader release and persistent refusal with unchanged
-old contents and no temporary-file leak. Native execution of these tests and
-subsequent controller delivery remains pending.
+old contents and no temporary-file leak. The Windows unit-test step containing
+both tests passed in this run; subsequent controller delivery remains pending.
 
 Image creation and verification now use `VirtualDiskId`, matching Microsoft's
 [VHDX identity implementation](https://github.com/microsoft/go-winio/blob/main/vhd/vhd.go).
