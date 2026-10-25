@@ -5,6 +5,7 @@ use super::*;
 use crate::windows_scratch_spec::Ranges;
 use std::{
     mem::offset_of,
+    os::windows::fs::FileExt,
     time::{Duration, Instant},
 };
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
@@ -225,7 +226,12 @@ impl AttachedDisk {
         let _privilege = privilege::ManageVolume::acquire()?;
         self.verify()?;
         let before = Layout::get(&self.physical)?;
-        if before.style != PARTITION_STYLE_RAW as u32 || before.count != 0 {
+        // A newly created, uninitialized VHDX can be reported as MBR with no
+        // entries. Accept no partitions in either empty representation, then
+        // independently inspect the disk headers before granting mutation.
+        if ![PARTITION_STYLE_RAW as u32, PARTITION_STYLE_MBR as u32].contains(&before.style)
+            || before.count != 0
+        {
             // Report only shape/range metadata, never disk/partition IDs or
             // device paths. Preserve refusal until the exact layout is known.
             let first = before.entries[0];
@@ -239,6 +245,21 @@ impl AttachedDisk {
                 before.style, before.count, first.PartitionStyle, first.StartingOffset,
                 first.PartitionLength, first.PartitionNumber
             ).into());
+        }
+        // Cover the MBR and both GPT header/table regions on this owned disk.
+        // No existing image can obtain AttachedDisk; nonzero headers still
+        // refuse initialization instead of erasing even an empty old layout.
+        let mut header = [0u8; 64 * 1024];
+        for offset in [0, self.spec().bytes - header.len() as u64] {
+            let read = self
+                .physical
+                .seek_read(&mut header, offset)
+                .map_err(|error| {
+                    format!("Scratch partition header read at byte {offset}: {error}")
+                })?;
+            if read != header.len() || header.iter().any(|&byte| byte != 0) {
+                return Err("Scratch partition headers are not empty".into());
+            }
         }
         let create = CREATE_DISK {
             PartitionStyle: PARTITION_STYLE_GPT,

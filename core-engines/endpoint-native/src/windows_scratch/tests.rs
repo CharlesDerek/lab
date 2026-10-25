@@ -40,7 +40,14 @@ impl Fixture {
         FreshDisk::create(self.directory(), self.spec.clone()).unwrap()
     }
     fn remove(self) {
-        require_detached(self.directory(), self.spec.clone()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match require_detached(self.directory(), self.spec.clone()) {
+                Ok(()) => break,
+                Err(error) if Instant::now() >= deadline => panic!("{error}"),
+                Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
         let directory = self.directory();
         directory.remove(IMAGE).unwrap();
         // Only a known helper proof can remain; never recursively traverse an
@@ -124,6 +131,27 @@ fn fixed_image_capacity_identity_and_detached_recovery_are_verified() {
 #[test]
 #[ignore = "requires native Windows LocalSystem; initializes only a new private scratch disk"]
 fn fresh_disk_gpt_and_discovered_volume_remain_bound_to_the_created_image() {
+    // Refuse nonempty primary/backup regions even if the provider reports no
+    // partitions. These writes target only this test's newly created VHDX.
+    use std::os::windows::fs::FileExt;
+    for backup in [false, true] {
+        let f = Fixture::new();
+        let disk = f.create().attach().unwrap();
+        let offset = if backup { f.spec.bytes - 512 } else { 512 };
+        let mut marker = [0u8; 512];
+        marker[0] = 0x5a;
+        assert_eq!(
+            disk.physical.seek_write(&marker, offset).unwrap(),
+            marker.len()
+        );
+        disk.physical.sync_all().unwrap();
+        let error = disk
+            .initialize()
+            .err()
+            .expect("Nonempty headers were overwritten");
+        assert_eq!(error.to_string(), "Scratch partition headers are not empty");
+        f.remove();
+    }
     let f = Fixture::new();
     let disk = f.create().attach().unwrap().initialize().unwrap();
     no_thread_impersonation();

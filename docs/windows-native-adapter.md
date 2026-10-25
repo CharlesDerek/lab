@@ -1059,8 +1059,14 @@ The [run at `6680d18`](https://github.com/CharlesDerek/lab/actions/runs/40214135
 passed nine of eleven: image identity/capacity and detached-recovery controls,
 plus attachment release after owner exit, now passed natively. Both the GPT and
 full worker tests stopped at the pre-initialization layout guard. The returned
-style/count and first-entry ranges are now reported without device paths or IDs;
-partition creation and full worker capacity/cleanup remain unverified.
+style/count and first-entry ranges are reported without device paths or IDs.
+The [run at `e895a42`](https://github.com/CharlesDerek/lab/actions/runs/40214514702)
+identified an empty MBR representation with zero entries. Initialization now
+accepts RAW or MBR only with zero entries, and additionally reads the first and
+last 64 KiB through the owned disk handle and requires every byte to be zero.
+The GPT fixture injects nonzero primary and backup header data into separate
+fresh images and requires refusal before running its successful-path checks.
+Partition creation and full worker capacity/cleanup remain unverified.
 This gate does not establish signed
 minifilter prevention, complete scanner confinement or hostile-administrator
 tamper resistance.
