@@ -112,6 +112,11 @@ try {
         $lines += 'ATHERNEX_PROCESS_EVENTS_DIAGNOSTIC=tdh_property:5'
         $lines += 'ATHERNEX_PROCESS_EVENTS_SCHEMA=3:4:64:12'
         $lines += 'ATHERNEX_PROCESS_EVENTS_SCHEMA=39:255:32:64'
+        $lines += 'ATHERNEX_PROCESS_EVENTS_SCHEMA=0:0:32:1'
+        $lines += 'ATHERNEX_PROCESS_EVENTS_SCHEMA=255:255:64:64'
+        foreach ($property in @('process_id','parent_id','session_id','exit_status','unique_process_key')) {
+            $lines += 'ATHERNEX_PROCESS_EVENTS_TDH_PROPERTY=' + $property
+        }
         if ($Case -ceq 'markers-injected') {
             $lines = @($lines | ForEach-Object {
                 $_ + ' private_fixture_payload'; ' ' + $_; $_ + [char]0; $_ + [char]0x00ad
@@ -120,11 +125,12 @@ try {
             })
             $lines += @('ATHERNEX_PROCESS_EVENTS_STAGE=unknown_private_fixture_payload',
                 'ATHERNEX_PROCESS_EVENTS_FAILURE=unknown_private_fixture_payload',
+                'ATHERNEX_PROCESS_EVENTS_TDH_PROPERTY=unknown_private_fixture_payload',
                 'ATHERNEX_PROCESS_EVENTS_DIAGNOSTIC=unknown_private_fixture_payload:5')
             foreach ($value in @('01','+1','-1','0x5','4294967296','1.0','1e2',' 1','1 ')) {
                 $lines += 'ATHERNEX_PROCESS_EVENTS_DIAGNOSTIC=query_trace:' + $value
             }
-            foreach ($value in @('03:4:64:12','5:4:64:12','3:256:64:12','3:04:64:12',
+            foreach ($value in @('03:4:64:12','256:4:64:12','-1:4:64:12','3:256:64:12','3:04:64:12',
                 '3:-1:64:12','3:4:16:12','3:4:064:12','3:4:64:0','3:4:64:65','3:4:64:012')) {
                 $lines += 'ATHERNEX_PROCESS_EVENTS_SCHEMA=' + $value
             }
@@ -134,11 +140,13 @@ try {
                 'ATHERNEX_PROCESS_EVENTS_STAGE=passed'; 'ATHERNEX_PROCESS_EVENTS_FAILURE=other';
                 'ATHERNEX_PROCESS_EVENTS_DIAGNOSTIC=query_trace:' + $_
                 'ATHERNEX_PROCESS_EVENTS_SCHEMA=3:' + $_ + ':64:12'
+                'ATHERNEX_PROCESS_EVENTS_TDH_PROPERTY=parent_id'
             })
         }
         $lines | Set-Content -LiteralPath $log
         $output = @{ stages=@(Get-ProcessEventsStages $log); failures=@(Get-ProcessEventsFailures $log);
-                     diagnostics=@(Get-ProcessEventsDiagnostics $log); schema=@(Get-ProcessEventsSchema $log) }
+                     diagnostics=@(Get-ProcessEventsDiagnostics $log); schema=@(Get-ProcessEventsSchema $log);
+                     properties=@(Get-ProcessEventsProperties $log) }
     } elseif ($Case.StartsWith('worker-') -or $Case.StartsWith('input-')) {
         if ($Case.StartsWith('worker-change:')) { Mutate-Input $Case.Substring(14) }
         $workerReport = @{ manifest_sha256=$digest; checks=[ordered]@{}; error=$null }
@@ -240,7 +248,7 @@ class ProcessEventsRunnerTests(unittest.TestCase):
                 self.assertEqual(set(public), {'schema', 'suite', 'proof_scope', 'production_readiness',
                     'manifest_sha256', 'native_process_events_validation_passed', 'stages',
                     'process_events_stages', 'process_events_failures', 'process_events_diagnostics',
-                    'process_events_schema', 'checks', 'error'})
+                    'process_events_schema', 'process_events_properties', 'checks', 'error'})
                 self.assertEqual(public['checks'], {TEST: 'passed' if passed else 'not_verified'})
                 self.assertIs(public['native_process_events_validation_passed'], passed)
                 self.assertIs(public['production_readiness'], False)
@@ -259,15 +267,19 @@ class ProcessEventsRunnerTests(unittest.TestCase):
                                               {'operation': 'tdh_size', 'win32_error': 122},
                                               {'operation': 'tdh_property', 'win32_error': 5}])
         self.assertEqual(valid['schema'], [{'opcode': 3, 'version': 4, 'pointer_bits': 64, 'property_count': 12},
-                                          {'opcode': 39, 'version': 255, 'pointer_bits': 32, 'property_count': 64}])
+                                          {'opcode': 39, 'version': 255, 'pointer_bits': 32, 'property_count': 64},
+                                          {'opcode': 0, 'version': 0, 'pointer_bits': 32, 'property_count': 1},
+                                          {'opcode': 255, 'version': 255, 'pointer_bits': 64, 'property_count': 64}])
+        self.assertEqual(valid['properties'], ['process_id', 'parent_id', 'session_id', 'exit_status', 'unique_process_key'])
         injected = self.run_case('markers-injected')
-        for key in ['stages', 'failures', 'diagnostics', 'schema']:
+        for key in ['stages', 'failures', 'diagnostics', 'schema', 'properties']:
             self.assertEqual(injected[key], [])
         flood = self.run_case('markers-flood')
         self.assertEqual(flood['stages'], ['passed'])
         self.assertEqual(flood['failures'], ['other'])
         self.assertEqual(flood['diagnostics'], [{'operation': 'query_trace', 'win32_error': i} for i in range(32)])
         self.assertEqual(flood['schema'], [{'opcode': 3, 'version': i, 'pointer_bits': 64, 'property_count': 12} for i in range(16)])
+        self.assertEqual(flood['properties'], ['parent_id'])
 
     def test_workflow_uploads_only_public_projection_and_manifest(self):
         workflow = SCRIPT.parent.parent/'.github/workflows/endpoint.yml'

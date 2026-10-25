@@ -97,6 +97,43 @@ fn scalar_type(
         "Process schema property type differs",
     )
 }
+fn property_label(field: &str) -> Option<&'static str> {
+    match field {
+        "ProcessId" => Some("process_id"),
+        "ParentId" => Some("parent_id"),
+        "SessionId" => Some("session_id"),
+        "ExitStatus" => Some("exit_status"),
+        "UniqueProcessKey" => Some("unique_process_key"),
+        _ => None,
+    }
+}
+fn scalar_property(
+    record: &EVENT_RECORD,
+    context: &TDH_CONTEXT,
+    properties: &BTreeMap<String, EVENT_PROPERTY_INFO>,
+    field: &str,
+    expected: &[i32],
+    width: usize,
+) -> Result<Vec<u8>> {
+    let result = scalar_type(properties, field, expected)
+        .and_then(|()| property(record, context, field, width));
+    if result.is_err() {
+        // These fields describe an installed structural schema. All payload
+        // values and arbitrary native property names remain private.
+        let descriptor = record.EventHeader.EventDescriptor;
+        println!(
+            "\nATHERNEX_PROCESS_EVENTS_SCHEMA={}:{}:{}:{}",
+            descriptor.Opcode,
+            descriptor.Version,
+            context.ParameterValue * 8,
+            properties.len()
+        );
+        if let Some(label) = property_label(field) {
+            println!("\nATHERNEX_PROCESS_EVENTS_TDH_PROPERTY={label}");
+        }
+    }
+    result
+}
 fn scalar32(
     record: &EVENT_RECORD,
     context: &TDH_CONTEXT,
@@ -104,8 +141,7 @@ fn scalar32(
     field: &str,
     expected: &[i32],
 ) -> Result<u32> {
-    scalar_type(properties, field, expected)?;
-    let value = property(record, context, field, 4)?;
+    let value = scalar_property(record, context, properties, field, expected, 4)?;
     Ok(u32::from_le_bytes(
         value.try_into().map_err(|_| "Invalid scalar bytes")?,
     ))
@@ -252,11 +288,12 @@ pub(super) fn decode(original: &Original) -> Result<Report> {
             "ExitStatus",
             &[TDH_INTYPE_INT32],
         )? as i32;
-        scalar_type(&properties, "UniqueProcessKey", &[TDH_INTYPE_POINTER])?;
-        let key_bytes = property(
+        let key_bytes = scalar_property(
             record,
             &context,
+            &properties,
             "UniqueProcessKey",
+            &[TDH_INTYPE_POINTER],
             pointer_bits as usize / 8,
         )?;
         let key = if pointer_bits == 32 {
@@ -312,4 +349,26 @@ pub(super) fn property_names_and_scalar_metadata_are_bounded_and_typed() {
     fields.get_mut("ProcessId").unwrap().Flags = 0;
     fields.get_mut("ProcessId").unwrap().Anonymous2.count = 2;
     assert!(scalar_type(&fields, "ProcessId", &[TDH_INTYPE_UINT32]).is_err());
+}
+
+#[test]
+fn property_diagnostics_use_only_fixed_requested_labels() {
+    for (field, label) in [
+        ("ProcessId", "process_id"),
+        ("ParentId", "parent_id"),
+        ("SessionId", "session_id"),
+        ("ExitStatus", "exit_status"),
+        ("UniqueProcessKey", "unique_process_key"),
+    ] {
+        assert_eq!(property_label(field), Some(label));
+    }
+    for field in [
+        "",
+        "PrivateNativeField",
+        "ProcessId\nprivate",
+        "ProcessId suffix",
+        "processid",
+    ] {
+        assert!(property_label(field).is_none());
+    }
 }
