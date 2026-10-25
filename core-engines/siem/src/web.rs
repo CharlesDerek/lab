@@ -49,7 +49,25 @@ fn checked<T>(result: LabResult<T>) -> Result<T, WebError> {
 }
 
 pub fn router(app: App) -> Router {
+    router_with_release_catalog(app, crate::fleet_update_web::catalog_root())
+}
+
+pub fn router_with_release_catalog(app: App, releases: std::path::PathBuf) -> Router {
     Router::new()
+        .merge(crate::control_web::routes())
+        .merge(crate::investigator_web::routes())
+        .merge(crate::fleet_engine_web::routes(releases.join("engines")))
+        .merge(crate::fleet_web::routes())
+        .merge(crate::fleet_update_web::routes(releases))
+        .merge(crate::storage_web::routes())
+        .route("/memory",get(memory_page))
+        .route("/memory/configure",post(memory_configure))
+        .route("/api/memory",get(memory_api).post(memory_update))
+        .route("/api/evidence/{id}",get(evidence_api))
+        .route("/api/evidence-audit",get(retrieval_audit_api))
+        .route("/api/history",get(history_api))
+        .route("/api/evidence-locations",post(location_update))
+        .route("/api/agent-certificates",post(certificate_update))
         .route("/sources",get(sources))
         .route("/source/{id}",get(source))
         .route("/sources/action",post(source_action))
@@ -112,6 +130,14 @@ fn page(
     let mut snapshot = checked(engine.snapshot())?;
     if view == "archive" {
         snapshot.events = checked(engine.archive_events(selected.unwrap_or(0)))?;
+    }
+    if view == "event" {
+        let id = selected.unwrap_or(0) as u64;
+        if !snapshot.events.iter().any(|e| e.event.id == id) {
+            snapshot
+                .events
+                .push(checked(engine.retrieve_local(id, now_ms()))?);
+        }
     }
     Ok(Html(render::page(
         &snapshot, view, filters, selected, &app.csrf,
@@ -234,7 +260,7 @@ async fn api_state(State(app): State<App>) -> Result<Json<serde_json::Value>, We
         .map_err(|_| WebError("Engine unavailable".into()))?;
     let s = checked(engine.snapshot())?;
     Ok(Json(
-        serde_json::json!({"schema":"AEF1","retained_events":s.events.len(),"total_received":s.total_received,"duplicates":s.duplicates,"open_findings":s.findings.iter().filter(|f|f.status=="open").count(),"payload_bytes":s.payload_bytes,"normalized_json_bytes":s.normalized_json_bytes,"database_bytes":s.database_bytes,"wal_bytes":s.wal_bytes,"dictionary_entries":s.dictionary_entries,"live":s.live,"limits":{"events":MAX_EVENTS,"findings":MAX_FINDINGS,"batch":MAX_BATCH},"mode":if s.demo {"demo"} else {"operational"},"sources":s.sources,"cases":s.cases,"storage_error":s.storage_error,"model_provider":"none","hive":s.hive,"retention":s.retention}),
+        serde_json::json!({"schema":"AEF1","retained_events":s.events.len(),"total_received":s.total_received,"duplicates":s.duplicates,"open_findings":s.findings.iter().filter(|f|f.status=="open").count(),"payload_bytes":s.payload_bytes,"normalized_json_bytes":s.normalized_json_bytes,"database_bytes":s.database_bytes,"wal_bytes":s.wal_bytes,"dictionary_entries":s.dictionary_entries,"live":s.live,"limits":{"events":MAX_EVENTS,"findings":MAX_FINDINGS,"batch":MAX_BATCH},"mode":if s.demo {"demo"} else {"operational"},"sources":s.sources,"cases":s.cases,"storage_error":s.storage_error,"model_provider":"none","hive":s.hive,"retention":s.retention,"memory":s.memory}),
     ))
 }
 
@@ -306,7 +332,7 @@ async fn api_export(State(app): State<App>) -> Result<Response, WebError> {
 
 async fn operator_boundary(
     State(app): State<App>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
     // DNS rebinding: this local service accepts only loopback hostnames.
@@ -330,7 +356,15 @@ async fn operator_boundary(
                     .and_then(|h| h.to_str().ok())
                     .unwrap_or("")
             );
-            if origin != expected {
+            let configured_origin = std::env::var("ATHERNEX_PUBLIC_ORIGIN").ok().filter(|s| {
+                athernex_endpoint_protocol::server_url(s).is_ok() && s.starts_with("https://")
+            });
+            if origin != expected
+                && configured_origin
+                    .as_deref()
+                    .map(|s| s.trim_end_matches('/'))
+                    != Some(origin)
+            {
                 return StatusCode::FORBIDDEN.into_response();
             }
         }
@@ -343,8 +377,25 @@ async fn operator_boundary(
         || path.starts_with("/assets/")
         || path == "/api/ingest"
         || path.starts_with("/api/ingest/")
-        || path.starts_with("/api/gateway/");
-    if !public && !app.operator.authorized(request.headers()) {
+        || path.starts_with("/api/gateway/")
+        || path.starts_with("/api/endpoint/");
+    let mut actor = app.operator.identity(request.headers());
+    if !public {
+        if let Ok(engine) = app.engine.lock() {
+            actor = match actor {
+                Some(ref identity) if identity.id != "bootstrap" => {
+                    engine.validate_operator_session(identity, now_ms()).ok()
+                }
+                Some(identity) => Some(identity),
+                None => engine
+                    .authenticate_operator(crate::fleet_web::bearer(request.headers()), now_ms())
+                    .ok(),
+            };
+        } else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    }
+    if !public && actor.is_none() {
         return if path.starts_with("/api/") || request.method() != axum::http::Method::GET {
             (
                 StatusCode::UNAUTHORIZED,
@@ -355,6 +406,35 @@ async fn operator_boundary(
             Redirect::to("/login").into_response()
         };
     }
+    if !public {
+        let actor = actor.expect("authenticated operator");
+        if !actor.allows(request.method().as_str(), path) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        if request.method() != axum::http::Method::GET
+            && request.method() != axum::http::Method::HEAD
+        {
+            let detail = format!(
+                "{} {} {}",
+                actor.id,
+                request.method(),
+                path.chars().take(1024).collect::<String>()
+            );
+            if app
+                .engine
+                .lock()
+                .map_err(|_| ())
+                .and_then(|e| {
+                    e.audit("operator.request", &detail, now_ms())
+                        .map_err(|_| ())
+                })
+                .is_err()
+            {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+        }
+        request.extensions_mut().insert(actor);
+    }
     next.run(request).await
 }
 async fn login_get() -> Html<String> {
@@ -364,14 +444,31 @@ async fn login_get() -> Html<String> {
 struct Login {
     key: String,
 }
-async fn login_post(State(app): State<App>, Form(form): Form<Login>) -> Response {
-    match app.operator.login(&form.key) {
+async fn login_post(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Form(form): Form<Login>,
+) -> Response {
+    let login = app.operator.login(&form.key).or_else(|_| {
+        let engine = app.engine.lock().map_err(|_| "Engine unavailable")?;
+        let actor = engine.authenticate_operator(&form.key, now_ms())?;
+        app.operator.login_principal(actor)
+    });
+    match login {
         Ok(token) => {
             let mut response = Redirect::to("/").into_response();
+            let secure = std::env::var("ATHERNEX_PUBLIC_ORIGIN")
+                .ok()
+                .is_some_and(|configured| {
+                    configured.starts_with("https://")
+                        && headers.get("origin").and_then(|h| h.to_str().ok())
+                            == Some(configured.trim_end_matches('/'))
+                });
             response.headers_mut().insert(
                 "set-cookie",
                 format!(
-                    "athernex_operator={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600"
+                    "athernex_operator={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600{}",
+                    if secure { "; Secure" } else { "" }
                 )
                 .parse()
                 .unwrap(),
@@ -538,6 +635,13 @@ async fn gateway_read(
     Path(resource): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, WebError> {
+    if resource.starts_with("event-") {
+        return Ok((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error":"event_evidence_requires_mtls"})),
+        )
+            .into_response());
+    }
     let mut engine = app
         .engine
         .lock()
@@ -703,8 +807,9 @@ async fn source_ingest(
             .into_response());
     }
     match engine.ingest_source(&id,Some(bearer(&headers)),&inputs,None,0,now_ms()) {
-        Ok(accepted)=>Ok(Json(serde_json::json!({"accepted":accepted,"duplicate":inputs.len()-accepted,"durability":"buffered; inspect rolling memory for flush status"})).into_response()),
+        Ok(accepted)=>Ok(Json(serde_json::json!({"accepted":accepted,"duplicate":inputs.len()-accepted,"durability":"committed normalized evidence"})).into_response()),
         Err(e) if e.to_string()=="Source credential rejected"=>Ok((StatusCode::UNAUTHORIZED,Json(serde_json::json!({"error":"source_credential_rejected"}))).into_response()),
+        Err(e) if ["capacity", "budget", "full"].iter().any(|word| e.to_string().contains(word))=>Ok((StatusCode::SERVICE_UNAVAILABLE,[("retry-after","30")],Json(serde_json::json!({"error":e.to_string(),"acknowledged":0}))).into_response()),
         Err(e)=>Err(WebError(e.to_string()))
     }
 }
@@ -743,13 +848,9 @@ fn evidence(engine: &Engine, id: u64, block: Option<i64>) -> LabResult<DisplayEv
             .find(|e| e.event.id == id)
             .ok_or("Archive evidence no longer retained".into());
     }
-    engine
-        .events()?
-        .into_iter()
-        .chain(engine.cases()?.into_iter().flat_map(|c| c.evidence))
-        .find(|e| e.event.id == id)
-        .ok_or("Evidence no longer retained".into())
+    engine.retrieve_local(id, now_ms())
 }
+
 async fn case_action(
     State(app): State<App>,
     Form(form): Form<CaseAction>,
@@ -810,7 +911,22 @@ async fn case_export(State(app): State<App>, Path(id): Path<i64>) -> Result<Resp
         .into_iter()
         .find(|c| c.id == id)
         .ok_or(WebError("Investigation not found".into()))?;
-    let data = serde_json::to_string_pretty(&case).map_err(|e| WebError(e.to_string()))?;
+    let mut export = serde_json::to_value(&case).map_err(|e| WebError(e.to_string()))?;
+    export["endpoint_responses"] =
+        serde_json::to_value(checked(engine.case_endpoint_commands(id))?)
+            .map_err(|e| WebError(e.to_string()))?;
+    let observations = case
+        .evidence
+        .iter()
+        .map(|e| engine.endpoint_observation(e.event.id))
+        .collect::<crate::engine::LabResult<Vec<_>>>()
+        .map_err(|e| WebError(e.to_string()))?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    export["endpoint_observations"] =
+        serde_json::to_value(observations).map_err(|e| WebError(e.to_string()))?;
+    let data = serde_json::to_string_pretty(&export).map_err(|e| WebError(e.to_string()))?;
     Ok((
         [
             ("content-type", "application/json"),
@@ -829,6 +945,7 @@ async fn readiness(State(app): State<App>) -> Response {
     };
     let now = now_ms();
     let ready = engine.storage_error.is_empty()
+        && engine.storage_state().is_ok_and(|s| s.admission_ready)
         && engine.sources().is_ok_and(|sources| {
             sources.iter().all(|s| {
                 s.kind != "journal"
@@ -878,4 +995,146 @@ async fn original_event(
     s.selected_archive = query.block;
     let html = render::page(&s, "event", &Filters::default(), Some(id as i64), &app.csrf);
     Ok(Html(html.replace("</main>",&format!("<section class='panel controls-panel'><div class=eyebrow>ON-DEMAND / OS JOURNAL</div><h2>Original message</h2><p>Read from the exact journal cursor. Not copied to the SIEM archive. Display capped at 16,384 characters.</p><pre class=raw-message>{}</pre></section></main>",render::escape(&message)))))
+}
+
+async fn memory_page(State(app): State<App>) -> Result<Html<String>, WebError> {
+    page(&app, "memory", &Filters::default(), None)
+}
+async fn memory_api(State(app): State<App>) -> Result<Json<crate::memory::MemoryState>, WebError> {
+    let engine = app
+        .engine
+        .lock()
+        .map_err(|_| WebError("Engine unavailable".into()))?;
+    Ok(Json(checked(engine.memory_state())?))
+}
+#[derive(Deserialize)]
+struct MemoryUpdate {
+    csrf: String,
+    config: crate::memory::MemoryConfig,
+}
+async fn memory_update(
+    State(app): State<App>,
+    Json(input): Json<MemoryUpdate>,
+) -> Result<Json<crate::memory::MemoryState>, WebError> {
+    check_csrf(&app, &input.csrf)?;
+    let engine = app
+        .engine
+        .lock()
+        .map_err(|_| WebError("Engine unavailable".into()))?;
+    checked(engine.configure_memory(input.config, now_ms()))?;
+    Ok(Json(checked(engine.memory_state())?))
+}
+#[derive(Deserialize)]
+struct MemoryForm {
+    csrf: String,
+    hot_hours: u64,
+    hot_events: usize,
+    context_events: usize,
+}
+async fn memory_configure(
+    State(app): State<App>,
+    Form(input): Form<MemoryForm>,
+) -> Result<Redirect, WebError> {
+    check_csrf(&app, &input.csrf)?;
+    let engine = app
+        .engine
+        .lock()
+        .map_err(|_| WebError("Engine unavailable".into()))?;
+    let mut config = checked(engine.memory_config())?;
+    config.hot_ms = input
+        .hot_hours
+        .checked_mul(3_600_000)
+        .ok_or_else(|| WebError("Invalid duration".into()))?;
+    config.hot_events = input.hot_events;
+    config.context_events = input.context_events;
+    checked(engine.configure_memory(config, now_ms()))?;
+    Ok(Redirect::to("/memory"))
+}
+async fn evidence_api(
+    State(app): State<App>,
+    Path(id): Path<u64>,
+) -> Result<Json<serde_json::Value>, WebError> {
+    let engine = app
+        .engine
+        .lock()
+        .map_err(|_| WebError("Engine unavailable".into()))?;
+    let evidence = checked(engine.retrieve_local(id, now_ms()))?;
+    Ok(Json(
+        serde_json::json!({"sha256":crate::memory::hex(&checked(engine.evidence_hash(id))?),"integrity":"verified_local","evidence":evidence}),
+    ))
+}
+async fn retrieval_audit_api(
+    State(app): State<App>,
+) -> Result<Json<Vec<serde_json::Value>>, WebError> {
+    let engine = app
+        .engine
+        .lock()
+        .map_err(|_| WebError("Engine unavailable".into()))?;
+    Ok(Json(checked(engine.retrieval_audits())?))
+}
+#[derive(Deserialize)]
+struct LocationUpdate {
+    csrf: String,
+    location: crate::evidence_transport::EvidenceLocation,
+}
+async fn location_update(
+    State(app): State<App>,
+    Json(input): Json<LocationUpdate>,
+) -> Result<StatusCode, WebError> {
+    check_csrf(&app, &input.csrf)?;
+    let engine = app
+        .engine
+        .lock()
+        .map_err(|_| WebError("Engine unavailable".into()))?;
+    checked(engine.add_evidence_location(&input.location, now_ms()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+#[derive(Deserialize)]
+struct CertificateUpdate {
+    csrf: String,
+    agent_id: i64,
+    fingerprint: String,
+}
+async fn certificate_update(
+    State(app): State<App>,
+    Json(input): Json<CertificateUpdate>,
+) -> Result<StatusCode, WebError> {
+    check_csrf(&app, &input.csrf)?;
+    let engine = app
+        .engine
+        .lock()
+        .map_err(|_| WebError("Engine unavailable".into()))?;
+    checked(engine.bind_agent_certificate(input.agent_id, &input.fingerprint, now_ms()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+#[derive(Deserialize)]
+struct HistoryQuery {
+    entity: String,
+    #[serde(default = "history_max")]
+    before_ms: u64,
+    #[serde(default = "history_max")]
+    before_id: u64,
+    #[serde(default = "history_limit")]
+    limit: usize,
+}
+fn history_max() -> u64 {
+    i64::MAX as u64
+}
+fn history_limit() -> usize {
+    32
+}
+async fn history_api(
+    State(app): State<App>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<Vec<crate::memory::HistoricalReference>>, WebError> {
+    let engine = app
+        .engine
+        .lock()
+        .map_err(|_| WebError("Engine unavailable".into()))?;
+    Ok(Json(checked(engine.search_history(
+        &query.entity,
+        query.before_ms,
+        query.before_id,
+        query.limit,
+    ))?))
 }

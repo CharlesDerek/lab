@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Refuse publication unless the exact outgoing tree and ancestry pass locally.
+set -euo pipefail
+scanner="${GITLEAKS_BIN:-.athernex/tools/gitleaks}"
+if [[ ! -x "$scanner" ]]; then
+  printf '%s\n' 'Public boundary: install Gitleaks or set GITLEAKS_BIN to its executable.' >&2
+  exit 1
+fi
+snapshot="$(mktemp -d)"
+trap 'rm -rf -- "$snapshot"' EXIT
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [[ "$local_sha" =~ ^0+$ ]]; then
+    continue
+  fi
+  python3 tools/check_public_boundary.py --tree "$local_sha"
+  tree_dir="$snapshot/$local_sha"
+  mkdir -p "$tree_dir"
+  git archive "$local_sha" | tar -x -C "$tree_dir"
+  "$scanner" dir "$tree_dir" --config "$tree_dir/.gitleaks.toml" --no-banner --redact=100 --ignore-gitleaks-allow --max-decode-depth 2
+  "$scanner" git . --log-opts="$local_sha" --config "$tree_dir/.gitleaks.toml" --no-banner --redact=100 --ignore-gitleaks-allow --max-decode-depth 2
+done

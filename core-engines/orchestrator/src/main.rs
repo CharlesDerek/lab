@@ -8,6 +8,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use orchestrator::durable_capacity;
 use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -15,7 +16,6 @@ use rdkafka::error::KafkaError;
 use rdkafka::message::{Header, Headers, Message, OwnedHeaders};
 use rdkafka::producer::{BaseProducer, BaseRecord, DeliveryResult, Producer, ProducerContext};
 use sha2::{Digest, Sha256};
-mod durable_capacity;
 
 const DEFAULT_MAX_DELIVERY_ATTEMPTS: u32 = 3;
 
@@ -1041,7 +1041,7 @@ fn capacity_command() -> Result<(), Box<dyn std::error::Error>> {
     use durable_capacity::{Decision, DurableCapacity};
     let args = std::env::args().skip(2).collect::<Vec<_>>();
     if args.len() < 4 {
-        return Err("usage: orchestrator capacity DB RESOURCE CAPACITY reserve|enqueue OWNER REQUESTED_SLOTS TTL_MS | publish | pending | release OWNER GENERATION | status".into());
+        return Err("usage: orchestrator capacity DB RESOURCE CAPACITY reserve|enqueue OWNER REQUESTED_SLOTS TTL_MS | bind-budget POOL PER_SLOT_JSON | authorize OWNER GENERATION | publish | pending | release OWNER GENERATION | status".into());
     }
     let mut ledger = DurableCapacity::open(std::path::Path::new(&args[0]))?;
     let resource = &args[1];
@@ -1053,6 +1053,21 @@ fn capacity_command() -> Result<(), Box<dyn std::error::Error>> {
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as i64;
     let result = match args[3].as_str() {
+        "bind-budget" if args.len() == 6 => {
+            let path = std::path::Path::new(&args[5]);
+            if std::fs::metadata(path)?.len() > 16384 {
+                return Err("Per-slot resource file exceeds its budget".into());
+            }
+            let cost = serde_json::from_slice(&std::fs::read(path)?)?;
+            ledger
+                .bind_budget(resource, &args[4], cost)
+                .map_err(|e| e.to_string())?;
+            serde_json::json!({"version":1,"decision":"bound","resource":resource,"pool":args[4]})
+        }
+        "authorize" if args.len() == 6 => {
+            let allowed = ledger.authorize(&args[4], resource, args[5].parse()?, now_ms)?;
+            serde_json::json!({"version":1,"decision":if allowed{"authorized"}else{"refused"}})
+        }
         "reserve" if args.len() == 7 => {
             let requested_slots: u32 = args[5].parse()?;
             let ttl_ms: i64 = args[6].parse()?;

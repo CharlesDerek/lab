@@ -1,0 +1,56 @@
+[
+  {
+    "platform": "linux",
+    "arch": "aarch64",
+    "format": "deb",
+    "version": "1.5.4",
+    "url": "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.linux.aarch64.deb",
+    "sha256": "4bdab4118e8accb02108316b996d7c14da1cccc4eea2dff7bea82109f9239d95",
+    "bytes": 108328536
+  },
+  {
+    "platform": "linux",
+    "arch": "aarch64",
+    "format": "rpm",
+    "version": "1.5.4",
+    "url": "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.linux.aarch64.rpm",
+    "sha256": "72cb798eb6afa19cd79dc3a40bd54f36146197db00cfc7e5594389a713869c0c",
+    "bytes": 43918660
+  },
+  {
+    "platform": "linux",
+    "arch": "x86_64",
+    "format": "deb",
+    "version": "1.5.4",
+    "url": "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.linux.x86_64.deb",
+    "sha256": "28d6efc5b4423e7830c3559339552eb53870a9eac51ac4efb37d60530d329886",
+    "bytes": 105819396
+  },
+  {
+    "platform": "linux",
+    "arch": "x86_64",
+    "format": "rpm",
+    "version": "1.5.4",
+    "url": "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.linux.x86_64.rpm",
+    "sha256": "1f4d381226b3cb5f4b1897253a496cf774a975fa1934e8610d7899f614f144dc",
+    "bytes": 45231424
+  },
+  {
+    "platform": "macos",
+    "arch": "universal",
+    "format": "pkg",
+    "version": "1.5.4",
+    "url": "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.macos.universal.pkg",
+    "sha256": "df7fa753e2f9f67f3bc99b2a40a3be7ef559088c68ad6bdf66b4b5764e965bd6",
+    "bytes": 166772489
+  },
+  {
+    "platform": "windows",
+    "arch": "x86_64",
+    "format": "msi",
+    "version": "1.5.4",
+    "url": "https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.win.x64.msi",
+    "sha256": "a025fa23a4b9d64fce448d5a211afcf30dc26ba6528186e6223d1b945f9d95d6",
+    "bytes": 224457050
+  }
+]

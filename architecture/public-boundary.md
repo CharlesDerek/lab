@@ -31,3 +31,26 @@ This repo is allowed to contain public-safe architecture, contracts, and local-o
 - No private model prompts or sensitive generated outputs.
 - No exact operational runbooks for power, remote management, firmware, or storage recovery.
 - Local examples work without real cloud or Paperclip access.
+
+## Publication Checks
+
+Run `python3 tools/check_public_boundary.py --tree HEAD` against the commit to
+publish. It reads Git objects, so ignored files forced into a commit are checked
+and private untracked working files are not read. It rejects local notes, runtime
+state, key files, generated binaries, and personal workstation paths. The narrow
+synthetic path exceptions are tied to their test files. Images still require a
+human review against their fixture provenance.
+
+The `Public repository boundary` workflow also scans the committed tree and its
+reachable history using checksum-pinned Gitleaks. Its configuration retains the
+default rules with two exact, file-specific exceptions for known test/prose false
+positives. Neither matching secret values nor runtime reports are uploaded.
+
+For protection before a Git push, install Gitleaks 8.30.1, set `GITLEAKS_BIN` to
+the executable (or place it at `.athernex/tools/gitleaks`), then enable the checked-in
+hook with `git config --local core.hooksPath .githooks`. Review any existing hook
+configuration before replacing it. The hook fails closed if the scanner is missing.
+Git hosting APIs bypass local hooks, so API publication must perform these checks
+against the exact outgoing tree before uploading any objects. CI runs after upload
+and cannot prevent an initial disclosure. These checks supplement human review;
+they cannot determine whether every arbitrary document contains private information.

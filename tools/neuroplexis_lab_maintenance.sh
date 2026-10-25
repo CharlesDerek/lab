@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/home/charles/Documents/Software/github/lab}"
+REPO_ROOT="${REPO_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
 BASE_BRANCH="${BASE_BRANCH:-development}"
 COMPONENT_AREA="${COMPONENT_AREA:-public-safe orchestration, Kafka power scheduling, Paperclip integration, and repo hygiene}"
 MAX_CODEX_RUNS="${MAX_CODEX_RUNS:-5}"

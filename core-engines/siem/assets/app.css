@@ -2929,3 +2929,21 @@ button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,s
 .code-AU,.code-SY { color:var(--cyan); }
 .fact-grid dt,.case-note small { color:#9fcabd; }
 .login-shell input { border-color:#3b6654; background:#0a2018; }
+
+/* Endpoint and storage controls reuse the operator console form system. */
+.fleet-panel { min-width:0; }
+.fleet-panel code { overflow-wrap:anywhere; }
+.fleet-panel p { overflow-wrap:anywhere; }
+.fleet-panel .control-form { margin:18px 0; }
+.fleet-panel .control-form input[type=checkbox] { width:auto; }
+.fleet-panel .control-form label.checkbox-label { flex-direction:row; align-items:flex-start; gap:8px; }
+.fleet-panel .checkbox-label input[type=checkbox] { flex-shrink:0; margin:2px 0 0; }
+.fleet-panel article { padding:18px 0; border-bottom:1px solid var(--line); }
+.fleet-panel article:last-child { border-bottom:0; }
+.fleet-panel .raw-message { max-width:100%; }
+.fleet-panel .fact-grid .fact-wide { grid-column:1 / -1; }
+.code-MW { color:#f29b8c; }
+@media(max-width:680px) {
+  .sidebar nav { max-width:100%; overflow-x:auto; }
+  .sidebar .nav-item { min-width:44px; min-height:44px; flex-shrink:0; }
+}

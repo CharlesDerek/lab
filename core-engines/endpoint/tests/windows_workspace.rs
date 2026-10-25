@@ -1,0 +1,282 @@
+//! Actual installed-command worker protocol, parent binding and job ownership.
+//! Cross-building this fixture does not execute it on Windows.
+#![cfg(windows)]
+use athernex_endpoint::{run_bounded, secret, Process};
+use athernex_endpoint_native::{windows_scanner::Token, windows_state::Directory};
+use serde_json::{json, Value};
+use std::{fs, path::Path};
+
+fn run(state: &Path, nonce: &str, spoof_parent: bool) -> (i32, String) {
+    run_cleanup("windows-workspace-cleanup", state, nonce, spoof_parent)
+}
+
+fn run_cleanup(command: &str, state: &Path, nonce: &str, spoof_parent: bool) -> (i32, String) {
+    assert!(["windows-workspace-cleanup", "windows-scratch-cleanup"].contains(&command));
+    let root = std::env::var_os("SystemRoot").unwrap();
+    let powershell = Path::new(&root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    // The production process runner owns PowerShell and the worker as a job.
+    // .NET supplies stdin to the real agent executable without a shell command
+    // string containing the executable path, JSON, or user-controlled arguments.
+    let script = r#"$ErrorActionPreference='Stop'; $p=[System.Diagnostics.Process]::new(); $p.StartInfo.FileName=$env:ATHERNEX_WORKSPACE_BINARY; $p.StartInfo.Arguments=$env:ATHERNEX_WORKSPACE_COMMAND+' '+$(if($env:ATHERNEX_WORKSPACE_SPOOF -eq 'yes'){'0'}else{$PID}); $p.StartInfo.UseShellExecute=$false; $p.StartInfo.RedirectStandardInput=$true; $p.StartInfo.RedirectStandardOutput=$true; $null=$p.Start(); $p.StandardInput.WriteLine($env:ATHERNEX_WORKSPACE_REQUEST); $p.StandardInput.Close(); $reply=$p.StandardOutput.ReadToEnd(); $p.WaitForExit(); [Console]::Write($reply); exit $p.ExitCode"#;
+    run_bounded(
+        Process::new(powershell)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ])
+            .env(
+                "ATHERNEX_WORKSPACE_BINARY",
+                env!("CARGO_BIN_EXE_athernex-endpoint"),
+            )
+            .env("ATHERNEX_WORKSPACE_COMMAND", command)
+            .env(
+                "ATHERNEX_WORKSPACE_SPOOF",
+                if spoof_parent { "yes" } else { "no" },
+            )
+            .env(
+                "ATHERNEX_WORKSPACE_REQUEST",
+                json!({"schema":1,"state":state,"nonce":nonce}).to_string(),
+            ),
+        40,
+    )
+    .unwrap()
+}
+
+#[test]
+#[ignore = "requires native Windows LocalSystem; runs actual agent scratch cleanup without attaching or formatting a disk"]
+fn actual_scratch_cleanup_excludes_live_workers_and_replays_partial_image_retirement() {
+    use athernex_endpoint_native::{windows_filter::peer, windows_scratch};
+    use std::io::Write;
+
+    let token = Token::new().unwrap();
+    let retained = tempfile::tempdir().unwrap().keep();
+    let state = Directory::create_under(&retained.canonicalize().unwrap(), "private").unwrap();
+    let _lease = state.lock("supervisor.lock").unwrap();
+    let runtime = state.directory("scratch-runtime").unwrap();
+    let journal = state.directory("scratch-journal").unwrap();
+    let id = secret().unwrap();
+    let leaf = format!("scanner-{id}");
+    let container = Directory::create_under(runtime.path(), &leaf).unwrap();
+    let identity = container.identity().unwrap();
+    let mut partial = container.create(windows_scratch::IMAGE).unwrap();
+    partial.write_all(b"interrupted image creation").unwrap();
+    partial.sync_all().unwrap();
+    drop(partial);
+    drop(container);
+    let mut record = json!({
+        "schema":1,
+        "spec":{"schema":1,"id":id,"bytes":256 * 1024 * 1024},
+        "directory":identity,
+        "logon":token.logon_sid(),
+        "owner":{"pid":std::process::id(),"created":peer::identify(std::process::id()).unwrap()},
+        "image_ready":false
+    });
+    let name = format!("{id}.json");
+    journal.write_json(&name, &record).unwrap();
+    let nonce = secret().unwrap();
+    let run = |spoof| run_cleanup("windows-scratch-cleanup", state.path(), &nonce, spoof);
+    assert_ne!(run(true).0, 0, "spoofed parent must be refused");
+    assert_ne!(run(false).0, 0, "live recorded owner must be retained");
+    assert!(runtime
+        .path()
+        .join(&leaf)
+        .join(windows_scratch::IMAGE)
+        .exists());
+    assert!(journal.path().join(&name).exists());
+
+    // A different creation time proves this PID no longer names the original
+    // owner. The cleanup command must never terminate the current process.
+    record["owner"]["created"] = json!(record["owner"]["created"].as_u64().unwrap() - 1);
+    journal.write_json(&name, &record).unwrap();
+    let worker_lease = state.lock("scratch-worker.lock").unwrap();
+    assert_ne!(run(false).0, 0, "worker lease must exclude cleanup");
+    drop(worker_lease);
+    let network = state.directory("network").unwrap();
+    network
+        .write_json("retained.json", &json!({"unreconciled":true}))
+        .unwrap();
+    assert_ne!(
+        run(false).0,
+        0,
+        "scanner recovery must precede scratch cleanup"
+    );
+    network.remove("retained.json").unwrap();
+    let (code, output) = run(false);
+    assert_eq!(code, 0, "{output}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&output).unwrap(),
+        json!({"schema":1,"nonce":nonce,"removed":1})
+    );
+    assert!(!runtime.path().join(&leaf).exists());
+    assert!(!journal.path().join(&name).exists());
+
+    journal.write_json(&name, &record).unwrap();
+    let (code, output) = run(false);
+    assert_eq!(code, 0, "{output}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&output).unwrap(),
+        json!({"schema":1,"nonce":nonce,"removed":1})
+    );
+    let (code, output) = run(false);
+    assert_eq!(code, 0, "{output}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&output).unwrap(),
+        json!({"schema":1,"nonce":nonce,"removed":0})
+    );
+}
+
+#[test]
+#[ignore = "requires native Windows LocalSystem/session zero; runs actual preview recovery without a driver or attached disk"]
+fn actual_preview_recovery_waits_for_workers_and_retires_scratch_before_staged_files() {
+    use athernex_endpoint_native::{windows_filter::peer, windows_scratch};
+    use std::io::Write;
+    let token = Token::new().unwrap();
+    let retained = tempfile::tempdir().unwrap().keep();
+    let endpoint = Directory::create_under(&retained.canonicalize().unwrap(), "private").unwrap();
+    let protection = endpoint.directory("protection").unwrap();
+    let state = protection.directory("windows").unwrap();
+    let id = secret().unwrap();
+    let leaf = format!("scanner-{id}");
+    let scratch = state.directory("scratch-runtime").unwrap();
+    let container = Directory::create_under(scratch.path(), &leaf).unwrap();
+    let identity = container.identity().unwrap();
+    let mut file = container.create(windows_scratch::IMAGE).unwrap();
+    file.write_all(b"interrupted image creation").unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    drop(container);
+    state.directory("scratch-journal").unwrap().write_json(&format!("{id}.json"), &json!({
+        "schema":1,"spec":{"schema":1,"id":id,"bytes":256 * 1024 * 1024},
+        "directory":identity,"logon":token.logon_sid(),"image_ready":false,
+        "owner":{"pid":std::process::id(),"created":peer::identify(std::process::id()).unwrap()-1}
+    })).unwrap();
+    let runtime = state.directory("runtime").unwrap();
+    let workspace = runtime.scanner_workspace(&leaf, &token).unwrap();
+    workspace
+        .write("retired-engine", b"staged scanner bytes")
+        .unwrap();
+    state
+        .directory("workspaces")
+        .unwrap()
+        .write_json(
+            &format!("{id}.json"),
+            &json!({
+                "schema":1,"id":id,"identity":workspace.identity().unwrap()
+            }),
+        )
+        .unwrap();
+    drop(workspace);
+    let network = state.directory("network").unwrap();
+    network
+        .write_json("retained.json", &json!({"unreconciled":true}))
+        .unwrap();
+    let run = || {
+        run_bounded(
+            Process::new(env!("CARGO_BIN_EXE_athernex-endpoint"))
+                .arg("windows-protection-recover")
+                .arg(endpoint.path()),
+            75,
+        )
+        .unwrap()
+    };
+    let common = protection.lock("supervisor.lock").unwrap();
+    assert_ne!(run().0, 0);
+    drop(common);
+    for name in ["supervisor.lock", "client.lock", "scratch-worker.lock"] {
+        let worker = state.lock(name).unwrap();
+        assert_ne!(run().0, 0, "live {name} must prevent recovery");
+        drop(worker);
+    }
+    assert_ne!(
+        run().0,
+        0,
+        "unresolved network ownership must retain all storage"
+    );
+    assert!(scratch
+        .path()
+        .join(&leaf)
+        .join(windows_scratch::IMAGE)
+        .exists());
+    assert!(runtime.path().join(&leaf).join("retired-engine").exists());
+    network.remove("retained.json").unwrap();
+    for _ in 0..2 {
+        let (code, output) = run();
+        assert_eq!(code, 0, "{output}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({"schema":1,"recovered":true})
+        );
+    }
+    for name in [
+        "network",
+        "scratch-journal",
+        "scratch-runtime",
+        "scratch-health",
+        "workspaces",
+        "runtime",
+    ] {
+        assert_eq!(
+            fs::read_dir(state.path().join(name)).unwrap().count(),
+            0,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires native Windows LocalSystem session zero; runs actual agent cleanup worker"]
+fn actual_cleanup_worker_preserves_live_journals_and_replays_committed_workspace_deletion() {
+    let token = Token::new().unwrap();
+    let retained = tempfile::tempdir().unwrap().keep();
+    let state = Directory::create_under(&retained.canonicalize().unwrap(), "private").unwrap();
+    let _lease = state.lock("supervisor.lock").unwrap();
+    let network = state.directory("network").unwrap();
+    let runtime = state.directory("runtime").unwrap();
+    let journal = state.directory("workspaces").unwrap();
+    let id = secret().unwrap();
+    let name = format!("scanner-{id}");
+    let workspace = runtime.scanner_workspace(&name, &token).unwrap();
+    let identity = workspace.identity().unwrap();
+    let record_name = format!("{id}.json");
+    journal
+        .write_json(
+            &record_name,
+            &json!({"schema":1,"id":id,"identity":identity}),
+        )
+        .unwrap();
+    workspace
+        .write("staged-file", b"retired scanner data")
+        .unwrap();
+    drop(workspace);
+    let nonce = secret().unwrap();
+    assert_ne!(run(state.path(), &nonce, true).0, 0);
+    assert!(runtime.path().join(&name).exists());
+    network
+        .write_json("retained.json", &json!({"unreconciled":true}))
+        .unwrap();
+    assert_ne!(run(state.path(), &nonce, false).0, 0);
+    assert!(runtime.path().join(&name).join("staged-file").exists());
+    assert!(journal.path().join(&record_name).exists());
+    network.remove("retained.json").unwrap();
+    let (code, output) = run(state.path(), &nonce, false);
+    assert_eq!(code, 0, "{output}");
+    let response: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(response, json!({"schema":1,"nonce":nonce,"removed":1}));
+    assert!(!runtime.path().join(&name).exists());
+    assert!(!journal.path().join(&record_name).exists());
+
+    // Crash after root deletion but before journal unlink: replay is harmless.
+    journal
+        .write_json(
+            &record_name,
+            &json!({"schema":1,"id":id,"identity":identity}),
+        )
+        .unwrap();
+    let (code, output) = run(state.path(), &nonce, false);
+    assert_eq!(code, 0, "{output}");
+    assert!(!journal.path().join(&record_name).exists());
+    assert_eq!(fs::read_dir(runtime.path()).unwrap().count(), 0);
+}

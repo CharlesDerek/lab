@@ -1,3 +1,3 @@
 [workspace]
-members = ["core-engines/orchestrator", "core-engines/siem"]
+members = ["core-engines/orchestrator", "core-engines/siem", "core-engines/endpoint-protocol", "core-engines/endpoint", "core-engines/endpoint-native"]
 resolver = "2"

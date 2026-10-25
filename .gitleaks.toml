@@ -1,0 +1,21 @@
+title = "Public repository secret scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Changelog prose, not a credential"
+condition = "AND"
+paths = ['''(^|/)CHANGELOG\.md$''']
+regexTarget = "secret"
+regexes = ['''^completion/revocation$''']
+
+[[rules.allowlists]]
+description = "Fixed operator credential used only by the HTTP integration test"
+condition = "AND"
+paths = ['''(^|/)core-engines/siem/tests/http\.rs$''']
+regexTarget = "secret"
+regexes = ['''^test-operator-key-32-characters-long$''']

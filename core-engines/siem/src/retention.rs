@@ -55,21 +55,42 @@ impl Engine {
              CREATE TABLE IF NOT EXISTS archive_blocks(id INTEGER PRIMARY KEY AUTOINCREMENT,first_ms INTEGER NOT NULL,last_ms INTEGER NOT NULL,events INTEGER NOT NULL,payload BLOB NOT NULL,decoded_bytes INTEGER NOT NULL,digest BLOB NOT NULL);
              INSERT OR IGNORE INTO settings VALUES ('retention_days',30),('archive_cap',1048576),('flush_seconds',5),('last_flush',0),('rotated_events',0),('event_sequence',0),('reserved_sequence',0);
              CREATE TEMP TABLE labels(id INTEGER PRIMARY KEY,value TEXT UNIQUE NOT NULL);
-             CREATE TEMP TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,time_ms INTEGER NOT NULL,kind INTEGER NOT NULL,severity INTEGER NOT NULL,source INTEGER NOT NULL,subject INTEGER NOT NULL,payload BLOB NOT NULL,json_bytes INTEGER NOT NULL,dedup TEXT UNIQUE NOT NULL,input_hash BLOB NOT NULL);
+             CREATE TEMP TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,time_ms INTEGER NOT NULL,kind INTEGER NOT NULL,severity INTEGER NOT NULL,source INTEGER NOT NULL,subject INTEGER NOT NULL,payload BLOB NOT NULL,json_bytes INTEGER NOT NULL,dedup TEXT UNIQUE NOT NULL,input_hash BLOB NOT NULL,outcome INTEGER NOT NULL CHECK(outcome IN(0,1,2)));
              CREATE TEMP TABLE event_context(event_id INTEGER PRIMARY KEY,payload TEXT NOT NULL);
              CREATE INDEX temp.hot_event_time ON events(time_ms);
+             CREATE INDEX temp.hot_detection_events ON events(time_ms,id) WHERE outcome IN(0,1);
              CREATE TEMP TABLE runtime_counts(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
              INSERT INTO runtime_counts SELECT key,value FROM main.settings WHERE key IN ('received','duplicates');
              INSERT INTO temp.labels SELECT * FROM main.labels;
-             INSERT INTO temp.events SELECT * FROM main.events;
+             INSERT INTO temp.events SELECT *,0 FROM main.events;
              CREATE TEMP TABLE pending(event_id INTEGER PRIMARY KEY);
              INSERT INTO pending SELECT id FROM temp.events;"
         )?;
+        // The outcome index is a derived RAM cache, never a ledger migration.
+        // Rebuild it from the encoded facts when importing a legacy hot table.
+        let legacy = self
+            .connection
+            .prepare("SELECT id,payload FROM temp.events")?
+            .query_map([], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (id, payload) in legacy {
+            let event = codec::decode(&payload)?;
+            if event.id != id {
+                return Err("Legacy hot event identity mismatch".into());
+            }
+            self.connection.execute(
+                "UPDATE temp.events SET outcome=?1 WHERE id=?2",
+                params![event.outcome as u8, id],
+            )?;
+        }
         // Load newest blocks only. Each carries its own identity dictionary.
+        let schema: u32 = self
+            .connection
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let blocks = self
             .connection
-            .prepare("SELECT id FROM archive_blocks ORDER BY id DESC LIMIT 4096")?
-            .query_map([], |r| r.get::<_, i64>(0))?
+            .prepare("SELECT id FROM archive_blocks WHERE ?1<5 ORDER BY id DESC LIMIT 4096")?
+            .query_map([schema], |r| r.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         let mut restored = 0;
         for id in blocks {
@@ -95,7 +116,7 @@ impl Engine {
                     )?;
                 }
                 self.connection.execute(
-                    "INSERT INTO temp.events VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    "INSERT INTO temp.events VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                     params![
                         event.id,
                         event.time_ms,
@@ -106,7 +127,8 @@ impl Engine {
                         record.payload,
                         record.json_bytes,
                         record.dedup,
-                        record.input_hash
+                        record.input_hash,
+                        event.outcome as u8
                     ],
                 )?;
                 if let Some(context) = record.context {
@@ -294,6 +316,7 @@ impl Engine {
         tx.commit()?;
         self.connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        self.maintain_memory(now)?;
         Ok(())
     }
     fn rotate_archive(&self, now: u64, incoming: u64) -> LabResult<()> {
@@ -346,11 +369,7 @@ impl Engine {
                 [count],
             )?;
         }
-        // Day retention applies to the query window too; evidence is a separate bounded tier.
-        self.connection.execute(
-            "DELETE FROM temp.events WHERE id NOT IN (SELECT event_id FROM pending) AND time_ms<?1",
-            [cutoff],
-        )?;
+        // Hot telemetry and investigative evidence have independent lifecycles.
         Ok(())
     }
     fn read_block(&self, id: i64) -> LabResult<(BTreeMap<u32, String>, Vec<Record>)> {
@@ -526,7 +545,7 @@ mod tests {
             .collect()
     }
     #[test]
-    fn unflushed_telemetry_is_ram_only_and_blocks_restore_exact_facts() {
+    fn hot_query_rows_are_ram_only_and_blocks_restore_exact_facts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lab.db");
         let mut e = Engine::open(&path).unwrap();
@@ -613,7 +632,8 @@ mod tests {
         let path = dir.path().join("legacy.db");
         let mut e = Engine::open(&path).unwrap();
         e.ingest(&events(0, 20), NOW).unwrap();
-        e.connection.execute_batch("INSERT OR IGNORE INTO main.labels SELECT * FROM temp.labels; INSERT INTO main.events SELECT * FROM temp.events;").unwrap();
+        // Legacy ledgers predate the derived outcome column in the RAM cache.
+        e.connection.execute_batch("INSERT OR IGNORE INTO main.labels SELECT * FROM temp.labels; INSERT INTO main.events SELECT id,time_ms,kind,severity,source,subject,payload,json_bytes,dedup,input_hash FROM temp.events;").unwrap();
         drop(e);
         let mut e = Engine::open(&path).unwrap();
         assert_eq!(e.events().unwrap().len(), 20);
@@ -630,7 +650,7 @@ mod tests {
         assert_eq!(Engine::open(&path).unwrap().events().unwrap().len(), 20);
     }
     #[test]
-    fn crash_lost_event_ids_are_not_reused_and_ledger_has_one_writer() {
+    fn committed_evidence_recovers_before_flush_and_ledger_has_one_writer() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lab.db");
         let mut e = Engine::open(&path).unwrap();
@@ -639,9 +659,9 @@ mod tests {
         let prior = e.events().unwrap().last().unwrap().event.id;
         drop(e);
         let mut e = Engine::open(&path).unwrap();
-        assert!(e.events().unwrap().is_empty());
+        assert_eq!(e.events().unwrap().len(), 2);
         e.ingest(&events(2, 1), NOW + 1).unwrap();
-        assert!(e.events().unwrap()[0].event.id > prior);
+        assert!(e.events().unwrap().last().unwrap().event.id > prior);
     }
     #[test]
     fn idle_ticks_do_not_rewrite_the_checkpoint() {

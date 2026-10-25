@@ -124,9 +124,14 @@ pub fn page(
     csrf: &str,
 ) -> String {
     let label = match view {
+        "endpoints" => "Endpoint protection",
+        "storage" => "Storage and recovery",
+        "control" => "Security and capacity",
+        "analysis" => "Investigation assistant",
         "cases" | "case" => "Investigations",
         "sources" | "source" => "Source management",
         "investigate" | "event" => "Event explorer",
+        "memory" => "Investigative memory",
         "detections" => "Detection engineering",
         "workbench" => "Athernex intelligence",
         "research" => "Research notebook",
@@ -144,7 +149,12 @@ pub fn page(
         ("overview", "/", "Overview"),
         ("investigate", "/investigate", "Event explorer"),
         ("cases", "/cases", "Investigations"),
+        ("memory", "/memory", "Investigative memory"),
         ("sources", "/sources", "Sources"),
+        ("endpoints", "/endpoints", "Endpoints"),
+        ("control", "/control", "Security & capacity"),
+        ("analysis", "/analysis", "Investigation assistant"),
+        ("storage", "/storage", "Storage and recovery"),
         ("detections", "/detections", "Detections"),
         ("hive", "/hive", "Agent hive"),
         ("workbench", "/workbench", "Athernex AI"),
@@ -186,6 +196,9 @@ pub fn page(
         .unwrap();
     }
     match view {
+        "endpoints" => html.push_str("<!-- ENDPOINT_CONTENT -->"),
+        "storage" => html.push_str("<!-- STORAGE_CONTENT -->"),
+        "memory" => crate::render_memory::memory(&mut html, s, csrf),
         "sources" => crate::render_ops::sources(&mut html, s, csrf),
         "source" => crate::render_ops::source(&mut html, s, &filters.q, csrf),
         "cases" => crate::render_ops::cases(&mut html, s, filters, csrf),
@@ -201,6 +214,8 @@ pub fn page(
         "research" => research(&mut html, s, filters),
         "event" => event_detail(&mut html, s, selected.unwrap_or(0), csrf),
         "incident" => incident(&mut html, s, selected.unwrap_or(0), csrf),
+        "control" => html.push_str("<!-- CONTROL_CONTENT -->"),
+        "analysis" => html.push_str("<!-- ANALYSIS_CONTENT -->"),
         _ => overview(&mut html, s, csrf),
     }
     html.push_str("</main><footer><span><i></i> SYNTHETIC DATA · REAL RUST PIPELINE</span><span>Evidence before action. <b>Always.</b></span><span>UTC timestamps / bounded by design</span></footer></div></div></body></html>");
@@ -435,6 +450,7 @@ fn explorer(html: &mut String, s: &Snapshot, filters: &Filters, csrf: &str) {
         ("PL", "Policy"),
         ("HB", "Heartbeat"),
         ("SY", "System"),
+        ("MW", "Malware"),
     ] {
         write!(
             html,

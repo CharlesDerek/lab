@@ -7,13 +7,21 @@ use std::path::{Path, PathBuf};
 
 pub type LabResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+struct LedgerOwner(std::fs::File);
+impl Drop for LedgerOwner {
+    fn drop(&mut self) {
+        // Collector children may briefly inherit a file description before exec.
+        let _ = self.0.unlock();
+    }
+}
+
 pub struct Engine {
     pub(crate) connection: Connection,
     pub(crate) path: Option<PathBuf>,
     pub live: bool,
     pub demo: bool,
     pub storage_error: String,
-    _owner: Option<std::fs::File>,
+    _owner: Option<LedgerOwner>,
 }
 
 #[derive(Debug, Serialize)]
@@ -33,6 +41,7 @@ pub struct Snapshot {
     pub live: bool,
     pub hive: crate::gateway::Hive,
     pub retention: crate::retention::Retention,
+    pub memory: crate::memory::MemoryState,
     pub sources: Vec<crate::operations::Source>,
     pub cases: Vec<crate::operations::Case>,
     pub demo: bool,
@@ -60,6 +69,22 @@ impl Engine {
         owner
             .try_lock()
             .map_err(|_| "This ledger is already owned by another SIEM process")?;
+        let owner = LedgerOwner(owner);
+        // The ledger can hold outbound evidence credentials; create and restrict it before SQLite opens WAL files.
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        drop(file);
         let mut engine = Self::initialize(Connection::open(path)?, Some(path.to_path_buf()))?;
         engine._owner = Some(owner);
         Ok(engine)
@@ -71,7 +96,7 @@ impl Engine {
 
     fn initialize(connection: Connection, path: Option<PathBuf>) -> LabResult<Self> {
         let version: u32 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 3 {
+        if version > 6 {
             return Err("Ledger schema is newer than this binary".into());
         }
         connection.busy_timeout(std::time::Duration::from_secs(3))?;
@@ -99,14 +124,34 @@ impl Engine {
             storage_error: String::new(),
             _owner: None,
         };
+        engine.init_identity()?;
         engine.init_retention()?;
         engine.init_gateway()?;
         engine.init_operations()?;
-        engine.connection.execute_batch("PRAGMA user_version=3")?;
+        engine.init_storage()?;
+        engine.init_memory()?;
+        engine.init_evidence_transport()?;
+        engine.init_fleet()?;
+        engine.init_ecosystem()?;
+        engine.init_signals()?;
+        engine.init_investigator()?;
+        engine.init_engine_fleet()?;
+        engine.init_engine_rollouts()?;
+        engine.init_background()?;
+        engine.connection.execute_batch("PRAGMA user_version=6")?;
         Ok(engine)
     }
 
     pub(crate) fn audit(&self, action: &str, detail: &str, now: u64) -> LabResult<()> {
+        let tx = if self.connection.is_autocommit() {
+            Some(rusqlite::Transaction::new_unchecked(
+                &self.connection,
+                rusqlite::TransactionBehavior::Immediate,
+            )?)
+        } else {
+            None
+        };
+        self.append_audit_chain(action, detail, now)?;
         self.connection.execute(
             "INSERT INTO audit(time_ms,action,detail) VALUES (?1,?2,?3)",
             params![now, action, detail],
@@ -115,6 +160,9 @@ impl Engine {
             "DELETE FROM audit WHERE id NOT IN (SELECT id FROM audit ORDER BY id DESC LIMIT 256)",
             [],
         )?;
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -125,6 +173,7 @@ impl Engine {
         for input in inputs {
             input.validate(now)?;
         }
+        self.prepare_storage(now)?;
         if self.pending_count()? + inputs.len() > 512 {
             self.flush(now)?;
         }
@@ -135,7 +184,9 @@ impl Engine {
             &self.connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
+        let lease = self.reserve_essential_work("ingest", now)?;
         let inserted = self.ingest_in_transaction(inputs, now)?;
+        self.complete_essential_work(lease)?;
         tx.commit()?;
         Ok(inserted)
     }
@@ -149,6 +200,7 @@ impl Engine {
             return Err("Ingestion requires an active transaction".into());
         }
         let tx = &self.connection;
+        let memory_config = self.memory_config()?;
         let mut inserted = 0;
         let mut duplicates = 0;
         for input in inputs {
@@ -156,7 +208,7 @@ impl Engine {
             let input_hash = Sha256::digest(serde_json::to_vec(input)?).to_vec();
             let previous: Option<Vec<u8>> = tx
                 .query_row(
-                    "SELECT input_hash FROM events WHERE dedup=?1",
+                    "SELECT input_hash FROM all_evidence_refs WHERE dedup=?1 UNION ALL SELECT input_hash FROM events WHERE dedup=?1 LIMIT 1",
                     [&dedup],
                     |row| row.get(0),
                 )
@@ -180,12 +232,16 @@ impl Engine {
                     None => {
                         let count: usize =
                             tx.query_row("SELECT count(*) FROM labels", [], |r| r.get(0))?;
-                        if count >= 8192 {
+                        if count >= MAX_LABELS {
                             return Err(
-                                "Dictionary budget exhausted; start a new lab database.".into()
+                                "Dictionary capacity exhausted; batch not acknowledged".into()
                             );
                         }
-                        tx.execute("INSERT INTO labels(value) VALUES (?1)", [value])?;
+                        let available:u32=tx.query_row("SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM labels WHERE id=1) THEN 1 ELSE (SELECT min(l.id+1) FROM labels l LEFT JOIN labels n ON n.id=l.id+1 WHERE n.id IS NULL) END",[],|r|r.get(0))?;
+                        tx.execute(
+                            "INSERT INTO labels(id,value) VALUES (?1,?2)",
+                            params![available, value],
+                        )?;
                         let id = tx.last_insert_rowid() as u32;
                         // Dictionary identities are durable metadata, preventing aliasing after a crash.
                         tx.execute(
@@ -197,7 +253,7 @@ impl Engine {
                 };
                 ids.push(id);
             }
-            tx.execute("INSERT INTO events(time_ms,kind,severity,source,subject,payload,json_bytes,dedup,input_hash) VALUES (?1,?2,?3,?4,?5,x'',0,?6,?7)", params![input.time_ms, input.kind as u8, input.severity, ids[0], ids[1], dedup, input_hash])?;
+            tx.execute("INSERT INTO events(time_ms,kind,severity,source,subject,payload,json_bytes,dedup,input_hash,outcome) VALUES (?1,?2,?3,?4,?5,x'',0,?6,?7,?8)", params![input.time_ms, input.kind as u8, input.severity, ids[0], ids[1], dedup, input_hash,input.outcome as u8])?;
             let event = Event {
                 id: tx.last_insert_rowid() as u64,
                 time_ms: input.time_ms,
@@ -227,6 +283,22 @@ impl Engine {
             if input.source == "agent-gateway" {
                 tx.execute("UPDATE sources SET received=received+1,last_event_ms=?1,last_poll_ms=?1 WHERE id='agent-gateway'",[now])?;
             }
+            let display = DisplayEvent {
+                event: event.clone(),
+                source_label: input.source.clone(),
+                subject_label: input.subject.clone(),
+                object_label: input.object.clone(),
+                encoded_bytes: payload.len(),
+                json_bytes,
+                notation: String::new(),
+                context: input.context.clone(),
+            };
+            self.preserve_event(&display, Some(&dedup), Some(&input_hash))?;
+            if input.severity >= memory_config.trigger_severity
+                || input.bytes >= memory_config.anomaly_bytes
+            {
+                self.correlate(event.id, now)?;
+            }
             inserted += 1;
         }
         tx.execute(
@@ -237,59 +309,109 @@ impl Engine {
             "UPDATE runtime_counts SET value=value+?1 WHERE key='duplicates'",
             [duplicates],
         )?;
-        // The idempotency horizon follows retained events; this is explicit in the public contract.
+        // Durable evidence references retain idempotency independently of the hot window.
         tx.execute(
-            "DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?1)",
+            "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT max(0,(SELECT count(*) FROM events)-?1))",
             [MAX_EVENTS],
         )?;
         tx.execute(
             "DELETE FROM event_context WHERE event_id NOT IN (SELECT id FROM events)",
             [],
         )?;
+        let last_finding: i64 =
+            tx.query_row("SELECT coalesce(max(id),0) FROM findings", [], |r| r.get(0))?;
         self.detect()?;
+        let alerts = tx
+            .prepare(
+                "SELECT id,rule,severity,evidence FROM findings WHERE id>?1 ORDER BY id LIMIT 128",
+            )?
+            .query_map([last_finding], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, u8>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (id, rule, severity, raw) in alerts {
+            let evidence: Vec<DisplayEvent> = serde_json::from_str(&raw)?;
+            for e in &evidence {
+                // Existing cases may include legacy facts; preserve them before linking.
+                self.preserve_event(e, None, None)?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO graph_links VALUES(?1,?2,?3)",
+                    params![
+                        format!("detection:{rule}:{id}"),
+                        e.event.id,
+                        e.event.time_ms
+                    ],
+                )?;
+            }
+            if let Some(e) = evidence.last() {
+                self.correlate_signal(e.event.id, Some(severity), now)?;
+            }
+        }
+        tx.execute("UPDATE main.settings SET value=(SELECT value FROM runtime_counts WHERE runtime_counts.key=settings.key) WHERE key IN ('received','duplicates')",[])?;
+        self.maintain_memory(now)?;
         Ok(inserted)
     }
 
     pub fn events(&self) -> LabResult<Vec<DisplayEvent>> {
-        let labels = self
-            .connection
-            .prepare("SELECT id,value FROM labels")?
-            .query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<Result<HashMap<_, _>, _>>()?;
-        let records = self
-            .connection
-            .prepare("SELECT e.payload,e.json_bytes,c.payload FROM events e LEFT JOIN event_context c ON c.event_id=e.id ORDER BY e.time_ms,e.id")?
-            .query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, usize>(1)?,r.get::<_,Option<String>>(2)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-        records
-            .into_iter()
-            .map(|(bytes, json_bytes, context)| {
-                let event = codec::decode(&bytes)?;
-                let label = |id: u32| -> LabResult<String> {
-                    labels
-                        .get(&id)
-                        .cloned()
-                        .ok_or_else(|| "Missing identity dictionary entry".into())
-                };
-                Ok(DisplayEvent {
-                    source_label: label(u32::from(event.source))?,
-                    subject_label: label(event.subject)?,
-                    object_label: label(event.object)?,
-                    notation: format!(
-                        "{}{} s{}:{}→{}",
-                        event.kind.code(),
-                        event.outcome.symbol(),
-                        event.severity,
-                        event.subject,
-                        event.object
-                    ),
-                    encoded_bytes: bytes.len(),
-                    json_bytes,
-                    context: context.map(|v| serde_json::from_str(&v)).transpose()?,
-                    event,
-                })
-            })
-            .collect()
+        self.read_hot_events(true)
+    }
+
+    fn read_hot_events(&self, include_observations: bool) -> LabResult<Vec<DisplayEvent>> {
+        let mut labels: Option<HashMap<u32, String>> = None;
+        let query = if include_observations {
+            "SELECT e.payload,e.json_bytes,c.payload FROM events e LEFT JOIN event_context c ON c.event_id=e.id ORDER BY e.time_ms,e.id"
+        } else {
+            "SELECT e.payload,e.json_bytes,c.payload FROM events e LEFT JOIN event_context c ON c.event_id=e.id WHERE e.outcome IN(0,1) ORDER BY e.time_ms,e.id"
+        };
+        let mut statement = self.connection.prepare(query)?;
+        let mut rows = statement.query([])?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next()? {
+            let bytes: Vec<u8> = row.get(0)?;
+            let event = codec::decode(&bytes)?;
+            if !include_observations && event.outcome == Outcome::Observe {
+                return Err("Hot detection index disagrees with encoded evidence".into());
+            }
+            if labels.is_none() {
+                labels = Some(
+                    self.connection
+                        .prepare("SELECT id,value FROM labels")?
+                        .query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, String>(1)?)))?
+                        .collect::<Result<HashMap<_, _>, _>>()?,
+                );
+            }
+            let label = |id: u32| -> LabResult<String> {
+                labels
+                    .as_ref()
+                    .and_then(|labels| labels.get(&id))
+                    .cloned()
+                    .ok_or_else(|| "Missing identity dictionary entry".into())
+            };
+            let context: Option<String> = row.get(2)?;
+            events.push(DisplayEvent {
+                source_label: label(u32::from(event.source))?,
+                subject_label: label(event.subject)?,
+                object_label: label(event.object)?,
+                notation: format!(
+                    "{}{} s{}:{}→{}",
+                    event.kind.code(),
+                    event.outcome.symbol(),
+                    event.severity,
+                    event.subject,
+                    event.object
+                ),
+                encoded_bytes: bytes.len(),
+                json_bytes: row.get(1)?,
+                context: context.map(|v| serde_json::from_str(&v)).transpose()?,
+                event,
+            });
+        }
+        Ok(events)
     }
 
     pub fn findings(&self) -> LabResult<Vec<Finding>> {
@@ -390,6 +512,14 @@ impl Engine {
     }
 
     fn detect(&self) -> LabResult<()> {
+        // These rules consume Allow/Deny facts only. The temporary outcome index
+        // avoids scanning and expanding every passive observation per record.
+        // Keep the same window and chronological order. Expiration is evaluated
+        // at the next relevant fact, so omitted observations cannot extend it.
+        self.detect_events(self.read_hot_events(false)?)
+    }
+
+    fn detect_events(&self, events: Vec<DisplayEvent>) -> LabResult<()> {
         #[derive(Default)]
         struct History {
             denied: VecDeque<DisplayEvent>,
@@ -404,7 +534,6 @@ impl Engine {
         }
         let mut candidates: HashMap<String, Candidate> = HashMap::new();
         let enabled = self.enabled_rules()?;
-        let events = self.events()?;
         let mut subjects: HashMap<u32, History> = HashMap::new();
         for current in &events {
             let event = &current.event;
@@ -723,6 +852,7 @@ impl Engine {
             live: self.live,
             hive: self.hive(now_ms())?,
             retention: self.retention()?,
+            memory: self.memory_state()?,
             sources: self.sources()?,
             cases: self.cases()?,
             demo: self.demo,
@@ -799,6 +929,9 @@ impl Engine {
     }
 
     pub fn tick(&mut self, now: u64) -> LabResult<()> {
+        self.tick_endpoint_rollouts(now)?;
+        self.tick_engine_rollouts(now)?;
+        self.maintain_memory(now)?;
         if now.saturating_sub(self.setting("last_flush")?) >= self.setting("flush_seconds")? * 1000
             && (self.pending_count()? > 0
                 || self.archive_expired(now)?
@@ -929,6 +1062,121 @@ impl Engine {
 mod tests {
     use super::*;
     const NOW: u64 = 1_800_000_000_000;
+    #[test]
+    fn restored_detection_index_preserves_denials_and_passive_originals() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ledger.sqlite3");
+        let mut lab = Engine::open(&path).unwrap();
+        lab.toggle_rule("AX-001", NOW).unwrap();
+        lab.scenario("auth", NOW).unwrap();
+        let mut passive = lab.normal_event(100, NOW, 100);
+        passive.kind = Kind::Authentication;
+        passive.outcome = Outcome::Observe;
+        lab.ingest(std::slice::from_ref(&passive), NOW).unwrap();
+        let original = serde_json::to_value(lab.events().unwrap()).unwrap();
+        lab.flush(NOW).unwrap();
+        drop(lab);
+        let mut lab = Engine::open(&path).unwrap();
+        assert_eq!(
+            original,
+            serde_json::to_value(lab.events().unwrap()).unwrap()
+        );
+        assert!(lab.findings().unwrap().is_empty());
+        lab.toggle_rule("AX-001", NOW).unwrap();
+        passive.idempotency_key.push_str("-after-restart");
+        lab.ingest(&[passive], NOW).unwrap();
+        assert_eq!(lab.findings().unwrap().len(), 1);
+        assert_eq!(lab.findings().unwrap()[0].rule, "AX-001");
+    }
+    #[test]
+    fn compact_detection_matches_full_history_with_passive_and_late_facts() {
+        let mut compact = Engine::memory().unwrap();
+        let mut full = Engine::memory().unwrap();
+        for lab in [&mut compact, &mut full] {
+            for rule in RULES {
+                lab.toggle_rule(rule.id, NOW).unwrap();
+            }
+            lab.scenario("chain", NOW).unwrap();
+            lab.scenario("policy", NOW).unwrap();
+            let mut service = lab.normal_event(900, NOW, 900);
+            service.kind = Kind::System;
+            service.outcome = Outcome::Deny;
+            service.severity = 4;
+            service.context = Some(EventContext {
+                host: "fixture".into(),
+                program: "systemd".into(),
+                pid: Some(1),
+                uid: Some(0),
+                parent_pid: None,
+                process_start_ms: None,
+                parent_start_ms: None,
+                summary: "Controlled service failure".into(),
+                journal_cursor: String::new(),
+            });
+            lab.ingest(&[service], NOW).unwrap();
+            // Eight denials separated by an expired window must stay quiet.
+            let mut facts: Vec<_> = (0..8)
+                .map(|i| {
+                    let mut event = lab.normal_event(
+                        1000 + i,
+                        if i == 7 {
+                            NOW - 1
+                        } else {
+                            NOW - 240_000 + i * 1000
+                        },
+                        901,
+                    );
+                    event.subject = "expired-account".into();
+                    event.kind = Kind::Authentication;
+                    event.outcome = Outcome::Deny;
+                    event
+                })
+                .collect();
+            // Insert observations late and out of chronological order, including
+            // the same subjects as both the positive and expired controls.
+            facts.extend((0..120).map(|i| {
+                let mut event = lab.normal_event(2000 + i, NOW - i * 2000, 902);
+                event.kind = [
+                    Kind::Authentication,
+                    Kind::Process,
+                    Kind::Network,
+                    Kind::Policy,
+                    Kind::System,
+                ][i as usize % 5];
+                event.outcome = Outcome::Observe;
+                event.subject = if i % 2 == 0 {
+                    "expired-account"
+                } else {
+                    "operator-0001"
+                }
+                .into();
+                event
+            }));
+            lab.ingest(&facts, NOW).unwrap();
+            assert!(lab.findings().unwrap().is_empty());
+            for rule in RULES {
+                lab.toggle_rule(rule.id, NOW).unwrap();
+            }
+        }
+        compact.detect().unwrap();
+        full.detect_events(full.events().unwrap()).unwrap();
+        let actual = compact.findings().unwrap();
+        assert_eq!(actual.len(), 5);
+        for id in ["AX-001", "AX-002", "AX-003", "AX-004", "AX-005"] {
+            assert!(actual.iter().any(|finding| finding.rule == id));
+        }
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(full.findings().unwrap()).unwrap()
+        );
+        // Passive facts remain queryable and retain exact immutable originals.
+        for event in compact.events().unwrap() {
+            assert_eq!(
+                serde_json::to_value(&event).unwrap(),
+                serde_json::to_value(compact.reconstruct(event.event.id).unwrap()).unwrap()
+            );
+        }
+    }
     #[test]
     fn attack_chain_correlates_and_normal_traffic_does_not() {
         let mut lab = Engine::memory().unwrap();

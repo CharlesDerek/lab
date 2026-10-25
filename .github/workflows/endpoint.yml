@@ -1,0 +1,274 @@
+name: Endpoint builds and platform tests
+on:
+  pull_request:
+    paths:
+      - 'core-engines/endpoint/**'
+      - 'core-engines/endpoint-protocol/**'
+      - 'core-engines/endpoint-native/**'
+      - 'core-engines/siem/**'
+      - 'infrastructure/endpoint/**'
+      - 'tools/package_endpoint.py'
+      - 'tools/test_package_endpoint.py'
+      - 'tools/package_engine.py'
+      - 'tools/test_package_engine.py'
+      - 'tools/verify_engine_update.py'
+      - 'tools/engine_rollout.py'
+      - 'tools/verify_process_events.py'
+      - 'tools/verify_auth_events.py'
+      - 'tools/verify_network_events.py'
+      - 'tools/verify_network_fleet.py'
+      - 'tools/network_fleet_tls.py'
+      - 'tools/test_engine_fixture_resources.py'
+      - 'tools/verify_engine_ui.cjs'
+      - 'tools/test_macos_installer.py'
+      - 'tools/verify_endpoint_fleet.py'
+      - 'tools/verify_endpoint_update.py'
+      - 'tools/verify_automatic_update.py'
+      - 'tools/verify_controller_maintenance.py'
+      - 'tools/verify_controller_delivery.py'
+      - 'tools/verify_endpoint_rollout.py'
+      - 'tools/verify_native_protection.py'
+      - 'tools/verify_native_adapter.py'
+      - 'tools/native_read_barrier.py'
+      - 'tools/verify_macos_native.py'
+      - 'tools/verify_native_service.py'
+      - 'tools/prepare_native_protection_fixture.py'
+      - 'tools/prepare_windows_filter_kits.py'
+      - 'tools/build_windows_filter.py'
+      - 'tools/verify_windows_filter_transport.py'
+      - 'tools/verify_windows_native_samples.py'
+      - 'tools/test_windows_scratch_formatter.py'
+      - 'tools/test_windows_installer.py'
+      - 'tools/verify_windows_service.ps1'
+      - 'tools/verify_windows_service_ci.ps1'
+      - 'tools/test_windows_service_ci.py'
+      - 'tools/test_verification_guards.py'
+      - 'tools/verify_ecosystem_recovery.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/endpoint.yml'
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+    branches: ['codex/endpoint-native-validation']
+permissions:
+  contents: read
+jobs:
+  windows-filter-build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch verified Microsoft driver kit files
+        shell: pwsh
+        run: python tools/prepare_windows_filter_kits.py --output "$env:RUNNER_TEMP/filter-kits" --package-cache "$env:RUNNER_TEMP/nuget-kits"
+      - name: Build unsigned development minifilter
+        shell: pwsh
+        run: |
+          $clang = (Get-Command clang.exe -ErrorAction Stop).Source
+          $linker = Join-Path (Split-Path $clang) 'lld-link.exe'
+          python tools/build_windows_filter.py --wdk "$env:RUNNER_TEMP/filter-kits/microsoft.windows.wdk.x64/c" --sdk "$env:RUNNER_TEMP/filter-kits/microsoft.windows.sdk.cpp/c" --clang "$clang" --linker "$linker" --output windows-filter-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-filter-development-unsigned
+          path: |
+            windows-filter-build/athernex-filter.sys
+            windows-filter-build/build.json
+          if-no-files-found: error
+  linux-prevention:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build agent and control plane
+        run: cargo build --locked --release -p athernex-endpoint -p athernex-siem -p athernex-endpoint-native
+      - name: Prepare verified native AV engine
+        run: python tools/prepare_native_protection_fixture.py --output "$RUNNER_TEMP/native-av"
+      - name: Build isolated native test environment
+        run: docker build -t athernex-native-protection-fixture:local infrastructure/endpoint/tests
+      - name: Compile native event test executables
+        run: cargo test --locked -p athernex-endpoint --lib --test continuous_telemetry --test authentication --no-run --message-format=json > "$RUNNER_TEMP/process-event-tests.jsonl"
+      - name: Verify short-lived kernel events, durable delivery, agent crash and socket overflow
+        run: python tools/verify_process_events.py --manifest "$RUNNER_TEMP/process-event-tests.jsonl" --agent target/release/athernex-endpoint --image athernex-native-protection-fixture:local
+      - name: Build private network event test environment
+        run: docker build -t athernex-native-network-fixture:local infrastructure/endpoint/network-tests
+      - name: Verify native tracker flows, source availability, overflow and agent recovery
+        run: python tools/verify_network_events.py --manifest "$RUNNER_TEMP/process-event-tests.jsonl" --agent target/release/athernex-endpoint
+      - name: Compile optimized native load fixture
+        run: cargo test --locked --release -p athernex-endpoint --lib --no-run --message-format=json > "$RUNNER_TEMP/network-load-tests.jsonl"
+      - name: Measure sustained native tracker delivery through outage and restart
+        timeout-minutes: 8
+        run: python tools/verify_network_events.py --manifest "$RUNNER_TEMP/network-load-tests.jsonl" --agent target/release/athernex-endpoint --soak-seconds 120 --soak-rate 8 --report "$RUNNER_TEMP/network-load.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-network-load
+          path: ${{ runner.temp }}/network-load.json
+          if-no-files-found: error
+      - name: Measure isolated endpoints against the real server through hard restarts
+        timeout-minutes: 14
+        run: python tools/verify_network_fleet.py --agent target/release/athernex-endpoint --server target/release/athernex-siem --seconds 180 --rate 4 --report "$RUNNER_TEMP/network-fleet.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-network-fleet
+          path: ${{ runner.temp }}/network-fleet.json
+          if-no-files-found: warn
+      - name: Verify TLS rejection, certificate rotation and durable fleet recovery
+        timeout-minutes: 16
+        run: python tools/verify_network_fleet.py --agent target/release/athernex-endpoint --server target/release/athernex-siem --seconds 180 --rate 4 --tls --report "$RUNNER_TEMP/network-tls-fleet.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-network-tls-fleet
+          path: ${{ runner.temp }}/network-tls-fleet.json
+          if-no-files-found: warn
+      - name: Build private authentication test environment
+        run: docker build -t athernex-native-auth-fixture:local infrastructure/endpoint/auth-tests
+      - name: Verify native SSH/PAM authentication, queue recovery, agent crash and detection
+        run: python tools/verify_auth_events.py --manifest "$RUNNER_TEMP/process-event-tests.jsonl" --agent target/release/athernex-endpoint
+      - name: Verify missing authentication producer identity remains visible
+        run: python tools/verify_auth_events.py --manifest "$RUNNER_TEMP/process-event-tests.jsonl" --agent target/release/athernex-endpoint --missing-provenance
+      - name: Verify real blocking, evidence delivery, failure reporting and recovery
+        run: python tools/verify_native_protection.py --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
+      - name: Verify signed engine staging, native activation and interrupted recovery
+        run: python tools/verify_engine_update.py --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
+      - name: Verify unattended engine activation and controller-crash recovery
+        run: python tools/verify_engine_update.py --automatic --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
+      - name: Verify reviewed fleet engine delivery, rollback and controller recovery
+        run: python tools/verify_engine_update.py --fleet --server target/release/athernex-siem --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
+      - name: Verify real engine canary promotion, server restart and failed-canary containment
+        run: python tools/verify_engine_update.py --rollout --server target/release/athernex-siem --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
+      - name: Verify native adapter scan transport with real ClamAV
+        run: python tools/verify_native_adapter.py --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
+      - name: Validate Windows kernel wire layouts and malformed input handling
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer infrastructure/endpoint/windows-filter/test_wire.c -o "$RUNNER_TEMP/windows-filter-wire"
+          "$RUNNER_TEMP/windows-filter-wire"
+      - name: Verify Windows filter stream transport with real ClamAV
+        run: python tools/verify_windows_filter_transport.py --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
+      - name: Verify owned scanner and adapter lifetimes with real ClamAV
+        run: python tools/verify_native_service.py --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
+  endpoint:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x86_64
+            binary: target/release/athernex-endpoint
+          - runner: ubuntu-24.04-arm
+            target: linux-aarch64
+            binary: target/release/athernex-endpoint
+          - runner: windows-2022
+            target: windows-x86_64
+            binary: target/release/athernex-endpoint.exe
+          - runner: macos-15
+            target: macos-aarch64
+            binary: target/release/athernex-endpoint
+          - runner: macos-15-intel
+            target: macos-x86_64
+            binary: target/release/athernex-endpoint
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test endpoint enforcement, receipt automation and protocol
+        run: cargo test --locked -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native
+      - name: Refuse disabled assertions in validation tools and isolated helpers
+        run: python tools/test_verification_guards.py -v
+      - name: Test artifact packaging with controlled signature results
+        run: python tools/test_package_endpoint.py
+      - name: Test bounded engine bundle assembly
+        run: python tools/test_package_engine.py
+      - name: Test scratch formatter refusals with mocked storage
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python tools/test_windows_scratch_formatter.py --powershell "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -v
+      - name: Test macOS installer ordering with controlled system tools
+        if: runner.os != 'Windows'
+        run: python tools/test_macos_installer.py
+      - name: Lint endpoint
+        run: cargo clippy --locked -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native --all-targets -- -D warnings
+      - name: Build native endpoint
+        run: cargo build --locked --release -p athernex-endpoint -p athernex-siem
+      - name: Build development macOS authorization adapter
+        if: runner.os == 'macOS'
+        run: cargo build --locked --release -p athernex-endpoint-native
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: native-authorization-development-${{ matrix.target }}
+          path: target/release/athernex-endpoint-native
+          if-no-files-found: error
+      - name: Verify native enrollment, response and restart recovery
+        run: python tools/verify_endpoint_fleet.py --bin-dir target/release
+      - name: Verify signed updates and interrupted replacement recovery
+        run: python tools/verify_endpoint_update.py
+      - name: Verify signed controller replacement, exclusion and recovery
+        run: python tools/verify_endpoint_update.py --component controller
+      - name: Verify reviewed automatic installation and runtime rollback
+        if: runner.os != 'macOS'
+        run: python tools/verify_automatic_update.py
+      - name: Verify launcher-owned controller updates and recovery
+        if: runner.os != 'macOS'
+        run: python tools/verify_controller_maintenance.py
+      - name: Verify reviewed controller delivery and durable recovery receipts
+        if: runner.os != 'macOS'
+        run: python tools/verify_controller_delivery.py
+      - name: Verify fleet promotion, server restart and failed-canary containment
+        if: runner.os != 'macOS'
+        run: python tools/verify_endpoint_rollout.py
+      - name: Verify controller fleet promotion and preservation of installed agents
+        if: runner.os != 'macOS'
+        run: python tools/verify_endpoint_rollout.py --component controller
+      - name: Validate Unix installer syntax
+        if: runner.os != 'Windows'
+        run: for script in infrastructure/endpoint/*.sh; do sh -n "$script"; done
+      - name: Validate Windows installer syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($file in @('infrastructure/endpoint/install.ps1', 'core-engines/endpoint/src/installer/register.ps1', 'tools/verify_windows_service.ps1', 'tools/verify_windows_service_ci.ps1')) {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+          }
+      - name: Verify Windows installer control flow with mocked commands
+        if: runner.os == 'Windows'
+        run: python tools/test_windows_installer.py -v
+      - name: Verify native service runner failure handling with mocked tasks
+        if: runner.os == 'Windows'
+        run: python tools/test_windows_service_ci.py -v
+      - name: Verify real SCM lifecycle as LocalSystem on the disposable hosted VM
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        shell: pwsh
+        run: tools/verify_windows_service_ci.ps1 -Agent target/release/athernex-endpoint.exe -OutputDirectory "$env:RUNNER_TEMP/native-windows-service" -DisposableHost
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Windows'
+        with:
+          name: native-windows-service
+          path: |
+            ${{ runner.temp }}/native-windows-service/*.json
+            ${{ runner.temp }}/native-windows-service/*.log
+          if-no-files-found: warn
+      - name: Assemble development catalog
+        run: python tools/package_endpoint.py --binary '${{ matrix.binary }}' --target '${{ matrix.target }}' --output endpoint-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-${{ matrix.target }}
+          path: endpoint-artifacts/
+          if-no-files-found: error

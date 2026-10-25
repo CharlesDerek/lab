@@ -42,7 +42,49 @@ impl DurableCapacity {
              CREATE INDEX IF NOT EXISTS active_leases ON leases(resource, active, expires_ms);
              CREATE TABLE IF NOT EXISTS command_outbox (owner TEXT NOT NULL, resource TEXT NOT NULL, generation INTEGER NOT NULL, expires_ms INTEGER NOT NULL, payload TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(owner, resource, generation));",
         )?;
+        crate::governor::initialize(&connection)
+            .map_err(rusqlite::Error::ToSqlConversionFailure)?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS scheduler_budgets(resource TEXT PRIMARY KEY REFERENCES resources(name),pool TEXT NOT NULL REFERENCES resource_pools(name),per_slot TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS scheduler_reservations(resource TEXT NOT NULL,generation INTEGER NOT NULL,reservation_id TEXT UNIQUE NOT NULL,reservation_generation INTEGER NOT NULL,PRIMARY KEY(resource,generation));")?;
         Ok(Self { connection })
+    }
+
+    /// Bind slot admission to the shared multidimensional budget. Configure
+    /// before dispatch; existing work cannot be retroactively assigned costs.
+    pub fn bind_budget(
+        &mut self,
+        resource: &str,
+        pool: &str,
+        per_slot: crate::governor::Resources,
+    ) -> crate::governor::Result<()> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous: Option<(String, String)> = tx
+            .query_row(
+                "SELECT pool,per_slot FROM scheduler_budgets WHERE resource=?1",
+                [resource],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((name, raw)) = previous {
+            if name != pool || serde_json::from_str::<crate::governor::Resources>(&raw)? != per_slot
+            {
+                return Err("Scheduler budget binding is immutable".into());
+            }
+            tx.commit()?;
+            return Ok(());
+        }
+        let ready:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM resources WHERE name=?1) AND EXISTS(SELECT 1 FROM resource_pools WHERE name=?2) AND NOT EXISTS(SELECT 1 FROM leases WHERE resource=?1 AND active=1)",params![resource,pool],|r|r.get(0))?;
+        if !ready || per_slot == Default::default() || !per_slot.valid() {
+            return Err("Register both pools and complete existing slot work before binding its resource costs".into());
+        }
+        tx.execute(
+            "INSERT INTO scheduler_budgets VALUES(?1,?2,?3)",
+            params![resource, pool, serde_json::to_string(&per_slot)?],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn configure(&mut self, resource: &str, slots: u32) -> rusqlite::Result<bool> {
@@ -118,12 +160,27 @@ impl DurableCapacity {
         let Some(capacity) = capacity else {
             return Ok(Decision::Refused("unknown_resource"));
         };
-        tx.execute(
-            "UPDATE leases SET active=0 WHERE resource=?1 AND active=1 AND expires_ms<=?2",
-            params![resource, now_ms],
-        )?;
+        if crate::governor::held(&tx, resource).map_err(rusqlite::Error::ToSqlConversionFailure)? {
+            return Ok(Decision::Refused("security_placement_hold"));
+        }
+        let budget: Option<(String, String)> = tx
+            .query_row(
+                "SELECT pool,per_slot FROM scheduler_budgets WHERE resource=?1",
+                [resource],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if budget.is_none() {
+            tx.execute(
+                "UPDATE leases SET active=0 WHERE resource=?1 AND active=1 AND expires_ms<=?2",
+                params![resource, now_ms],
+            )?;
+        }
         let existing = tx.query_row("SELECT owner, resource, slots, generation, created_ms, expires_ms FROM leases WHERE owner=?1 AND resource=?2 AND active=1", params![owner, resource], parse_lease).optional()?;
         if let Some(lease) = existing {
+            if budget.is_some() && lease.expires_ms <= now_ms {
+                return Ok(Decision::Refused("expired_worker_requires_completion"));
+            }
             if enqueue && lease.slots == slots {
                 enqueue_command(&tx, &lease)?;
             }
@@ -165,6 +222,34 @@ impl DurableCapacity {
             created_ms: now_ms,
             expires_ms: now_ms + ttl_ms,
         };
+        if let Some((pool, raw)) = budget {
+            let per_slot: crate::governor::Resources = serde_json::from_str(&raw)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            let scale = |n: u64| n.saturating_mul(u64::from(slots));
+            let resources = crate::governor::Resources {
+                cpu_millis: scale(per_slot.cpu_millis),
+                memory_mib: scale(per_slot.memory_mib),
+                io_mib: scale(per_slot.io_mib),
+                gpu_millis: scale(per_slot.gpu_millis),
+                tokens: scale(per_slot.tokens),
+                power_watts: scale(per_slot.power_watts),
+            };
+            let request = crate::governor::Request {
+                id: format!("slots:{resource}:{next}"),
+                pool,
+                class: crate::governor::Class::Batch,
+                resources,
+                expires_ms: lease.expires_ms as u64,
+            };
+            let reservation = match crate::governor::reserve(&tx, &request, now_ms as u64) {
+                Ok(r) => r,
+                Err(_) => return Ok(Decision::Refused("shared_resource_budget_held")),
+            };
+            tx.execute(
+                "INSERT INTO scheduler_reservations VALUES(?1,?2,?3,?4)",
+                params![resource, next, request.id, reservation.generation],
+            )?;
+        }
         tx.execute("INSERT INTO leases(owner,resource,slots,generation,created_ms,expires_ms,active) VALUES (?1,?2,?3,?4,?5,?6,1)", params![owner, resource, slots, next, now_ms, lease.expires_ms])?;
         if enqueue {
             enqueue_command(&tx, &lease)?;
@@ -181,6 +266,20 @@ impl DurableCapacity {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pool: Option<String> = tx
+            .query_row(
+                "SELECT pool FROM scheduler_budgets WHERE resource=?1",
+                [resource],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if crate::governor::held(&tx, resource).map_err(rusqlite::Error::ToSqlConversionFailure)?
+            || pool
+                .as_deref()
+                .is_some_and(|p| crate::governor::held(&tx, p).unwrap_or(true))
+        {
+            return Ok(Vec::new());
+        }
         tx.execute(
             "UPDATE command_outbox SET delivered=2 WHERE delivered=0 AND expires_ms<=?1",
             [now_ms],
@@ -217,10 +316,15 @@ impl DurableCapacity {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current: Option<(i64, i64)> = tx.query_row("SELECT generation, expires_ms FROM leases WHERE owner=?1 AND resource=?2 AND active=1", params![owner, resource], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        let bound:Option<(String,u64)>=tx.query_row("SELECT reservation_id,reservation_generation FROM scheduler_reservations WHERE resource=?1 AND generation=?2",params![resource,generation],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         let decision = match current {
             Some((actual, _)) if actual != generation => "stale_generation",
-            Some((_, expiry)) if expiry <= now_ms => "expired_lease",
+            Some((_, expiry)) if expiry <= now_ms && bound.is_none() => "expired_lease",
             Some(_) => {
+                if let Some((id, generation)) = bound {
+                    crate::governor::release(&tx, &id, generation)
+                        .map_err(rusqlite::Error::ToSqlConversionFailure)?;
+                }
                 tx.execute(
                     "UPDATE leases SET active=0 WHERE owner=?1 AND resource=?2 AND generation=?3",
                     params![owner, resource, generation],
@@ -235,16 +339,41 @@ impl DurableCapacity {
     }
 
     pub fn active(&self, resource: &str, now_ms: i64) -> rusqlite::Result<Vec<Lease>> {
-        let mut stmt = self.connection.prepare("SELECT owner,resource,slots,generation,created_ms,expires_ms FROM leases WHERE resource=?1 AND active=1 AND expires_ms>?2 ORDER BY generation")?;
+        let mut stmt = self.connection.prepare("SELECT owner,resource,slots,generation,created_ms,expires_ms FROM leases WHERE resource=?1 AND active=1 AND (expires_ms>?2 OR EXISTS(SELECT 1 FROM scheduler_budgets WHERE resource=?1)) ORDER BY generation")?;
         let result = stmt
             .query_map(params![resource, now_ms], parse_lease)?
             .collect();
         result
     }
+    /// Workers must revalidate immediately before starting admitted work.
+    pub fn authorize(
+        &self,
+        owner: &str,
+        resource: &str,
+        generation: i64,
+        now_ms: i64,
+    ) -> rusqlite::Result<bool> {
+        let valid:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM leases WHERE owner=?1 AND resource=?2 AND generation=?3 AND active=1 AND expires_ms>?4)",params![owner,resource,generation,now_ms],|r|r.get(0))?;
+        if !valid
+            || crate::governor::held(&self.connection, resource)
+                .map_err(rusqlite::Error::ToSqlConversionFailure)?
+        {
+            return Ok(false);
+        }
+        let bound:Option<(String,u64)>=self.connection.query_row("SELECT reservation_id,reservation_generation FROM scheduler_reservations WHERE resource=?1 AND generation=?2",params![resource,generation],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        Ok(bound.is_none_or(|(id, token)| {
+            crate::governor::authorize(&self.connection, &id, token, now_ms as u64).is_ok()
+        }))
+    }
 }
 
 fn enqueue_command(tx: &rusqlite::Transaction<'_>, lease: &Lease) -> rusqlite::Result<()> {
-    let payload = serde_json::json!({"schema_version":"athernex.capacity.command.v1","owner":lease.owner,"resource":lease.resource,"slots":lease.slots,"fencing_token":lease.generation,"lease_expires_at_epoch_ms":lease.expires_ms}).to_string();
+    let mut payload = serde_json::json!({"schema_version":"athernex.capacity.command.v1","owner":lease.owner,"resource":lease.resource,"slots":lease.slots,"fencing_token":lease.generation,"lease_expires_at_epoch_ms":lease.expires_ms});
+    let bound:Option<(String,u64)>=tx.query_row("SELECT reservation_id,reservation_generation FROM scheduler_reservations WHERE resource=?1 AND generation=?2",params![lease.resource,lease.generation],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    if let Some((id, generation)) = bound {
+        payload["resource_reservation"] = serde_json::json!({"id":id,"generation":generation});
+    }
+    let payload = payload.to_string();
     tx.execute("INSERT OR IGNORE INTO command_outbox(owner,resource,generation,expires_ms,payload) VALUES (?1,?2,?3,?4,?5)", params![lease.owner,lease.resource,lease.generation,lease.expires_ms,payload])?;
     Ok(())
 }

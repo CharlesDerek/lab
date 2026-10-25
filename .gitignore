@@ -53,5 +53,11 @@ kubeconfig*
 # MRGI local runtime state
 .mrgi
 
+# Local AI working notes
+AGENTS.md
+CODEX.md
+CLAUDE.md
+GEMINI.md
+
 # Bounded local SIEM state (synthetic fixtures and authenticated local ingestion)
 .athernex/

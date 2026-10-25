@@ -9,6 +9,7 @@ use std::sync::Mutex;
 struct Session {
     hash: String,
     expires: u64,
+    actor: crate::identity::Actor,
 }
 pub struct OperatorAuth {
     key: String,
@@ -28,6 +29,9 @@ impl OperatorAuth {
         if !same_secret(&digest(key), &self.key) {
             return Err("Operator key rejected".into());
         }
+        self.login_principal(crate::identity::Actor::bootstrap())
+    }
+    pub(crate) fn login_principal(&self, actor: crate::identity::Actor) -> LabResult<String> {
         let token = secret()?;
         let mut sessions = self.sessions.lock().map_err(|_| "Sessions unavailable")?;
         sessions.retain(|s| s.expires > now_ms());
@@ -37,26 +41,29 @@ impl OperatorAuth {
         sessions.push(Session {
             hash: digest(&token),
             expires: now_ms() + 3_600_000,
+            actor,
         });
         Ok(token)
     }
     pub fn authorized(&self, headers: &HeaderMap) -> bool {
+        self.identity(headers).is_some()
+    }
+    pub fn identity(&self, headers: &HeaderMap) -> Option<crate::identity::Actor> {
         if let Some(value) = headers
             .get("authorization")
             .and_then(|h| h.to_str().ok())
             .and_then(|h| h.strip_prefix("Bearer "))
         {
-            return same_secret(&digest(value), &self.key);
+            return same_secret(&digest(value), &self.key).then(crate::identity::Actor::bootstrap);
         }
-        let Some(token) = cookie(headers) else {
-            return false;
-        };
+        let token = cookie(headers)?;
         let Ok(sessions) = self.sessions.lock() else {
-            return false;
+            return None;
         };
         sessions
             .iter()
-            .any(|s| s.expires > now_ms() && same_secret(&digest(token), &s.hash))
+            .find(|s| s.expires > now_ms() && same_secret(&digest(token), &s.hash))
+            .map(|s| s.actor.clone())
     }
     pub fn logout(&self, headers: &HeaderMap) {
         if let (Some(token), Ok(mut sessions)) = (cookie(headers), self.sessions.lock()) {

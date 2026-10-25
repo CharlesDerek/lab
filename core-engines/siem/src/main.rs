@@ -31,9 +31,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut journal = true;
     let mut memory = false;
     let mut key_file = None;
+    let mut evidence_bind: Option<std::net::SocketAddr> = None;
+    let mut evidence_client = false;
+    let mut tls_ca = None;
+    let mut tls_cert = None;
+    let mut tls_key = None;
+    let mut memory_config = None;
+    let mut backup_dir = None;
+    let mut verify_backup = None;
+    let mut restore_backup = None;
+    let mut restore_dir = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--restore-backup" => {
+                restore_backup = Some(
+                    args.next()
+                        .ok_or("--restore-backup needs a source directory")?,
+                )
+            }
+            "--restore-dir" => {
+                restore_dir = Some(
+                    args.next()
+                        .ok_or("--restore-dir needs a new destination directory")?,
+                )
+            }
+            "--backup-dir" => {
+                backup_dir = Some(args.next().ok_or("--backup-dir needs a new directory")?)
+            }
+            "--verify-backup" => {
+                verify_backup = Some(args.next().ok_or("--verify-backup needs a directory")?)
+            }
+            "--evidence-bind" => {
+                evidence_bind = Some(
+                    args.next()
+                        .ok_or("--evidence-bind needs ADDRESS:PORT")?
+                        .parse()?,
+                )
+            }
+            "--evidence-client" => evidence_client = true,
+            "--tls-ca" => tls_ca = Some(args.next().ok_or("--tls-ca needs a PEM path")?),
+            "--tls-cert" => tls_cert = Some(args.next().ok_or("--tls-cert needs a PEM path")?),
+            "--tls-key" => tls_key = Some(args.next().ok_or("--tls-key needs a PEM path")?),
+            "--memory-config" => {
+                memory_config = Some(args.next().ok_or("--memory-config needs a JSON path")?)
+            }
             "--port" => port = args.next().ok_or("--port needs a value")?.parse()?,
             "--db" => database = Some(args.next().ok_or("--db needs a path")?),
             "--demo" => demo = true,
@@ -48,10 +90,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             "--help" | "-h" => {
                 println!("athernex-siem [--port 8787] [--db PATH] [--operator-key-file PATH] [--no-journal] [--demo] [--memory]\nOperational by default: local journald collector, no sample events. Loopback only.\nDefault database: .athernex/live.sqlite3 (demo: .athernex/demo.sqlite3). Never mix modes.\n--no-journal disables the collector process; sources remain visible.\n--init-operator-key PATH creates a private key file and exits.\nOtherwise use ATHERNEX_OPERATOR_KEY or the random key printed in an interactive terminal.\nService deployments require a key file or environment credential. --no-seed is a compatibility alias for operational mode.");
+                println!("Investigative memory: --memory-config JSON (default: 48 hours, bounded by event and byte budgets).\nOptional mTLS evidence: --evidence-bind ADDRESS:PORT and/or --evidence-client, with --tls-ca PEM --tls-cert PEM --tls-key PEM. Register agent certificates and exact event capabilities in the existing operator API.");
+                println!("Storage: --db PATH --backup-dir NEW_DIRECTORY performs a verified offline backup including sealed evidence. --verify-backup DIRECTORY verifies its manifest and SQLite integrity. --restore-backup SOURCE --restore-dir NEW_DIRECTORY verifies and restores into a private new destination. Stop the service before offline backup.");
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument: {arg}").into()),
         }
+    }
+    if let Some(directory) = verify_backup {
+        let count = athernex_siem::storage::verify_backup(Path::new(&directory))?;
+        println!("Verified {count} backup files.");
+        return Ok(());
+    }
+    if restore_backup.is_some() || restore_dir.is_some() {
+        let source = restore_backup.ok_or("--restore-backup is required")?;
+        let destination = restore_dir.ok_or("--restore-dir is required")?;
+        let path =
+            athernex_siem::storage::restore_backup(Path::new(&source), Path::new(&destination))?;
+        println!("Verified private ledger restored to {}", path.display());
+        return Ok(());
+    }
+    if let Some(directory) = backup_dir {
+        let path = database
+            .as_ref()
+            .ok_or("Backup requires an explicit --db PATH")?;
+        if !Path::new(path).is_file() {
+            return Err("Backup source does not exist".into());
+        }
+        let mut engine = Engine::open(Path::new(path))?;
+        engine.backup_to(Path::new(&directory), now_ms())?;
+        println!(
+            "Verified backup created. Keep this private; it includes operational credentials."
+        );
+        return Ok(());
     }
     let generated = key_file.is_none() && std::env::var("ATHERNEX_OPERATOR_KEY").is_err();
     if generated {
@@ -95,6 +166,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Engine::open(Path::new(&database))?
     };
     engine.configure_mode(demo)?;
+    if let Some(path) = memory_config {
+        engine.configure_memory(
+            serde_json::from_str(&std::fs::read_to_string(path)?)?,
+            now_ms(),
+        )?;
+    }
+    engine.maintain_memory(now_ms())?;
     if demo {
         engine.seed(now_ms())?;
         engine.seed_hive(now_ms())?;
@@ -120,6 +198,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         operator,
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
+    let mut evidence_tasks = Vec::new();
+    if evidence_bind.is_some() || evidence_client {
+        use athernex_siem::evidence_transport as transport;
+        let ca = tls_ca.ok_or("mTLS requires --tls-ca")?;
+        let cert = tls_cert.ok_or("mTLS requires --tls-cert")?;
+        let key = tls_key.ok_or("mTLS requires --tls-key")?;
+        if let Some(bind) = evidence_bind {
+            let config = transport::server_config(
+                transport::root_store(transport::certificates(Path::new(&ca))?)?,
+                transport::certificates(Path::new(&cert))?,
+                transport::private_key(Path::new(&key))?,
+            )?;
+            let listener = tokio::net::TcpListener::bind(bind).await?;
+            evidence_tasks.push(tokio::spawn(transport::serve(
+                listener,
+                config,
+                app.engine.clone(),
+                stopped.clone(),
+            )));
+        }
+        if evidence_client {
+            let config = transport::client_config(
+                transport::root_store(transport::certificates(Path::new(&ca))?)?,
+                transport::certificates(Path::new(&cert))?,
+                transport::private_key(Path::new(&key))?,
+            )?;
+            let client = transport::EvidenceClient::new(config);
+            let engine = app.engine.clone();
+            let mut stopping = stopped.clone();
+            evidence_tasks.push(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                loop {
+                    tokio::select! {_=stopping.changed()=>break,_=interval.tick()=>{}}
+                    tokio::select! {
+                        _=stopping.changed()=>break,
+                        result=client.promote_pending(engine.clone(),now_ms())=>{
+                            if let Err(error)=result {
+                                if let Ok(mut e)=engine.lock() {e.storage_error=error.to_string();}
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }));
+        }
+    }
     let collector = if journal && !demo {
         Some(tokio::spawn(athernex_siem::collector::run(
             Arc::clone(&app.engine),
@@ -155,6 +279,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         collector.await?;
     }
     tick.await?;
+    for task in evidence_tasks {
+        task.await??;
+    }
     shutdown_engine
         .lock()
         .map_err(|_| "Engine unavailable at shutdown")?

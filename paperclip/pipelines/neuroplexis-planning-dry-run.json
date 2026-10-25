@@ -1,6 +1,6 @@
 {
   "name": "neuroplexis-planning-dry-run",
-  "repoRoot": "/home/charles/Documents/Software/github/lab",
+  "repoRoot": "/path/to/lab",
   "baseBranch": "development",
   "branchPrefix": "routine/neuroplexis-planning-dry-run",
   "primaryRemoteName": "origin",

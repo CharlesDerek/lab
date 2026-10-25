@@ -158,6 +158,14 @@ impl Engine {
                 return Err("Unknown finding resource".into());
             }
             "read"
+        } else if let Some(id) = resource
+            .strip_prefix("event-")
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            if resource != format!("event-{id}") || self.evidence_hash(id).is_err() {
+                return Err("Unknown evidence resource".into());
+            }
+            "read"
         } else {
             return Err("Unknown resource".into());
         };
@@ -395,7 +403,7 @@ impl Engine {
             now,
         )?;
         // One commit binds consumption, operation, decision, normalized event
-        // and any resulting finding. The hot event can still be lost on crash.
+        // and any resulting finding, including its durable evidence reference.
         self.ingest_in_transaction(
             &[InputEvent {
                 time_ms: now,
@@ -666,7 +674,7 @@ mod tests {
         assert_eq!(h.notes.len(), 1);
         assert_eq!(h.decisions.len(), 1);
         assert_eq!(h.grants[0].uses, 1);
-        assert!(e.events().unwrap().is_empty());
+        assert_eq!(e.events().unwrap().len(), 1);
         assert_eq!(
             e.access(&token, "lab-note", "append", Some("Must fail"), NOW + 1)
                 .unwrap()

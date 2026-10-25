@@ -486,3 +486,199 @@ async fn scoped_ingestion_cannot_impersonate_journal_or_operator() {
         1
     );
 }
+
+#[tokio::test]
+async fn exhausted_storage_returns_retryable_error_without_acknowledging() {
+    use athernex_siem::{memory::DAY, model::*, storage::StorageConfig};
+    let dir = tempfile::tempdir().unwrap();
+    let mut engine = Engine::open(&dir.path().join("ledger.db")).unwrap();
+    let now = now_ms();
+    let token = engine
+        .create_source("fixture", "api", "", now)
+        .unwrap()
+        .unwrap();
+    engine
+        .configure_storage(
+            StorageConfig {
+                ledger_mib: 64,
+                segment_limit: 1,
+                segment_records: 64,
+                minimum_free_mib: 0,
+            },
+            now,
+        )
+        .unwrap();
+    let row = |n| InputEvent {
+        time_ms: now - 3 * DAY,
+        source: "fixture".into(),
+        subject: "fixture-user".into(),
+        object: "fixture-resource".into(),
+        kind: Kind::System,
+        outcome: Outcome::Observe,
+        severity: 1,
+        bytes: 0,
+        trace: 0,
+        idempotency_key: format!("fixture-{n}"),
+        context: None,
+    };
+    engine
+        .ingest_source("fixture", Some(&token), &[row(0)], None, 0, now)
+        .unwrap();
+    engine.seal_evidence(now).unwrap();
+    engine
+        .ingest_source(
+            "fixture",
+            Some(&token),
+            &(1..=64).map(row).collect::<Vec<_>>(),
+            None,
+            0,
+            now,
+        )
+        .unwrap();
+    let app = App {
+        engine: Arc::new(Mutex::new(engine)),
+        csrf: "test-session-token".into(),
+        ingest_token: None,
+        operator: Arc::new(
+            athernex_siem::auth::OperatorAuth::new("test-operator-key-32-characters-long").unwrap(),
+        ),
+    };
+    let router = router(app.clone());
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/ingest/fixture")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&vec![row(65)]).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["retry-after"], "30");
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["acknowledged"], 0);
+    assert_eq!(
+        app.engine
+            .lock()
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .total_received,
+        65
+    );
+    let readiness = router
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(readiness.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn investigative_memory_api_and_console_obey_operator_and_csrf_boundaries() {
+    let app = app(None);
+    let router = router(app.clone());
+    for path in [
+        "/memory",
+        "/api/memory",
+        "/api/evidence/1",
+        "/api/evidence-audit",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(!response.status().is_success(), "{path}");
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header(
+                        "authorization",
+                        "Bearer test-operator-key-32-characters-long",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let body = to_bytes(response.into_body(), 2_000_000).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        if path == "/memory" {
+            assert!(text.contains("Active investigation context"));
+            assert!(!text.contains("<script"));
+        }
+        if path == "/api/evidence/1" {
+            assert!(text.contains("verified_local"));
+        }
+    }
+    for (csrf, status) in [
+        ("invalid", StatusCode::BAD_REQUEST),
+        ("test-session-token", StatusCode::OK),
+    ] {
+        let body = serde_json::json!({"csrf":csrf,"config":{"hot_ms":3600000,"context_events":4}})
+            .to_string();
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/memory")
+                    .header(
+                        "authorization",
+                        "Bearer test-operator-key-32-characters-long",
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    assert_eq!(
+        app.engine.lock().unwrap().memory_config().unwrap().hot_ms,
+        3600000
+    );
+}
+
+#[tokio::test]
+async fn event_capabilities_cannot_bypass_mtls_via_the_plain_gateway() {
+    let app = app(None);
+    let token = {
+        let e = app.engine.lock().unwrap();
+        let now = now_ms();
+        let a = e.register_agent("evidence-reader", "fixture", now).unwrap();
+        let t = e
+            .create_task(a, "Read evidence", "event-1", 10, now)
+            .unwrap();
+        e.issue_grant(t, 60, 2, now).unwrap().token
+    };
+    let response = router(app.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/gateway/event-1")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        app.engine.lock().unwrap().hive(now_ms()).unwrap().grants[0].uses,
+        0
+    );
+}

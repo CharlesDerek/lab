@@ -258,6 +258,7 @@ impl Engine {
             }
             input.validate(now)?;
         }
+        self.prepare_storage(now)?;
         if self.pending_count()? + inputs.len() > 512 {
             self.flush(now)?;
         }
@@ -271,12 +272,15 @@ impl Engine {
         } else {
             self.ingest_in_transaction(inputs, now)?
         };
-        tx.execute("INSERT INTO source_progress(id,received,rejected,last_event_ms,last_poll_ms) VALUES (?4,?1,?2,CASE WHEN ?1>0 THEN ?3 ELSE 0 END,?3) ON CONFLICT(id) DO UPDATE SET received=source_progress.received+excluded.received,rejected=source_progress.rejected+excluded.rejected,last_event_ms=max(source_progress.last_event_ms,excluded.last_event_ms),last_poll_ms=excluded.last_poll_ms,error=''",params![accepted,skipped,now,id])?;
+        tx.execute("UPDATE sources SET received=received+?1,rejected=rejected+?2,last_event_ms=CASE WHEN ?1>0 THEN max(last_event_ms,?3) ELSE last_event_ms END,last_poll_ms=max(last_poll_ms,?3),error='' WHERE id=?4",params![accepted,skipped,now,id])?;
         if let Some(cursor) = cursor {
             if cursor.len() > 512 || cursor.chars().any(char::is_control) {
                 return Err("Invalid journal checkpoint".into());
             }
-            tx.execute("INSERT INTO source_cursors VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET cursor=excluded.cursor",params![id,cursor])?;
+            tx.execute(
+                "UPDATE sources SET cursor=?2 WHERE id=?1",
+                params![id, cursor],
+            )?;
         }
         tx.commit()?;
         Ok(accepted)
@@ -476,6 +480,14 @@ impl Engine {
             &self.connection,
             rusqlite::TransactionBehavior::Immediate,
         )?;
+        let responses: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM endpoint_commands WHERE case_id=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if responses {
+            return Err("Cases with endpoint response records are retained for receipt replay and audit; export the case or a complete backup".into());
+        }
         let finding: Option<i64> =
             tx.query_row("SELECT finding_id FROM cases WHERE id=?1", [id], |r| {
                 r.get(0)
@@ -594,6 +606,9 @@ mod tests {
         );
         let mut forged = fact("fixture", 3);
         forged.context = Some(EventContext {
+            parent_pid: None,
+            process_start_ms: None,
+            parent_start_ms: None,
             host: "forged".into(),
             program: "sshd".into(),
             pid: Some(1),
@@ -615,7 +630,7 @@ mod tests {
         );
     }
     #[test]
-    fn cursor_provenance_and_counts_commit_with_archive_and_recover_after_crash() {
+    fn cursor_provenance_and_counts_commit_with_evidence_and_recover_after_crash() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("live.db");
         let mut e = Engine::open(&path).unwrap();
@@ -632,7 +647,7 @@ mod tests {
             NOW + 10,
         )
         .unwrap();
-        // A crash drops the buffer and its checkpoint together.
+        // Evidence and its source checkpoint now commit together before the archive flush.
         drop(e);
         let mut e = Engine::open(&path).unwrap();
         e.configure_mode(false).unwrap();
@@ -642,9 +657,9 @@ mod tests {
             .into_iter()
             .find(|s| s.id == "journal")
             .unwrap();
-        assert!(source.cursor.is_empty());
-        assert_eq!(source.received, 0);
-        assert!(e.events().unwrap().is_empty());
+        assert_eq!(source.cursor, "s=fixture;i=1");
+        assert_eq!(source.received, 1);
+        assert_eq!(e.events().unwrap().len(), 1);
         e.ingest_source(
             "journal",
             None,
@@ -662,7 +677,7 @@ mod tests {
                     r.get::<_, String>(0)
                 })
                 .unwrap(),
-            ""
+            "s=fixture;i=1"
         );
         e.connection
             .execute_batch("DROP TRIGGER fail_archive")

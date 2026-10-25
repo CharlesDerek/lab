@@ -115,31 +115,47 @@ pub fn normalize(record: &Value, source: &str, now: u64) -> LabResult<InputEvent
         } else {
             "OpenSSH reported an authentication denial"
         };
-    } else if pam && message.contains("authentication failure") {
+    } else if pam
+        && message.starts_with("pam_")
+        && message.contains(":auth): authentication failure;")
+    {
         kind = Kind::Authentication;
-        outcome = Outcome::Deny;
-        severity = 3;
+        // A sufficient/optional module may fail before another module accepts
+        // the same login. Keep this evidence without asserting service denial
+        // or counting it again beside the service's completed outcome.
+        outcome = Outcome::Observe;
+        severity = 1;
         object = label(comm);
         if let Some(user) = token_after(message, "user=") {
             subject = label(user);
         }
-        summary = "PAM reported an authentication failure";
-    } else if exe == "/usr/bin/sudo"
-        && (message.contains("NOT in sudoers")
-            || message.contains("not allowed to execute")
-            || message.contains("command not allowed"))
-    {
-        kind = Kind::Policy;
-        outcome = Outcome::Deny;
-        severity = 4;
-        object = "sudo".into();
-        summary = "sudo reported a denied policy decision";
-    } else if exe == "/usr/bin/sudo" && message.contains("COMMAND=") {
-        kind = Kind::Policy;
-        outcome = Outcome::Allow;
-        severity = 2;
-        object = "sudo".into();
-        summary = "sudo recorded an authorized command request";
+        summary = "PAM module reported failure; service authentication outcome is not established";
+    } else if exe == "/usr/bin/sudo" {
+        use athernex_endpoint_protocol::authentication::{sudo_report, SudoOutcome};
+        if let Some(report) = sudo_report(message) {
+            subject = label(report.claimed_user);
+            object = "sudo".into();
+            match report.outcome {
+                SudoOutcome::PasswordDenied { .. } => {
+                    kind = Kind::Authentication;
+                    outcome = Outcome::Deny;
+                    severity = 3;
+                    summary = "sudo reported a completed password-authentication denial";
+                }
+                SudoOutcome::PolicyDenied => {
+                    kind = Kind::Policy;
+                    outcome = Outcome::Deny;
+                    severity = 4;
+                    summary = "sudo reported a denied policy decision";
+                }
+                SudoOutcome::CommandAuthorized => {
+                    kind = Kind::Policy;
+                    outcome = Outcome::Allow;
+                    severity = 2;
+                    summary = "sudo recorded an authorized command request; fresh authentication is not established";
+                }
+            }
+        }
     } else if field(record, "_PID") == "1"
         && uid == Some(0)
         && comm == "systemd"
@@ -164,6 +180,9 @@ pub fn normalize(record: &Value, source: &str, now: u64) -> LabResult<InputEvent
         trace: 0,
         idempotency_key: digest(cursor),
         context: Some(EventContext {
+            parent_pid: None,
+            process_start_ms: None,
+            parent_start_ms: None,
             host: bounded(field(record, "_HOSTNAME"), 64),
             program: bounded(
                 if comm.is_empty() {
@@ -378,6 +397,84 @@ mod tests {
         .unwrap();
         assert_eq!(input.kind, Kind::System);
         assert_eq!(input.outcome, Outcome::Observe);
+    }
+    #[test]
+    fn pam_module_reports_do_not_double_count_denied_service_authentications() {
+        let now = 1_800_000_000_000;
+        let mut engine = Engine::memory().unwrap();
+        for index in 0..8 {
+            let mut pam = record("pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=192.0.2.10 user=alice", "/usr/sbin/sshd");
+            pam["__CURSOR"] = format!("pam-{index}").into();
+            let input = normalize(&pam, "host-journal", now).unwrap();
+            assert_eq!(input.outcome, Outcome::Observe);
+            assert!(input.context.as_ref().unwrap().summary.contains("module"));
+            engine.ingest(&[input], now).unwrap();
+            let mut ssh = record(
+                "Failed password for alice from 192.0.2.10 port 2222 ssh2",
+                "/usr/sbin/sshd",
+            );
+            ssh["__CURSOR"] = format!("ssh-{index}").into();
+            engine
+                .ingest(&[normalize(&ssh, "host-journal", now).unwrap()], now)
+                .unwrap();
+            assert_eq!(
+                engine
+                    .findings()
+                    .unwrap()
+                    .iter()
+                    .any(|f| f.rule == "AX-001"),
+                index == 7
+            );
+        }
+        let command = normalize(
+            &record(
+                "alice : TTY=unknown ; PWD=/fixture ; USER=root ; COMMAND=/bin/echo authentication failure",
+                "/usr/bin/sudo",
+            ),
+            "host-journal",
+            now,
+        )
+        .unwrap();
+        assert_eq!(command.kind, Kind::Policy);
+        assert_eq!(command.outcome, Outcome::Allow);
+    }
+
+    #[test]
+    fn sudo_password_denial_is_not_an_authorized_command_and_arguments_are_opaque() {
+        let now = 1_800_000_000_000;
+        let failure = record("alice : 2 incorrect password attempts ; TTY=unknown ; PWD=/fixture ; USER=root ; COMMAND=/usr/bin/true", "/usr/bin/sudo");
+        let input = normalize(&failure, "host-journal", now).unwrap();
+        assert_eq!(input.kind, Kind::Authentication);
+        assert_eq!(input.outcome, Outcome::Deny);
+        assert_eq!(input.subject, "alice");
+        for text in [
+            "NOT in sudoers",
+            "not allowed to execute",
+            "command not allowed",
+            "1 incorrect password attempt",
+        ] {
+            let input = normalize(&record(&format!("alice : TTY=unknown ; PWD=/fixture ; USER=root ; COMMAND=/usr/bin/printf {text}"), "/usr/bin/sudo"), "host-journal", now).unwrap();
+            assert_eq!(input.kind, Kind::Policy);
+            assert_eq!(input.outcome, Outcome::Allow);
+        }
+        for text in [
+            "alice : custom authentication failure ; COMMAND=/usr/bin/true",
+            "alice : 1 incorrect password attempt ; COMMAND=/usr/bin/true",
+        ] {
+            assert_eq!(
+                normalize(&record(text, "/usr/bin/sudo"), "host-journal", now)
+                    .unwrap()
+                    .outcome,
+                Outcome::Observe
+            );
+        }
+        let mut forged = failure;
+        forged["_EXE"] = "/usr/bin/logger".into();
+        forged["SYSLOG_IDENTIFIER"] = "sudo".into();
+        assert_eq!(
+            normalize(&forged, "host-journal", now).unwrap().outcome,
+            Outcome::Observe
+        );
     }
     #[test]
     fn generic_error_priority_is_not_a_privilege_or_service_failure() {

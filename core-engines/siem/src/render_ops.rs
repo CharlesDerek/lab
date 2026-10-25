@@ -270,7 +270,13 @@ pub fn event_controls(html: &mut String, s: &Snapshot, event: &DisplayEvent, csr
         ] {
             write!(html, "<div><dt>{key}</dt><dd>{}</dd></div>", escape(&value)).unwrap();
         }
-        write!(html,"</dl><p>AEF1 is the compact fact payload. Provenance is stored separately in AXR2 and adds overhead.</p><a class='button secondary' href='/event/{}/original{}'>Retrieve original journal message ↗</a><p>Available only while the OS journal retains the exact record. Loaded on demand, never copied into the SIEM archive.</p></section>",event.event.id,s.selected_archive.map(|b|format!("?block={b}")).unwrap_or_default()).unwrap();
+        html.push_str("</dl>");
+        if event.source_label == "endpoint" {
+            write!(html,"<a class='button secondary' href='/endpoints/{}'>Open original device evidence ↗</a><p>Retained endpoint observations preserve their typed source reports.</p>",escape(&context.host)).unwrap();
+        } else if !context.journal_cursor.is_empty() {
+            write!(html,"<a class='button secondary' href='/event/{}/original{}'>Retrieve original journal message ↗</a><p>Available only while the OS journal retains the exact record. Loaded on demand, never copied into the SIEM archive.</p>",event.event.id,s.selected_archive.map(|b|format!("?block={b}")).unwrap_or_default()).unwrap();
+        }
+        html.push_str("</section>");
     }
     write!(html,"<section class='panel controls-panel'><h2>Attach to an investigation</h2>{}<input type=hidden name=event value='{}'>",form(csrf,"/cases/action","attach"),event.event.id).unwrap();
     if let Some(block) = s.selected_archive {

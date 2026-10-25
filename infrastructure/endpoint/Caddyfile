@@ -1,0 +1,10 @@
+# Set ATHERNEX_PUBLIC_HOST on Caddy and ATHERNEX_PUBLIC_ORIGIN=https://that-host/
+# on the SIEM service. Keep the Rust listener bound to loopback.
+{$ATHERNEX_PUBLIC_HOST} {
+    request_body {
+        max_size 256KB
+    }
+    reverse_proxy 127.0.0.1:8787 {
+        header_up Host 127.0.0.1:8787
+    }
+}

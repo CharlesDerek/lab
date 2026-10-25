@@ -1,12 +1,12 @@
 {
   "title": "Neuroplexis Athernex Lab Maintenance",
-  "description": "Every 6 hours, Neuroplexis reviews /home/charles/Documents/Software/github/lab on the development branch and performs a bounded maintenance pass. The expected implementation path is tools/neuroplexis_lab_maintenance.sh: create a task branch, run up to 5 non-interactive Codex cycles, verify after each cycle, collect evidence, and compact notes for the next cycle. Scope work to public-safe Project Athernex R&D improvements only: orchestration contracts, Kafka broker and power-scheduler modeling, Paperclip integration, Rust control-plane scaffolding, documentation, tests, and repo hygiene. Do not publish secrets, private topology, credentials, private network inventories, BMC/IPMI details, vendor-specific power runbooks, or destructive automation.",
+  "description": "Every 6 hours, Neuroplexis reviews the configured repository on the development branch and performs a bounded maintenance pass. Set REPO_ROOT to the local checkout before enabling this template. The expected implementation path is tools/neuroplexis_lab_maintenance.sh: create a task branch, run up to 5 non-interactive Codex cycles, verify after each cycle, collect evidence, and compact notes for the next cycle. Scope work to public-safe Project Athernex R&D improvements only: orchestration contracts, Kafka broker and power-scheduler modeling, Paperclip integration, Rust control-plane scaffolding, documentation, tests, and repo hygiene. Do not publish secrets, private topology, credentials, private network inventories, BMC/IPMI details, vendor-specific power runbooks, or destructive automation.",
   "priority": "medium",
   "status": "active",
   "concurrencyPolicy": "skip_if_active",
   "catchUpPolicy": "skip_missed",
   "env": {
-    "REPO_ROOT": "/home/charles/Documents/Software/github/lab",
+    "REPO_ROOT": "/path/to/lab",
     "BASE_BRANCH": "development",
     "MAX_CODEX_RUNS": "5",
     "VERIFY_COMMAND": "make check",

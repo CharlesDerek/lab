@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_EVENTS: usize = 4096;
+pub const MAX_LABELS: usize = 16384;
 pub const MAX_FINDINGS: usize = 128;
 pub const MAX_BATCH: usize = 256;
 
@@ -14,6 +15,7 @@ pub enum Kind {
     Policy = 4,
     Heartbeat = 5,
     System = 6,
+    Malware = 7,
 }
 
 impl Kind {
@@ -25,6 +27,7 @@ impl Kind {
             Self::Policy => "Policy",
             Self::Heartbeat => "Heartbeat",
             Self::System => "System",
+            Self::Malware => "Malware",
         }
     }
     pub fn code(self) -> &'static str {
@@ -35,6 +38,7 @@ impl Kind {
             Self::Policy => "PL",
             Self::Heartbeat => "HB",
             Self::System => "SY",
+            Self::Malware => "MW",
         }
     }
     pub fn from_byte(value: u8) -> Option<Self> {
@@ -45,6 +49,7 @@ impl Kind {
             4 => Self::Policy,
             5 => Self::Heartbeat,
             6 => Self::System,
+            7 => Self::Malware,
             _ => return None,
         })
     }
@@ -90,6 +95,12 @@ pub struct EventContext {
     pub host: String,
     pub program: String,
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub parent_pid: Option<u32>,
+    #[serde(default)]
+    pub process_start_ms: Option<u64>,
+    #[serde(default)]
+    pub parent_start_ms: Option<u64>,
     pub uid: Option<u32>,
     pub summary: String,
     pub journal_cursor: String,
@@ -170,10 +181,10 @@ impl InputEvent {
             return Err("Severity must be between 1 and 5.".into());
         }
         if self.time_ms > now.saturating_add(60_000)
-            || self.time_ms < now.saturating_sub(86_400_000)
+            || self.time_ms > i64::MAX as u64
             || self.bytes > 1 << 50
         {
-            return Err("Event exceeds the 24-hour time window or numeric limits.".into());
+            return Err("Event exceeds future timestamp or numeric limits.".into());
         }
         Ok(())
     }
@@ -237,12 +248,15 @@ pub struct Rule {
     pub tactic: &'static str,
 }
 
-pub const RULES: [Rule; 5] = [
+pub const RULES: [Rule; 8] = [
     Rule { id: "AX-001", title: "Authentication burst", description: "Eight denied authentication events for one subject inside two minutes.", severity: 4, fields: "subject · time · kind · outcome", window: "120 seconds", tactic: "Credential access" },
     Rule { id: "AX-002", title: "Privilege sequence", description: "A high-severity process execution follows a successful authentication for the same subject inside one minute.", severity: 5, fields: "subject · time · kind · outcome · severity", window: "60 seconds", tactic: "Privilege escalation" },
     Rule { id: "AX-003", title: "Egress after execution", description: "At least 10 MiB sent after a high-severity process execution by the same subject inside three minutes.", severity: 5, fields: "subject · time · kind · outcome · bytes · severity", window: "180 seconds", tactic: "Exfiltration signal" },
     Rule { id: "AX-004", title: "Policy boundary denied", description: "A high-severity policy denial signals a blocked action at the control-plane boundary.", severity: 3, fields: "kind · outcome · severity", window: "Single event", tactic: "Defense boundary" },
     Rule { id: "AX-005", title: "System service failure", description: "A trusted system manager reports a failed service or process exit.", severity: 4, fields: "kind · outcome · severity · provenance", window: "Single event", tactic: "Service availability" },
+    Rule { id: "AX-006", title: "Browser or document interpreter child", description: "An interpreter observation names a browser or document process as its parent, matching device, boot, PID and start time.", severity: 4, fields: "endpoint · boot · process · parent identity", window: "120 seconds", tactic: "Execution signal" },
+    Rule { id: "AX-007", title: "Interpreter with external TCP connection", description: "An interpreter process and an established TCP socket share the exact observed process identity and metadata, with a non-local peer.", severity: 3, fields: "endpoint · boot · process identity · socket", window: "120 seconds", tactic: "Network investigation" },
+    Rule { id: "AX-008", title: "Process identity became privileged", description: "The same observed process identity and executable changed from a non-system user to root or SYSTEM.", severity: 4, fields: "endpoint · boot · process identity · user", window: "120 seconds", tactic: "Privilege change" },
 ];
 
 pub fn now_ms() -> u64 {
