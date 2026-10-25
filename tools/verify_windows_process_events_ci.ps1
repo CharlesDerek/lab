@@ -12,7 +12,7 @@ function Get-ProcessEventsTest {
 }
 
 function Get-ProcessEventsStageNames {
-    @('guard_verified','agent_config_verified','source_ready','lifecycle_verified','rundown_verified',
+    @('guard_verified','agent_config_verified','source_ready','lifecycle_verified','termination_verified','rundown_verified',
       'tdh_differential_verified','stalled_http_verified','queue_loss_verified','crash_replay_verified',
       'orphan_recovered','session_gap_verified','http_delivery_verified','server_replay_verified',
       'export_authorization_verified','original_export_verified','portal_coverage_verified',

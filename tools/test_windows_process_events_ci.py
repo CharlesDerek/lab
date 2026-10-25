@@ -42,6 +42,7 @@ $log = Join-Path $Root 'check-0.log'
 function Write-Log {
     $lines = @(Get-ProcessEventsStageNames | ForEach-Object { 'ATHERNEX_PROCESS_EVENTS_STAGE=' + $_ })
     if ($Case -match 'missing-cleanup') { $lines = @($lines | Where-Object { $_ -cne 'ATHERNEX_PROCESS_EVENTS_STAGE=cleanup_verified' }) }
+    if ($Case -match 'missing-termination') { $lines = @($lines | Where-Object { $_ -cne 'ATHERNEX_PROCESS_EVENTS_STAGE=termination_verified' }) }
     if ($Case -match 'failure-marker') { $lines += 'ATHERNEX_PROCESS_EVENTS_FAILURE=native_loss' }
     $lines += 'private_fixture_payload'
     $lines += 'test result: ok. 1 passed; 0 failed; 0 ignored; 100 filtered out;'
@@ -224,7 +225,7 @@ class ProcessEventsRunnerTests(unittest.TestCase):
         inputs = ['agent.exe', 'endpoint.exe', 'verify_windows_process_events_ci.ps1',
                   'verify_windows_isolation_ci.ps1', 'verify_windows_service_ci.ps1']
         for case in ['worker-passed', 'worker-missing-test', 'worker-zero-tests', 'worker-ignored',
-                     'worker-exit-failure', 'worker-missing-cleanup', 'worker-failure-marker',
+                     'worker-exit-failure', 'worker-missing-cleanup', 'worker-missing-termination', 'worker-failure-marker',
                      'worker-post-input', 'worker-final-log-error', *['worker-change:'+name for name in inputs]]:
             with self.subTest(case=case):
                 value = self.run_case(case)
@@ -236,7 +237,7 @@ class ProcessEventsRunnerTests(unittest.TestCase):
         inputs = ['agent.exe', 'endpoint.exe', 'verify_windows_process_events_ci.ps1',
                   'verify_windows_isolation_ci.ps1', 'verify_windows_service_ci.ps1', 'inputs.json']
         for case in ['publish-passed', 'publish-task-failure', 'publish-cleanup-failure',
-                     'publish-missing-cleanup', 'publish-failure-marker', 'publish-report-failure',
+                     'publish-missing-cleanup', 'publish-missing-termination', 'publish-failure-marker', 'publish-report-failure',
                      'publish-report-change', 'publish-missing-report', 'publish-wrong-source',
                      *['publish-change:'+name for name in inputs]]:
             with self.subTest(case=case):
@@ -259,7 +260,7 @@ class ProcessEventsRunnerTests(unittest.TestCase):
 
     def test_only_exact_fixed_markers_and_bounded_numeric_diagnostics_are_public(self):
         valid = self.run_case('markers-valid')
-        self.assertEqual(len(valid['stages']), 19)
+        self.assertEqual(len(valid['stages']), 20)
         self.assertEqual(len(valid['failures']), 32)
         self.assertEqual(valid['diagnostics'], [{'operation': 'query_trace', 'win32_error': 0},
                                               {'operation': 'stop_trace', 'win32_error': 4294967295},

@@ -20,6 +20,7 @@ pub(crate) fn windows_process_change(
         WindowsProcessChange::RundownStart => "rundown start (existing process)",
         WindowsProcessChange::RundownEnd => "rundown end (existing process)",
         WindowsProcessChange::Defunct => "defunct (source-specific report)",
+        WindowsProcessChange::Terminate => "termination report (PID only)",
     }
 }
 

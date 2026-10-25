@@ -128,14 +128,20 @@ fn documented_layouts_preserve_reported_facts_and_distinct_lifecycle_semantics()
                             event.session_id,
                             event.exit_status
                         ),
-                        (42, 24, 7, -2)
+                        (42, Some(24), Some(7), Some(-2))
                     );
                     assert_eq!(event.original.header.process_id, 99); // Never rewrite reporting PID.
-                    assert_eq!(event.unique_process_key, 0x1234);
+                    assert_eq!(event.unique_process_key, Some(0x1234));
                     assert_eq!(event.process_flags, (version == 4).then_some(3));
                     assert_eq!(event.user_sid.as_deref(), sid.then_some("S-1-5-21-1000"));
-                    assert_eq!(event.image_name_bytes_hex, "66697874757265ff2e657865");
-                    assert_eq!(event.command_line, "fixture --value=\"\u{1f680}\"");
+                    assert_eq!(
+                        event.image_name_bytes_hex.as_deref(),
+                        Some("66697874757265ff2e657865")
+                    );
+                    assert_eq!(
+                        event.command_line.as_deref(),
+                        Some("fixture --value=\"\u{1f680}\"")
+                    );
                     assert_eq!(
                         event.package_full_name.as_deref(),
                         (version == 4).then_some("fixture-package")
@@ -152,6 +158,178 @@ fn documented_layouts_preserve_reported_facts_and_distinct_lifecycle_semantics()
                     envelope(event).validate(NOW).unwrap();
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn optional_lifecycle_fields_preserve_exact_legacy_wire_bytes() {
+    for version in 2..=4 {
+        for width in [4, 8] {
+            for sid in [false, true] {
+                for (opcode, change) in [
+                    (1, "start"),
+                    (2, "end"),
+                    (3, "rundown_start"),
+                    (4, "rundown_end"),
+                    (39, "defunct"),
+                ] {
+                    let raw = original(version, width, opcode, sid);
+                    // The prior wire contract had six required scalar/string
+                    // fields. Compare its literal JSON, including field order,
+                    // rather than serializing the new Options as the oracle.
+                    let expected = format!(
+                        concat!(
+                            "{{\"original\":{},\"change\":\"{}\",\"pointer_bits\":{},",
+                            "\"pid\":42,\"parent_pid\":24,\"session_id\":7,\"exit_status\":-2,",
+                            "\"unique_process_key\":4660,\"process_flags\":{},\"user_sid\":{},",
+                            "\"image_name_bytes_hex\":\"66697874757265ff2e657865\",",
+                            "\"command_line\":\"fixture --value=\\\"🚀\\\"\",",
+                            "\"package_full_name\":{},\"application_id\":{},",
+                            "\"time_ms\":1800000000000,\"time_uncertainty_ms\":2,",
+                            "\"time_basis\":\"collector_qpc_estimate\"}}"
+                        ),
+                        serde_json::to_string(&raw).unwrap(),
+                        change,
+                        width * 8,
+                        if version == 4 { "3" } else { "null" },
+                        if sid { "\"S-1-5-21-1000\"" } else { "null" },
+                        if version == 4 {
+                            "\"fixture-package\""
+                        } else {
+                            "null"
+                        },
+                        if version == 4 {
+                            "\"fixture-app\""
+                        } else {
+                            "null"
+                        },
+                    );
+                    let event = WindowsProcessEvent::from_original(raw).unwrap();
+                    assert_eq!(serde_json::to_vec(&event).unwrap(), expected.as_bytes());
+                    let restored: WindowsProcessEvent = serde_json::from_str(&expected).unwrap();
+                    restored.validate(NOW).unwrap();
+                    assert_eq!(restored.event_id(), event.event_id());
+                }
+            }
+        }
+    }
+}
+
+fn terminate(width: usize) -> WindowsProcessOriginal {
+    let mut raw = original(2, width, 11, false);
+    raw.user_data_hex = parse::encode(&42u32.to_le_bytes());
+    raw
+}
+
+#[test]
+fn termination_preserves_only_reported_pid_and_exact_original() {
+    for width in [4, 8] {
+        let raw = terminate(width);
+        let event = WindowsProcessEvent::from_original(raw.clone()).unwrap();
+        assert_eq!(event.original, raw);
+        assert_eq!(event.change, WindowsProcessChange::Terminate);
+        assert_eq!(event.pid, 42);
+        assert_eq!(event.original.header.process_id, 99);
+        assert_eq!(event.pointer_bits, (width * 8) as u8);
+        let value = serde_json::to_value(&event).unwrap();
+        for field in [
+            "parent_pid",
+            "session_id",
+            "exit_status",
+            "unique_process_key",
+            "process_flags",
+            "user_sid",
+            "image_name_bytes_hex",
+            "command_line",
+            "package_full_name",
+            "application_id",
+        ] {
+            assert!(value.get(field).unwrap().is_null());
+        }
+        let restored: WindowsProcessEvent = serde_json::from_value(value).unwrap();
+        assert_eq!(event, restored);
+        let id = event.event_id();
+        let wrapper = envelope(restored);
+        wrapper.validate(NOW).unwrap();
+        assert!(wrapper.telemetry.as_ref().unwrap().process().is_none());
+
+        let mut reused = raw.clone();
+        reused.receipt_sequence += 1;
+        assert_ne!(
+            id,
+            WindowsProcessEvent::from_original(reused)
+                .unwrap()
+                .event_id()
+        );
+        let mut changed = raw;
+        changed.user_data_hex = parse::encode(&43u32.to_le_bytes());
+        let changed = WindowsProcessEvent::from_original(changed).unwrap();
+        assert_ne!(id, changed.event_id());
+        let mut forged = event;
+        forged.original = changed.original;
+        assert!(forged.validate(NOW).is_err());
+    }
+}
+
+#[test]
+fn termination_and_lifecycle_fact_presence_cannot_be_forged() {
+    let termination = WindowsProcessEvent::from_original(terminate(8)).unwrap();
+    for (field, value) in [
+        ("parent_pid", serde_json::json!(24)),
+        ("session_id", serde_json::json!(7)),
+        ("exit_status", serde_json::json!(0)),
+        ("unique_process_key", serde_json::json!(4660)),
+        ("process_flags", serde_json::json!(0)),
+        ("user_sid", serde_json::json!("S-1-5-18")),
+        ("image_name_bytes_hex", serde_json::json!("")),
+        ("command_line", serde_json::json!("")),
+        ("package_full_name", serde_json::json!("")),
+        ("application_id", serde_json::json!("")),
+        ("change", serde_json::json!("end")),
+        ("pid", serde_json::json!(43)),
+    ] {
+        let mut forged = serde_json::to_value(&termination).unwrap();
+        forged[field] = value;
+        let forged: WindowsProcessEvent = serde_json::from_value(forged).unwrap();
+        assert!(forged.validate(NOW).is_err());
+    }
+    for opcode in [1, 2, 3, 4, 39] {
+        let event = WindowsProcessEvent::from_original(original(4, 8, opcode, true)).unwrap();
+        for field in [
+            "parent_pid",
+            "session_id",
+            "exit_status",
+            "unique_process_key",
+            "image_name_bytes_hex",
+            "command_line",
+        ] {
+            let mut forged = serde_json::to_value(&event).unwrap();
+            forged[field] = serde_json::Value::Null;
+            let forged: WindowsProcessEvent = serde_json::from_value(forged).unwrap();
+            assert!(forged.validate(NOW).is_err());
+        }
+    }
+}
+
+#[test]
+fn termination_requires_exact_version_two_four_byte_layout() {
+    for width in [4, 8] {
+        for version in [0, 1, 3, 4, 5, 255] {
+            let mut raw = terminate(width);
+            raw.header.descriptor.version = version;
+            assert!(WindowsProcessEvent::from_original(raw).is_err());
+        }
+        for length in [0, 1, 2, 3, 5, 8, 16] {
+            let mut raw = terminate(width);
+            raw.user_data_hex = "00".repeat(length);
+            assert!(WindowsProcessEvent::from_original(raw).is_err());
+        }
+        assert!(WindowsProcessEvent::from_original(original(2, width, 11, false)).is_err());
+        for opcode in [1, 2, 3, 4, 39] {
+            let mut raw = terminate(width);
+            raw.header.descriptor.opcode = opcode;
+            assert!(WindowsProcessEvent::from_original(raw).is_err());
         }
     }
 }
@@ -244,7 +422,7 @@ fn originals_and_normalized_fields_are_bound_to_immutable_envelope_identity() {
     changed.change = WindowsProcessChange::RundownStart;
     assert!(changed.validate(NOW).is_err());
     let mut changed = event.clone();
-    changed.command_line.push('x');
+    changed.command_line.as_mut().unwrap().push('x');
     assert!(changed.validate(NOW).is_err());
     let mut changed = event.clone();
     changed.original.user_data_hex.replace_range(16..18, "ff");

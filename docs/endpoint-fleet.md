@@ -688,11 +688,20 @@ before reclaiming an orphan. It refuses a foreign session, a live owner or an
 impersonated caller. It does not change token privileges or configure the global
 kernel logger.
 
-Start, end, rundown start, rundown end and defunct reports remain distinct
-observations. The parser accepts bounded classic process versions 2–4 with
-explicit 32/64-bit layout flags; unknown layouts and malformed records become
-visible rejection counters. The native source experiment has exercised version
-4 with 64-bit layout; the other layouts have portable synthetic coverage only.
+Start, end, rundown start, rundown end, defunct and termination reports remain
+distinct observations. The full lifecycle parser accepts bounded classic process
+versions 2–4 with explicit 32/64-bit layout flags. The separate opcode 11/version
+2 termination decoder requires an exact four-byte reported PID; parent, session,
+exit status, process key, image and command line remain explicitly absent. Existing
+full lifecycle reports retain their original numeric/string wire fields. Unknown
+layouts and malformed records become visible rejection counters.
+
+The native source experiment has exercised version 4/64-bit Start/End records.
+Native diagnostics have also observed an opcode 11/version 2/64-bit TDH schema
+with one PID property. Exact termination-payload length and controlled-target
+delivery still require the separate native acceptance gate below; those diagnostics
+alone do not validate the new decoder. Other layouts have portable synthetic
+coverage only.
 Reported PID, parent PID, SID, image bytes and process-object key do not establish
 verified executable identity, ancestry or a process incarnation. ANSI image bytes
 remain hexadecimal bytes rather than a guessed path or code-page conversion.
@@ -715,7 +724,8 @@ present, fresh and healthy.
 
 The independent `windows-process-events` CI gate exercises the release agent as
 well as collector components on a disposable LocalSystem/session-zero worker.
-It requires actual controlled lifecycles and rundown, native TDH agreement with
+It requires actual controlled lifecycles, rundown and a separate PID-only
+termination observation in both the component and release-agent phases, native TDH agreement with
 the portable decoder for PID, parent, session, exit status, process key and pointer
 width, stalled HTTP, bounded queue loss, forced agent termination,
 orphan recovery, committed-original replay, authenticated export, portal coverage,

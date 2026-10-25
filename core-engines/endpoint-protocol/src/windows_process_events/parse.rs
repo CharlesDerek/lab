@@ -7,6 +7,11 @@
 //! https://learn.microsoft.com/en-us/windows/win32/etw/process-v2-typegroup1
 //! Only v4/64-bit has native acceptance evidence; other supported layouts have
 //! portable synthetic tests. Unknown versions/trailing fields are refused.
+//! The SDK defines TERMINATE (11) separately from END (2). Its observed v2
+//! single-ProcessId schema is admitted only with an exact four-byte payload;
+//! native payload/PID agreement must still be established by the native gate.
+//! Opcode semantics (not payload-layout evidence) are pinned to Microsoft's SDK:
+//! https://github.com/microsoft/win32metadata/blob/2f767671802301cf043c717d66bf004ed7863487/generation/WinSDK/RecompiledIdlHeaders/shared/evntrace.h#L331-L334
 use super::*;
 
 fn hex(input: &str) -> Result<Vec<u8>, String> {
@@ -135,6 +140,7 @@ pub(super) fn decode(original: WindowsProcessOriginal) -> Result<WindowsProcessE
         3 => WindowsProcessChange::RundownStart,
         4 => WindowsProcessChange::RundownEnd,
         39 => WindowsProcessChange::Defunct,
+        11 if version == 2 => WindowsProcessChange::Terminate,
         _ => return Err("Unsupported Windows process opcode".into()),
     };
     let bytes = hex(&original.user_data_hex)?;
@@ -150,6 +156,31 @@ pub(super) fn decode(original: WindowsProcessOriginal) -> Result<WindowsProcessE
         bytes: &bytes,
         offset: 0,
     };
+    if change == WindowsProcessChange::Terminate {
+        let pid = reader.u32()?;
+        if reader.offset != bytes.len() {
+            return Err("Unrecognized trailing Windows process termination bytes".into());
+        }
+        return Ok(WindowsProcessEvent {
+            original,
+            change,
+            pointer_bits: (width * 8) as u8,
+            pid,
+            parent_pid: None,
+            session_id: None,
+            exit_status: None,
+            unique_process_key: None,
+            process_flags: None,
+            user_sid: None,
+            image_name_bytes_hex: None,
+            command_line: None,
+            package_full_name: None,
+            application_id: None,
+            time_ms,
+            time_uncertainty_ms,
+            time_basis: WindowsProcessTimeBasis::CollectorQpcEstimate,
+        });
+    }
     let unique_process_key = reader.pointer(width)?;
     let pid = reader.u32()?;
     let parent_pid = reader.u32()?;
@@ -176,14 +207,14 @@ pub(super) fn decode(original: WindowsProcessOriginal) -> Result<WindowsProcessE
         change,
         pointer_bits: (width * 8) as u8,
         pid,
-        parent_pid,
-        session_id,
-        exit_status,
-        unique_process_key,
+        parent_pid: Some(parent_pid),
+        session_id: Some(session_id),
+        exit_status: Some(exit_status),
+        unique_process_key: Some(unique_process_key),
         process_flags,
         user_sid,
-        image_name_bytes_hex,
-        command_line,
+        image_name_bytes_hex: Some(image_name_bytes_hex),
+        command_line: Some(command_line),
         package_full_name,
         application_id,
         time_ms,

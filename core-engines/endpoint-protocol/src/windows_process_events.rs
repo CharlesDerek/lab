@@ -120,6 +120,8 @@ pub enum WindowsProcessChange {
     RundownStart,
     RundownEnd,
     Defunct,
+    /// A separate PID-only termination report, not End or a verified lifetime.
+    Terminate,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -135,15 +137,16 @@ pub struct WindowsProcessEvent {
     pub pointer_bits: u8,
     /// Reported target fields, not a verified current PID/incarnation/ancestry.
     pub pid: u32,
-    pub parent_pid: u32,
-    pub session_id: u32,
-    pub exit_status: i32,
-    pub unique_process_key: u64,
+    /// Lifecycle-only fields are absent from the PID-only Terminate layout.
+    pub parent_pid: Option<u32>,
+    pub session_id: Option<u32>,
+    pub exit_status: Option<i32>,
+    pub unique_process_key: Option<u64>,
     pub process_flags: Option<u32>,
     pub user_sid: Option<String>,
     /// The ANSI image field is bytes: no machine code page or path is guessed.
-    pub image_name_bytes_hex: String,
-    pub command_line: String,
+    pub image_name_bytes_hex: Option<String>,
+    pub command_line: Option<String>,
     pub package_full_name: Option<String>,
     pub application_id: Option<String>,
     pub time_ms: u64,

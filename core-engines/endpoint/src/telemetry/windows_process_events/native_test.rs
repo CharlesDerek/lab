@@ -102,10 +102,18 @@ fn differential(event: &WindowsProcessEvent, report: &schema::Report) {
         && event.exit_status == report.exit
         && event.unique_process_key == report.key
         && event.pointer_bits == report.pointer_bits;
-    let shape_matches = event.original.header.descriptor.version == 4
-        && event.pointer_bits == 64
-        && report.property_count == 12
-        && report.schema_hash.len() == 64;
+    let shape_matches = if event.change == WindowsProcessChange::Terminate {
+        event.original.header.descriptor.version == 2
+            && event.pointer_bits == 64
+            && report.property_count == 1
+            && event.original.user_data_hex.len() == 8
+            && report.schema_hash.len() == 64
+    } else {
+        event.original.header.descriptor.version == 4
+            && event.pointer_bits == 64
+            && report.property_count == 12
+            && report.schema_hash.len() == 64
+    };
     if !scalar_matches || !shape_matches {
         // Only bounded structural metadata is public. No payload values,
         // PID, key, SID, command line or raw original enters this marker.
@@ -201,15 +209,35 @@ impl Child {
             "controlled_lifecycle",
         );
     }
+    fn reaped(&mut self) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.0.try_wait() {
+                Ok(Some(_)) => return self.0.wait().is_ok(),
+                Err(_) => return false,
+                Ok(None) => (),
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
     fn kill(&mut self) {
         safe(self.0.kill(), "cleanup");
-        safe(self.0.wait(), "cleanup");
+        ensure(self.reaped(), "cleanup");
     }
 }
 impl Drop for Child {
     fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(Some(_))) {
+            return;
+        }
         let _ = self.0.kill();
-        let _ = self.0.wait();
+        if !self.reaped() {
+            eprintln!("Controlled process cleanup exceeded its bounded interval");
+            std::process::abort();
+        }
     }
 }
 #[test]
@@ -299,6 +327,28 @@ fn lifecycles(events: &[EndpointEvent], pids: &[u32]) -> bool {
     })
 }
 
+fn termination(events: &[EndpointEvent], pid: u32, since_qpc: i64) -> bool {
+    events.iter().filter_map(process).any(|event| {
+        event.pid == pid
+            && event.original.header.timestamp_qpc >= since_qpc
+            && event.change == WindowsProcessChange::Terminate
+            && event.original.header.descriptor.opcode == 11
+            && event.original.header.descriptor.version == 2
+            && event.pointer_bits == 64
+            && event.original.user_data_hex.len() == 8
+            && event.parent_pid.is_none()
+            && event.session_id.is_none()
+            && event.exit_status.is_none()
+            && event.unique_process_key.is_none()
+            && event.image_name_bytes_hex.is_none()
+            && event.command_line.is_none()
+            && event.process_flags.is_none()
+            && event.user_sid.is_none()
+            && event.package_full_name.is_none()
+            && event.application_id.is_none()
+    })
+}
+
 fn verify_controlled(events: &[EndpointEvent], pids: &[u32]) {
     ensure(
         pids.iter()
@@ -326,11 +376,11 @@ fn verify_controlled(events: &[EndpointEvent], pids: &[u32]) {
         let start = starts[0];
         let end = ends[0];
         ensure(
-            start.parent_pid == std::process::id()
+            start.parent_pid == Some(std::process::id())
                 && end.parent_pid == start.parent_pid
-                && start.session_id == 0
-                && end.session_id == 0
-                && end.exit_status == 23
+                && start.session_id == Some(0)
+                && end.session_id == Some(0)
+                && end.exit_status == Some(23)
                 && start.unique_process_key == end.unique_process_key
                 && start.original.header.timestamp_qpc <= end.original.header.timestamp_qpc,
             "controlled_lifecycle",
@@ -374,6 +424,18 @@ fn component(path: &Path) {
     for child in &mut children {
         child.finish();
     }
+    let termination_since = safe(native::clock(), "controlled_lifecycle").after_qpc;
+    let mut killed = Child::controlled();
+    let killed_pid = killed.0.id();
+    ensure(
+        !pids.contains(&killed_pid) && killed_pid != preexisting_pid,
+        "controlled_lifecycle",
+    );
+    ensure(
+        safe(killed.0.try_wait(), "controlled_lifecycle").is_none(),
+        "controlled_lifecycle",
+    );
+    killed.kill();
     let mut events = Vec::new();
     let mut rundown = false;
     until(
@@ -383,7 +445,10 @@ fn component(path: &Path) {
                 // Differential checks use native TDH before portable normalization.
                 let report =
                     schema::decode(&record).unwrap_or_else(|error| fail(tdh_failure(error)));
-                if pids.contains(&report.pid) || report.pid == preexisting_pid {
+                if pids.contains(&report.pid)
+                    || report.pid == preexisting_pid
+                    || report.pid == killed_pid
+                {
                     let event = safe(
                         WindowsProcessEvent::from_original(
                             record
@@ -398,12 +463,14 @@ fn component(path: &Path) {
                         rundown = true;
                     }
                     if pids.contains(&event.pid) && event.change == WindowsProcessChange::End {
-                        ensure(event.exit_status == 23, "controlled_lifecycle");
+                        ensure(event.exit_status == Some(23), "controlled_lifecycle");
                     }
                     events.push(envelope(&event));
                 }
             }
-            rundown && lifecycles(&events, &pids)
+            rundown
+                && lifecycles(&events, &pids)
+                && termination(&events, killed_pid, termination_since)
         },
         "controlled_lifecycle",
     );
@@ -481,7 +548,7 @@ impl Agent {
             match child.0.try_wait() {
                 Ok(Some(_)) => (),
                 Ok(None) => {
-                    if child.0.kill().is_err() || child.0.wait().is_err() {
+                    if child.0.kill().is_err() || !child.reaped() {
                         return false;
                     }
                 }
@@ -642,20 +709,33 @@ fn run(temp: &Path, exe: &Path) {
     for child in &mut children {
         child.finish();
     }
+    let termination_since = safe(native::clock(), "controlled_lifecycle").after_qpc;
+    let mut killed = Child::controlled();
+    let killed_pid = killed.0.id();
+    ensure(!pids.contains(&killed_pid), "controlled_lifecycle");
+    ensure(
+        safe(killed.0.try_wait(), "controlled_lifecycle").is_none(),
+        "controlled_lifecycle",
+    );
+    killed.kill();
+    let mut all_pids = pids.clone();
+    all_pids.push(killed_pid);
     until(
         || {
             agent.alive();
-            lifecycles(&controlled(&state, &pids), &pids)
+            let records = controlled(&state, &all_pids);
+            lifecycles(&records, &pids) && termination(&records, killed_pid, termination_since)
         },
         "controlled_lifecycle",
     );
-    let selected = controlled(&state, &pids);
+    let selected = controlled(&state, &all_pids);
     verify_controlled(&selected, &pids);
     ensure(
         status(&state).is_some_and(|h| h.healthy(crate::now_ms())),
         "native_loss",
     );
     println!("\nATHERNEX_PROCESS_EVENTS_STAGE=lifecycle_verified");
+    println!("\nATHERNEX_PROCESS_EVENTS_STAGE=termination_verified");
     println!("\nATHERNEX_PROCESS_EVENTS_STAGE=stalled_http_verified");
     fill(&state, false);
     let mut pressure = Child::controlled();
@@ -692,7 +772,7 @@ fn run(temp: &Path, exe: &Path) {
         recovered.stream_id != original.stream_id && recovered.owner_pid != original.owner_pid,
         "ownership",
     );
-    let after = controlled(&state, &pids);
+    let after = controlled(&state, &all_pids);
     ensure(
         selected.iter().all(|e| {
             after

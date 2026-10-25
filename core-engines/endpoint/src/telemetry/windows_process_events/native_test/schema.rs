@@ -13,10 +13,10 @@ use windows_sys::Win32::{Foundation::ERROR_INSUFFICIENT_BUFFER, System::Diagnost
 
 pub(super) struct Report {
     pub pid: u32,
-    pub parent: u32,
-    pub session: u32,
-    pub exit: i32,
-    pub key: u64,
+    pub parent: Option<u32>,
+    pub session: Option<u32>,
+    pub exit: Option<i32>,
+    pub key: Option<u64>,
     pub pointer_bits: u8,
     pub property_count: u32,
     pub schema_hash: String,
@@ -267,6 +267,26 @@ pub(super) fn decode(original: &Original) -> Result<Report> {
             "ProcessId",
             &[TDH_INTYPE_UINT32, TDH_INTYPE_HEXINT32],
         )?;
+        if record.EventHeader.EventDescriptor.Opcode == 11 {
+            // Native62 established a separate one-property installed schema.
+            // This run must additionally prove the exact native payload width.
+            require(
+                record.EventHeader.EventDescriptor.Version == 2
+                    && info.PropertyCount == 1
+                    && record.UserDataLength == 4,
+                "TDH schema event identity differs",
+            )?;
+            return Ok(Report {
+                pid,
+                parent: None,
+                session: None,
+                exit: None,
+                key: None,
+                pointer_bits,
+                property_count: info.PropertyCount,
+                schema_hash,
+            });
+        }
         let parent = scalar32(
             record,
             &context,
@@ -311,10 +331,10 @@ pub(super) fn decode(original: &Original) -> Result<Report> {
         };
         Ok(Report {
             pid,
-            parent,
-            session,
-            exit,
-            key,
+            parent: Some(parent),
+            session: Some(session),
+            exit: Some(exit),
+            key: Some(key),
             pointer_bits,
             property_count: info.PropertyCount,
             schema_hash,
