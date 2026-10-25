@@ -569,9 +569,14 @@ fn maintain(binary: &Path, state: &Path, config: &Config) -> Result<Option<Child
 pub fn supervise(state: &Path, binary: &Path) -> Result<()> {
     let state = state.canonicalize()?;
     crate::guardian::enter(&state)?;
+    // Windows canonicalize adds an extended-path prefix. Retain the absolute
+    // spelling used by the configured update policy and its transaction ledger.
+    #[cfg(windows)]
+    let binary = std::path::absolute(binary)?;
+    #[cfg(not(windows))]
     let binary = binary.canonicalize()?;
     update::check_destination(&binary)?;
-    if std::env::current_exe()?.canonicalize()? == binary {
+    if std::env::current_exe()?.canonicalize()? == binary.canonicalize()? {
         return Err("Controller must be a separate trusted executable copy".into());
     }
     let directory = state.join("supervisor");

@@ -176,7 +176,9 @@ fn log_event(line: &str, policy: &ProtectionConfig) -> Option<EndpointEvent> {
         detail:"ClamAV on-access log observation, deduplicated within its collection minute. Original detection time and file content hash are unavailable. The log path is unverified. Automatic hash-bound quarantine is not authorized by this observation.".into()})
 }
 fn record(c: &Connection, event: &EndpointEvent) -> Result<()> {
-    let tx = c.unchecked_transaction()?;
+    // Reserve the writer before reading admission state. A deferred read-to-write
+    // upgrade can fail immediately when the collector deletes a queued record.
+    let tx = rusqlite::Transaction::new_unchecked(c, rusqlite::TransactionBehavior::Immediate)?;
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM events WHERE id=?1)",
         [&event.id],
@@ -206,7 +208,11 @@ pub fn collect(store: &Store) -> Result<()> {
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     for (id, raw) in rows {
-        let tx = store.connection.unchecked_transaction()?;
+        // The background telemetry collector also writes this destination.
+        let tx = rusqlite::Transaction::new_unchecked(
+            &store.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let existing: Option<String> = tx
             .query_row("SELECT payload FROM outbox WHERE id=?1", [&id], |r| {
                 r.get(0)
@@ -747,6 +753,81 @@ mod tests {
         let event = log_event("/public/watch/fixture: Fixture.UNOFFICIAL FOUND", &p).unwrap();
         assert!(record(&c, &event).is_err());
         assert_eq!(counts(&c).unwrap(), (2048, 1));
+    }
+    #[test]
+    fn native_record_waits_for_collector_deletion_before_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let collector = queue(dir.path()).unwrap();
+        let producer = queue(dir.path()).unwrap();
+        let p = policy(Path::new("/public/watch"));
+        let prior = log_event("/public/watch/prior: Fixture FOUND", &p).unwrap();
+        let next = log_event("/public/watch/next: Fixture FOUND", &p).unwrap();
+        record(&collector, &prior).unwrap();
+        let deleting = rusqlite::Transaction::new_unchecked(
+            &collector,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .unwrap();
+        deleting
+            .execute("DELETE FROM events WHERE id=?1", [&prior.id])
+            .unwrap();
+        let expected = next.clone();
+        complete_after_writer_releases(deleting, move || record(&producer, &next));
+        assert_eq!(counts(&collector).unwrap(), (1, 0));
+        let raw: String = collector
+            .query_row(
+                "SELECT payload FROM events WHERE id=?1",
+                [&expected.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw, serde_json::to_string(&expected).unwrap());
+    }
+    #[test]
+    fn native_transfer_waits_for_background_outbox_writer_without_losing_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let transfer = store.collector_connection().unwrap();
+        let c = queue(dir.path()).unwrap();
+        let p = policy(Path::new("/public/watch"));
+        let event = log_event("/public/watch/fixture: Fixture FOUND", &p).unwrap();
+        record(&c, &event).unwrap();
+        let background = rusqlite::Transaction::new_unchecked(
+            &store.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .unwrap();
+        complete_after_writer_releases(background, move || collect(&transfer));
+        assert_eq!(counts(&c).unwrap(), (0, 0));
+        let raw: String = store
+            .connection
+            .query_row("SELECT payload FROM outbox WHERE id=?1", [&event.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(raw, serde_json::to_string(&event).unwrap());
+    }
+    fn complete_after_writer_releases(
+        writer: rusqlite::Transaction<'_>,
+        operation: impl FnOnce() -> Result<()> + Send + 'static,
+    ) {
+        let (started, ready) = std::sync::mpsc::sync_channel(0);
+        let (finished, result) = std::sync::mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            started.send(()).unwrap();
+            finished
+                .send(operation().map_err(|error| error.to_string()))
+                .unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        // A deferred read-to-write upgrade fails immediately under this lock,
+        // even though the configured busy timeout could wait for its release.
+        let early = result.recv_timeout(Duration::from_millis(100));
+        writer.commit().unwrap();
+        worker.join().unwrap();
+        early
+            .unwrap_or_else(|_| result.recv_timeout(Duration::from_secs(5)).unwrap())
+            .unwrap();
     }
     #[test]
     fn active_health_requires_fresh_policy_and_live_process_identities() {

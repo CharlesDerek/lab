@@ -137,7 +137,20 @@ def main():
             if args.component == 'controller':
                 child = subprocess.Popen([str(installed), 'supervise', str(state), str(managed)], stdout=log, stderr=log)
                 lease_file = state / 'supervisor/lease.json'
-                lease = eventually(lambda: json.loads(lease_file.read_text()) if lease_file.exists() and json.loads(lease_file.read_text()).get('child_pid') else None)
+                def supervised_child():
+                    if child.poll() is not None:
+                        # Only this disposable fixture's bounded diagnostics.
+                        with (root / 'agent.log').open('rb') as diagnostic:
+                            diagnostic.seek(0, os.SEEK_END)
+                            diagnostic.seek(max(0, diagnostic.tell() - 4096))
+                            detail = diagnostic.read(4096).decode(errors='replace')
+                        raise AssertionError(f'Fixture controller exited ({child.returncode}): {detail}')
+                    try:
+                        current = json.loads(lease_file.read_text())
+                    except FileNotFoundError:
+                        return None
+                    return current if current.get('child_pid') else None
+                lease = eventually(supervised_child)
                 managed_pid = lease['child_pid']
                 assert child.poll() is None and alive(managed_pid)
                 for command in ['controller-update-apply', 'controller-update-recover']:
@@ -204,12 +217,13 @@ fn main() {
                 assert alive(pid) and applying.poll() is None
                 assert status()['transaction'] is not None
                 applying.kill(); applying.wait(timeout=10); applying = None
-                if os.name == 'nt' or Path('/proc').is_dir():
+                if os.name == 'nt' or sys.platform == 'darwin' or Path('/proc').is_dir():
+                    # The Unix runner installs an owner-death watcher; macOS
+                    # uses kqueue and must satisfy the same cleanup assertion.
                     eventually(lambda: not alive(pid))
                     checks['updater_death_terminates_probe'] = 'passed'
                 else:
-                    # macOS has no PDEATHSIG. Clean up this deliberately hung
-                    # fixture; supervisor/job integration remains a release gate.
+                    # Other platforms still require owned-process validation.
                     os.kill(pid, 9)
             run('update-recover', state)
             run('update-recover', state)
@@ -233,7 +247,7 @@ fn main() {
                     refused = subprocess.run([str(installed), 'supervise', str(state), str(managed)], capture_output=True, text=True, timeout=10)
                     assert refused.returncode != 0 and 'Stop' not in refused.stderr and 'interrupted controller update' in refused.stderr, refused.stderr
                     checks['pending_controller_transaction_blocks_startup'] = 'passed'
-                if os.name == 'nt' or Path('/proc').is_dir():
+                if os.name == 'nt' or sys.platform == 'darwin' or Path('/proc').is_dir():
                     eventually(lambda: not alive(pid))
                 else:
                     os.kill(pid, 9)
