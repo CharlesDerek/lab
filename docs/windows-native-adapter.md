@@ -1032,7 +1032,7 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `c1c7030`](https://github.com/CharlesDerek/lab/actions/runs/40219591064)
+and task cleanup using mocked commands. The [hosted run at `9d73e80`](https://github.com/CharlesDerek/lab/actions/runs/40220048416)
 passed ten of eleven checks on Windows Server 2022 as LocalSystem in session
 zero. The retained report was checked against its source commit and input-manifest
 hash. Scanner startup/cleanup, private-state access, both workspace cleanup cases,
@@ -1049,9 +1049,13 @@ enabled traversal privilege. Both boundaries now grant only `FILE_TRAVERSE` to
 the validated scanner logon. The root grant does not inherit or permit listing,
 creation or security changes. Both scanner logons were denied raw volume/disk
 data, attribute and security access, with SYSTEM read controls on the exact
-identity-checked devices. The combined traversal correction, capacity enforcement
-and full worker cleanup await native verification. Test-only ACL diagnostics
-include the integrity label and report only object kinds, rights and results.
+identity-checked devices. With both traversal grants, native ACL checks including
+the integrity label permit traversal at every boundary and creation in scratch,
+but actual child file opens remain denied. Test-only diagnostics now compare
+synchronous and overlapped opens, impersonation, and a native-device path derived
+from the pinned scratch handle and checked against its volume/file identity.
+Only access results are reported. Capacity enforcement and full worker cleanup
+remain unverified.
 
 Initialization creates the owned MSR when the new GPT is empty, verifies its
 arrival, then adds data. The read-only partition-device query uses numbers derived

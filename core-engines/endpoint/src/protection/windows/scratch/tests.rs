@@ -35,15 +35,20 @@ fn scratch_access_probe(path: &Path) {
         FILE_LIST_DIRECTORY,
         FILE_TRAVERSE,
     ] {
-        let result = std::fs::OpenOptions::new()
-            .access_mode(access)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path);
-        eprintln!(
-            "scratch directory access mask={access:#x}, error={:?}",
-            result.err().and_then(|e| e.raw_os_error())
-        );
+        for overlapped in [0, FILE_FLAG_OVERLAPPED] {
+            let result = std::fs::OpenOptions::new()
+                .access_mode(access)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | overlapped,
+                )
+                .open(path);
+            eprintln!(
+                "scratch directory access mask={access:#x}, overlapped={}, error={:?}",
+                overlapped != 0,
+                result.err().and_then(|e| e.raw_os_error())
+            );
+        }
     }
     eprintln!(
         "scratch metadata error={:?}",
@@ -61,6 +66,102 @@ fn scratch_access_probe(path: &Path) {
             .err()
             .and_then(|e| e.raw_os_error())
     );
+    let alternative = PathBuf::from(std::env::var_os("ATHERNEX_SCRATCH_TEST_NT_PATH").unwrap());
+    eprintln!(
+        "checked NT scratch metadata error={:?}",
+        std::fs::metadata(&alternative)
+            .err()
+            .and_then(|e| e.raw_os_error())
+    );
+    let created = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(alternative.join("alternative-proof"));
+    match created {
+        Ok(mut file) => {
+            file.write_all(b"fixture").unwrap();
+            drop(file);
+            std::fs::remove_file(alternative.join("alternative-proof")).unwrap();
+            eprintln!("checked NT scratch create/write/remove passed");
+        }
+        Err(error) => eprintln!("checked NT scratch create error={:?}", error.raw_os_error()),
+    }
+}
+
+fn checked_nt_path(ready: &Health, token: &Token) -> PathBuf {
+    use std::os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::{
+        Security::{ImpersonateLoggedOnUser, RevertToSelf},
+        Storage::FileSystem::*,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&ready.path)
+        .unwrap();
+    let mut name = [0u16; 4096];
+    let n = unsafe {
+        GetFinalPathNameByHandleW(
+            file.as_raw_handle(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+            VOLUME_NAME_NT,
+        )
+    } as usize;
+    assert!(n > 0 && n < name.len());
+    let name = std::ffi::OsString::from_wide(&name[..n]);
+    let name = name.to_str().unwrap();
+    let number = name
+        .strip_prefix(r"\Device\HarddiskVolume")
+        .unwrap()
+        .strip_suffix(r"\scratch")
+        .unwrap();
+    assert!(!number.is_empty() && number.len() <= 10 && number.bytes().all(|v| v.is_ascii_digit()));
+    let path = PathBuf::from(format!(r"\\?\GLOBALROOT{name}"));
+    let alternative = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path)
+        .unwrap();
+    let mut identity = FILE_ID_INFO::default();
+    assert_ne!(
+        unsafe {
+            GetFileInformationByHandleEx(
+                alternative.as_raw_handle(),
+                FileIdInfo,
+                (&mut identity as *mut FILE_ID_INFO).cast(),
+                std::mem::size_of_val(&identity) as u32,
+            )
+        },
+        0
+    );
+    assert_eq!(identity.VolumeSerialNumber, ready.directory.volume);
+    assert_eq!(identity.FileId.Identifier, ready.directory.file_id);
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if unsafe { RevertToSelf() } == 0 {
+                std::process::abort();
+            }
+        }
+    }
+    assert_ne!(
+        unsafe { ImpersonateLoggedOnUser(token.handle().as_raw_handle()) },
+        0
+    );
+    let _restore = Restore;
+    for (kind, candidate) in [("guid", &ready.path), ("nt", &path)] {
+        let result = std::fs::metadata(candidate);
+        eprintln!(
+            "impersonated scratch metadata kind={kind}, error={:?}",
+            result.err().and_then(|e| e.raw_os_error())
+        );
+    }
+    // Keep no inherited handles: the child receives only this identity-checked
+    // string, and its normal restricted token still authorizes every operation.
+    path
 }
 
 fn scratch_acl_probe(ready: &Health, token: &Token) {
@@ -306,6 +407,7 @@ fn restricted_io_fixture() {
 
 fn run_scanner(state: &Directory, token: &Token, ready: &Health, denied: bool) {
     let path = &ready.path;
+    let nt_path = checked_nt_path(ready, token);
     let devices = [
         ready.target.volume.trim_end_matches('\\').to_owned(),
         format!(r"\\.\PhysicalDrive{}", ready.target.disk_number),
@@ -332,6 +434,7 @@ fn run_scanner(state: &Directory, token: &Token, ready: &Health, denied: bool) {
             "--test-threads=1",
         ])
         .env("ATHERNEX_SCRATCH_TEST_PATH", path)
+        .env("ATHERNEX_SCRATCH_TEST_NT_PATH", nt_path)
         .env(
             "ATHERNEX_SCRATCH_TEST_DEVICES",
             serde_json::to_string(&devices).unwrap(),
