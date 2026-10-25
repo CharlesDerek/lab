@@ -13,6 +13,15 @@ import unittest
 SCRIPT = Path(__file__).resolve().with_name('verify_windows_isolation_ci.ps1')
 AUTHENTICATION_TEST = ('telemetry::windows_authentication::native_test::'
                        'security_logon_delivery_replays_and_reports_policy_gaps')
+PROCESS_SOURCE_TEST = ('telemetry::windows_process_events_probe::'
+                       'owned_system_logger_reports_controlled_process_lifecycles')
+PROCESS_FAILURES = [
+    'schema_provenance', 'schema_identity', 'schema_bounds', 'schema_shape',
+    'property_missing', 'property_type', 'property_scalar', 'property_size',
+    'record_provenance', 'record_bounds', 'session_ownership', 'session_configuration',
+    'session_cleanup', 'native_loss', 'callback_loss', 'consumer_lifecycle',
+    'controlled_lifecycle', 'controlled_timeout', 'token_state', 'api_failure', 'other',
+]
 WRAPPER = r'''
 param([string]$Script, [string]$Case, [string]$Root, [string]$SelectedSuite)
 $ErrorActionPreference = 'Stop'
@@ -22,6 +31,12 @@ $report = [pscustomobject]@{ schema=1; suite=$SelectedSuite; native_windows_exec
     manifest_sha256=('a'*64); user_sid='S-1-5-18'; session_id=0; windows_version='fixture';
     checks=[pscustomobject]@{}; error=$null }
 foreach ($name in $checks) { $report.checks | Add-Member -NotePropertyName $name -NotePropertyValue 'passed' }
+if ($SelectedSuite -ceq 'ProcessSource') {
+    $report | Add-Member -NotePropertyName proof_scope -NotePropertyValue source_only
+    $report | Add-Member -NotePropertyName process_source_stages -NotePropertyValue @(Get-ProcessSourceStageNames)
+    $report | Add-Member -NotePropertyName process_source_failures -NotePropertyValue @()
+    $report | Add-Member -NotePropertyName process_source_schema -NotePropertyValue @(@{event='start'},@{event='end'})
+}
 $global:executed = 0
 function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [string]$Log) {
     if ($Arguments[0] -eq '--list') {
@@ -56,6 +71,11 @@ try {
         'skipped-check' { $report.checks.($checks[0]) = 'skipped' }
         'failed-check' { $report.checks.($checks[0]) = 'failed' }
         'error' { $report.error = 'fixture failed' }
+        'wrong-scope' { $report.proof_scope = 'production_collector' }
+        'missing-cleanup' { $report.process_source_stages = @($report.process_source_stages | Where-Object { $_ -cne 'cleanup_verified' }) }
+        'missing-schema' { $report.process_source_schema = @() }
+        'reported-failure' { $report.process_source_failures = @('native_loss') }
+        'missing-failures' { $report.PSObject.Properties.Remove('process_source_failures') }
     }
     Assert-IsolationReport $report ('a'*64) $SelectedSuite
     Invoke-IsolationCheck 'fixture.exe' $checks[0] (Join-Path $Root 'check.log')
@@ -290,6 +310,159 @@ $lines | Set-Content -LiteralPath $log
 '''
 
 
+PROCESS_WRAPPER = r'''
+param([string]$Script, [string]$Case, [string]$Root, [string]$SelectedSuite)
+$ErrorActionPreference = 'Stop'
+. $Script
+$manifest = @{ schema=1; suite='ProcessSource'; github_sha=('a'*40); sha256=@{} }
+foreach ($name in @('endpoint.exe','native.exe','verify_windows_isolation_ci.ps1','verify_windows_service_ci.ps1')) {
+    $path = Join-Path $Root $name
+    Set-Content -LiteralPath $path -Value 'controlled fixture, never executed'
+    $manifest.sha256[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+$manifestPath = Join-Path $Root 'inputs.json'
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
+$digest = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$name = (Get-IsolationChecks ProcessSource).test
+$report = @{ schema=1; suite='ProcessSource'; native_windows_executed=$true; production_readiness=$false;
+    proof_scope='source_only'; manifest_sha256=$digest; user_sid='S-1-5-18'; session_id=0;
+    windows_version='private_fixture_payload'; checks=[ordered]@{}; failures=[ordered]@{}; error=$null;
+    process_source_stages=@(Get-ProcessSourceStageNames); process_source_failures=@();
+    process_source_schema=@(@{event='start'},@{event='end'}) }
+$report.checks[$name] = 'passed'
+$log = Join-Path $Root 'check-0.log'
+$lines = @((Get-ProcessSourceStageNames) | ForEach-Object { 'ATHERNEX_PROCESS_PROBE_STAGE=' + $_ }) + @(
+    ('ATHERNEX_PROCESS_PROBE_SCHEMA=start:0:32:1:' + ('a'*64)),
+    ('ATHERNEX_PROCESS_PROBE_SCHEMA=end:255:64:64:' + ('b'*64)),
+    'ATHERNEX_PROCESS_PROBE_DIAGNOSTIC=close_trace:0',
+    'ATHERNEX_PROCESS_PROBE_DIAGNOSTIC=query_trace:4294967295',
+    'private_fixture_payload')
+if ($Case -in @('worker-no-cleanup','publish-no-cleanup')) {
+    $lines = @($lines | Where-Object { $_ -cne 'ATHERNEX_PROCESS_PROBE_STAGE=cleanup_verified' })
+}
+if ($Case -in @('worker-no-schema','publish-no-schema')) {
+    $lines = @($lines | Where-Object { -not $_.StartsWith('ATHERNEX_PROCESS_PROBE_SCHEMA=end:') })
+}
+if ($Case -in @('worker-failure-marker','publish-failure-marker')) {
+    $lines += 'ATHERNEX_PROCESS_PROBE_FAILURE=native_loss'
+}
+if ($Case -ceq 'publish-failure-report') { $report.process_source_failures = @('callback_loss') }
+$global:executed = 0
+$global:taskCalls = 0
+$env:ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST = 'previous_authentication'
+$env:ATHERNEX_WINDOWS_PROCESS_EVENTS_PROBE_DISPOSABLE_HOST = 'previous_process'
+$failure = $null
+$result = @{}
+if ($Case.StartsWith('markers-')) {
+    $failureTags = @('schema_provenance','schema_identity','schema_bounds','schema_shape',
+        'property_missing','property_type','property_scalar','property_size',
+        'record_provenance','record_bounds','session_ownership','session_configuration',
+        'session_cleanup','native_loss','callback_loss','consumer_lifecycle',
+        'controlled_lifecycle','controlled_timeout','token_state','api_failure','other')
+    $lines += @($failureTags + $failureTags | ForEach-Object { 'ATHERNEX_PROCESS_PROBE_FAILURE=' + $_ })
+    if ($Case -ceq 'markers-injected') {
+        $good = @($lines | Where-Object { $_ -cne 'private_fixture_payload' })
+        $lines = @($good | ForEach-Object {
+            ' ' + $_
+            'test fixture ... ' + $_
+            $_ + ':private_fixture_payload'
+            $_ + ' private_fixture_payload'
+            $_ + [char]0
+            $_ + [char]0x00ad
+            $_.ToUpperInvariant()
+        })
+    }
+    if ($Case -ceq 'markers-invalid-fields') {
+        $lines = @(
+            'ATHERNEX_PROCESS_PROBE_DIAGNOSTIC=unknown:0',
+            'ATHERNEX_PROCESS_PROBE_DIAGNOSTIC=start_trace:4294967296',
+            'ATHERNEX_PROCESS_PROBE_DIAGNOSTIC=start_trace:00',
+            'ATHERNEX_PROCESS_PROBE_DIAGNOSTIC=start_trace:-1',
+            'ATHERNEX_PROCESS_PROBE_DIAGNOSTIC=start_trace:+1',
+            ('ATHERNEX_PROCESS_PROBE_DIAGNOSTIC=start_trace:' + [char]0x0661),
+            ('ATHERNEX_PROCESS_PROBE_SCHEMA=start:256:64:1:' + ('a'*64)),
+            ('ATHERNEX_PROCESS_PROBE_SCHEMA=start:00:64:1:' + ('a'*64)),
+            ('ATHERNEX_PROCESS_PROBE_SCHEMA=start:1:128:1:' + ('a'*64)),
+            ('ATHERNEX_PROCESS_PROBE_SCHEMA=start:1:64:0:' + ('a'*64)),
+            ('ATHERNEX_PROCESS_PROBE_SCHEMA=start:1:64:65:' + ('a'*64)),
+            ('ATHERNEX_PROCESS_PROBE_SCHEMA=start:1:64:01:' + ('a'*64)),
+            ('ATHERNEX_PROCESS_PROBE_SCHEMA=start:1:64:1:' + ('A'*64)),
+            ('ATHERNEX_PROCESS_PROBE_SCHEMA=start:1:64:1:' + ('a'*63)),
+            ('ATHERNEX_PROCESS_PROBE_SCHEMA=other:1:64:1:' + ('a'*64)),
+            ('ATHERNEX_PROCESS_PROBE_SCHEMA=start:' + [char]0x0661 + ':64:1:' + ('a'*64)),
+            'ATHERNEX_PROCESS_PROBE_STAGE=unknown',
+            'ATHERNEX_PROCESS_PROBE_FAILURE=unknown',
+            'ATHERNEX_PROCESS_PROBE_FAILURE=',
+            'ATHERNEX_PROCESS_PROBE_FAILURE=native_loss:private_fixture_payload')
+    }
+    if ($Case -ceq 'markers-flood') {
+        $lines = @(0..63 | ForEach-Object { 'ATHERNEX_PROCESS_PROBE_DIAGNOSTIC=query_trace:' + $_ }) +
+            @(0..63 | ForEach-Object { 'ATHERNEX_PROCESS_PROBE_SCHEMA=start:' + $_ + ':64:1:' + ('a'*64) }) +
+            @(0..63 | ForEach-Object { 'ATHERNEX_PROCESS_PROBE_STAGE=passed' }) +
+            @(0..63 | ForEach-Object { 'ATHERNEX_PROCESS_PROBE_FAILURE=other' })
+    }
+    $lines | Set-Content -LiteralPath $log
+    $result = @{ stages=@(Get-ProcessSourceStages $log); failures=@(Get-ProcessSourceFailures $log); diagnostics=@(Get-ProcessSourceDiagnostics $log);
+        schema=@(Get-ProcessSourceSchema $log) }
+} elseif ($Case.StartsWith('worker-')) {
+    $report.checks.Clear()
+    if ($Case -ceq 'worker-input-change') { Set-Content -LiteralPath (Join-Path $Root 'endpoint.exe') -Value changed }
+    if ($Case -ceq 'worker-runner-change') { Set-Content -LiteralPath (Join-Path $Root 'verify_windows_isolation_ci.ps1') -Value changed }
+    if ($Case -ceq 'worker-helper-change') { Set-Content -LiteralPath (Join-Path $Root 'verify_windows_service_ci.ps1') -Value changed }
+    function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [string]$Log) {
+        if ((Split-Path -Leaf $Executable) -cne 'endpoint.exe') { throw 'Wrong source proof executable' }
+        if ($Arguments[0] -ceq '--list') {
+            $listing = if ($Case -ceq 'worker-missing-test') { 'other: test' } else { $name + ': test' }
+            Set-Content -LiteralPath $Log -Value $listing
+            return
+        }
+        $global:executed += 1
+        if ($Arguments[0] -cne '--exact' -or $Arguments[1] -cne $name -or
+            $Arguments[2] -cne '--ignored' -or $Arguments[3] -cne '--test-threads=1' -or
+            $env:ATHERNEX_WINDOWS_PROCESS_EVENTS_PROBE_DISPOSABLE_HOST -cne '1' -or
+            $env:ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST) { throw 'Source proof scope escaped' }
+        $summary = if ($Case -ceq 'worker-zero-tests') { 'test result: ok. 0 passed; 0 failed; 0 ignored;' }
+            else { 'test result: ok. 1 passed; 0 failed; 0 ignored;' }
+        @($lines) + @($summary) | Set-Content -LiteralPath $Log
+        if ($Case -ceq 'worker-exit-failure') { throw 'private_fixture_payload' }
+    }
+    try { Invoke-IsolationWorkerChecks $Root $manifest $report ProcessSource }
+    catch { $failure = $_.Exception.Message }
+    $result = @{ failed=($null -ne $failure); error=$failure; executed=$global:executed;
+        worker_error=$report.error; checks=$report.checks;
+        stages=$report.process_source_stages; failures=$report.process_source_failures; diagnostics=$report.process_source_diagnostics;
+        schema=$report.process_source_schema;
+        authentication_opt_in=$env:ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST;
+        process_opt_in=$env:ATHERNEX_WINDOWS_PROCESS_EVENTS_PROBE_DISPOSABLE_HOST }
+} else {
+    function Invoke-ServiceFixtureTask($TaskName, $Action, $ResultFile, $AgentSha256, $TimeoutSeconds, $ValidateReport) {
+        $global:taskCalls += 1
+        if ($Case -ceq 'publish-task-fails') { throw 'private_fixture_payload' }
+        $lines | Set-Content -LiteralPath $log
+        $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ResultFile
+        $parsed = Get-Content -LiteralPath $ResultFile -Raw | ConvertFrom-Json
+        & $ValidateReport $parsed $AgentSha256
+        if ($Case -ceq 'publish-cleanup-fails') { throw 'private_fixture_payload' }
+        if ($Case -ceq 'publish-input-change') { Set-Content -LiteralPath (Join-Path $Root 'endpoint.exe') -Value changed }
+        if ($Case -ceq 'publish-runner-change') { Set-Content -LiteralPath (Join-Path $Root 'verify_windows_isolation_ci.ps1') -Value changed }
+        if ($Case -ceq 'publish-helper-change') { Set-Content -LiteralPath (Join-Path $Root 'verify_windows_service_ci.ps1') -Value changed }
+        if ($Case -ceq 'publish-manifest-change') { Add-Content -LiteralPath $manifestPath -Value ' ' }
+        if ($Case -ceq 'publish-report-change') {
+            $report.checks[$name] = 'skipped'
+            $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ResultFile
+        }
+        if ($Case -ceq 'publish-missing-report') { Remove-Item -LiteralPath $ResultFile }
+    }
+    $source = if ($Case -ceq 'publish-wrong-source') { 'b'*40 } else { 'a'*40 }
+    try { Invoke-ProcessSourceEvidence $Root fixture-task $null $digest $source }
+    catch { $failure = $_.Exception.Message }
+    $public = Get-Content -LiteralPath (Join-Path $Root 'process-source-validation.json') -Raw | ConvertFrom-Json
+    $result = @{ failed=($null -ne $failure); error=$failure; task_calls=$global:taskCalls; public=$public }
+}
+$result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
+'''
+
+
 class IsolationRunnerTests(unittest.TestCase):
     powershell = None
 
@@ -310,7 +483,7 @@ class IsolationRunnerTests(unittest.TestCase):
             return value
 
     def test_exact_native_identity_and_complete_report_are_required(self):
-        for suite in ['Isolation', 'Authentication']:
+        for suite in ['Isolation', 'Authentication', 'ProcessSource']:
             for case in ['wrong-hash', 'wrong-suite', 'missing-suite', 'wrong-account',
                          'wrong-session', 'not-native', 'production-claim', 'missing-check',
                          'extra-check', 'skipped-check', 'failed-check', 'error']:
@@ -320,7 +493,7 @@ class IsolationRunnerTests(unittest.TestCase):
                     self.assertEqual(value['executed'], 0)
 
     def test_missing_test_never_executes_and_zero_or_ignored_tests_cannot_pass(self):
-        for suite in ['Isolation', 'Authentication']:
+        for suite in ['Isolation', 'Authentication', 'ProcessSource']:
             for case in ['missing-test', 'zero-tests', 'ignored-test', 'failed-test', 'exit-failure']:
                 with self.subTest(suite=suite, case=case):
                     value = self.run_case(case, suite=suite)
@@ -328,13 +501,15 @@ class IsolationRunnerTests(unittest.TestCase):
                     self.assertEqual(value['executed'], 0 if case == 'missing-test' else 1)
 
     def test_one_actual_success_is_required(self):
-        for suite in ['Isolation', 'Authentication']:
+        for suite in ['Isolation', 'Authentication', 'ProcessSource']:
             with self.subTest(suite=suite):
                 value = self.run_case('passed', suite=suite)
                 self.assertFalse(value['failed'], value)
                 self.assertEqual(value['executed'], 1)
                 if suite == 'Authentication':
                     self.assertEqual(value['names'], [AUTHENTICATION_TEST])
+                if suite == 'ProcessSource':
+                    self.assertEqual(value['names'], [PROCESS_SOURCE_TEST])
 
     def test_independent_failures_collect_remaining_checks_but_changed_input_stops_execution(self):
         for case, executed, passed, failures, failed in [
@@ -495,6 +670,90 @@ class IsolationRunnerTests(unittest.TestCase):
             'connection_ready', 'worker_entered', 'startup_failed', 'invalid_property_type'
         ])
         self.assertNotIn('private_payload', json.dumps(value))
+
+    def test_process_source_requires_explicit_scope_cleanup_and_both_schemas(self):
+        for case in ['wrong-scope', 'missing-cleanup', 'missing-schema', 'reported-failure', 'missing-failures']:
+            with self.subTest(case=case):
+                value = self.run_case(case, suite='ProcessSource')
+                self.assertTrue(value['failed'], value)
+                self.assertEqual(value['executed'], 0)
+
+    def test_process_markers_reject_injection_and_noncanonical_or_out_of_range_fields(self):
+        value = self.run_case('markers-valid', PROCESS_WRAPPER, 'ProcessSource')
+        self.assertEqual(value['stages'], [
+            'guard_verified', 'token_verified', 'session_owned', 'consumer_ready',
+            'children_exited', 'lifecycle_verified', 'schema_verified', 'cleanup_verified', 'passed'])
+        self.assertEqual(value['failures'], PROCESS_FAILURES)
+        self.assertEqual(value['diagnostics'], [
+            {'operation': 'close_trace', 'win32_error': 0},
+            {'operation': 'query_trace', 'win32_error': 4294967295}])
+        self.assertEqual(value['schema'], [
+            {'event': 'start', 'version': 0, 'pointer_bits': 32, 'property_count': 1, 'metadata_sha256': 'a'*64},
+            {'event': 'end', 'version': 255, 'pointer_bits': 64, 'property_count': 64, 'metadata_sha256': 'b'*64}])
+        self.assertNotIn('private_fixture_payload', json.dumps(value))
+        for case in ['markers-injected', 'markers-invalid-fields']:
+            with self.subTest(case=case):
+                self.assertEqual(self.run_case(case, PROCESS_WRAPPER, 'ProcessSource'),
+                                 {'stages': [], 'failures': [], 'diagnostics': [], 'schema': []})
+        value = self.run_case('markers-flood', PROCESS_WRAPPER, 'ProcessSource')
+        self.assertEqual(value['stages'], ['passed'])
+        self.assertEqual(value['failures'], ['other'])
+        self.assertEqual(len(value['diagnostics']), 32)
+        self.assertEqual(len(value['schema']), 32)
+        self.assertEqual([entry['win32_error'] for entry in value['diagnostics']], list(range(32)))
+        self.assertEqual([entry['version'] for entry in value['schema']], list(range(32)))
+
+    def test_process_worker_binds_all_inputs_and_restores_separate_opt_ins(self):
+        for case, executed in [
+                ('worker-passed', 1), ('worker-exit-failure', 1), ('worker-zero-tests', 1),
+                ('worker-missing-test', 0), ('worker-no-cleanup', 1), ('worker-no-schema', 1), ('worker-failure-marker', 1),
+                ('worker-input-change', 0), ('worker-runner-change', 0), ('worker-helper-change', 0)]:
+            with self.subTest(case=case):
+                value = self.run_case(case, PROCESS_WRAPPER, 'ProcessSource')
+                self.assertEqual(value['failed'], case != 'worker-passed', value)
+                self.assertEqual(value['executed'], executed)
+                self.assertEqual(value['authentication_opt_in'], 'previous_authentication')
+                self.assertEqual(value['process_opt_in'], 'previous_process')
+                self.assertNotIn('private_fixture_payload', json.dumps(value))
+                self.assertEqual(value['failures'], ['native_loss'] if case == 'worker-failure-marker' else [])
+                if value['failed']:
+                    self.assertEqual(value['worker_error'], 'native_worker_failed')
+                else:
+                    self.assertEqual(value['checks'], {PROCESS_SOURCE_TEST: 'passed'})
+
+    def test_process_public_success_requires_task_cleanup_source_inputs_and_revalidated_report(self):
+        for case in ['publish-passed', 'publish-task-fails', 'publish-cleanup-fails',
+                     'publish-no-cleanup', 'publish-no-schema', 'publish-wrong-source',
+                     'publish-input-change', 'publish-runner-change', 'publish-helper-change',
+                     'publish-manifest-change', 'publish-report-change', 'publish-missing-report',
+                     'publish-failure-marker', 'publish-failure-report']:
+            with self.subTest(case=case):
+                value = self.run_case(case, PROCESS_WRAPPER, 'ProcessSource')
+                passed = case == 'publish-passed'
+                self.assertEqual(value['failed'], not passed, value)
+                self.assertEqual(value['task_calls'], 0 if case == 'publish-wrong-source' else 1)
+                public = value['public']
+                self.assertEqual(public['suite'], 'ProcessSource')
+                self.assertEqual(public['proof_scope'], 'source_only')
+                self.assertIs(public['production_readiness'], False)
+                self.assertEqual(public['native_process_source_validation_passed'], passed)
+                self.assertEqual(public['checks'], {PROCESS_SOURCE_TEST: 'passed' if passed else 'not_verified'})
+                self.assertEqual(public['error'], None if passed else 'native_process_source_not_verified')
+                self.assertEqual(public['process_source_failures'], ['native_loss'] if case == 'publish-failure-marker' else [])
+                self.assertNotIn('private_fixture_payload', json.dumps(value))
+                if passed:
+                    self.assertEqual(public['stages'], ['inputs_verified', 'task_completed_and_removed', 'report_verified'])
+
+    def test_process_workflow_uploads_only_bound_source_proof_projection(self):
+        workflow = SCRIPT.parent.parent/'.github/workflows/endpoint.yml'
+        job = workflow.read_text().split('  windows-process-source:\n', 1)[1].split('  windows-isolation:\n', 1)[0]
+        self.assertIn('-Suite ProcessSource', job)
+        self.assertIn('Source proof only: no production collector or replay support claim.', job)
+        self.assertIn('-DisposableHost', job)
+        paths = job.split('          path: |\n', 1)[1].split('          if-no-files-found:', 1)[0]
+        self.assertEqual(paths.split(), [
+            '${{', 'runner.temp', '}}/native-windows-process-source/inputs.json',
+            '${{', 'runner.temp', '}}/native-windows-process-source/process-source-validation.json'])
 
     def test_bookmark_render_evidence_preserves_only_bounded_exact_numeric_call_metadata(self):
         value = self.run_case('passed', STAGES_WRAPPER, 'Authentication')

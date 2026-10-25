@@ -257,15 +257,14 @@ except ConnectionResetError:
             barrier = ReadBarrier(watched, broker.pid)
 
             def denied(path):
-                before = barrier.denied
+                before = barrier.denial_count()
                 try:
                     path.read_bytes()
                 except PermissionError as error:
                     assert error.errno in (errno.EPERM, errno.EACCES)
                 else:
                     raise AssertionError('Ordinary root open bypassed the kernel read barrier')
-                barrier.check()
-                assert barrier.denied > before
+                barrier.wait_for_denial(before)
 
             denied(protected)
             try:

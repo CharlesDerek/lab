@@ -5,14 +5,18 @@ worker test formats and fills its own new volume. No existing disk is adopted. W
 to fresh fixture images. Failed checks retain their private recovery journals.
 The Authentication suite temporarily changes logon auditing and creates a private
 fixture account; its test owns restoration. Dot-sourcing defines helpers only.
+ProcessSource is a test-only ETW source proof, not a production collector.
 #>
 param([string]$EndpointTests, [string]$NativeTests, [string]$OutputDirectory,
       [switch]$DisposableHost, [switch]$Worker,
-      [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation')
+      [ValidateSet('Isolation','Authentication','ProcessSource', IgnoreCase=$false)][string]$Suite = 'Isolation')
 
-function Get-IsolationChecks([ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
+function Get-IsolationChecks([ValidateSet('Isolation','Authentication','ProcessSource', IgnoreCase=$false)][string]$Suite = 'Isolation') {
     if ($Suite -ceq 'Authentication') {
         return @{ binary='endpoint.exe'; test='telemetry::windows_authentication::native_test::security_logon_delivery_replays_and_reports_policy_gaps' }
+    }
+    if ($Suite -ceq 'ProcessSource') {
+        return @{ binary='endpoint.exe'; test='telemetry::windows_process_events_probe::owned_system_logger_reports_controlled_process_lifecycles' }
     }
     @(
         @{ binary='endpoint.exe'; test='windows_job::tests::scanner_launch_has_checked_identity_job_limits_and_owned_cleanup' },
@@ -30,7 +34,7 @@ function Get-IsolationChecks([ValidateSet('Isolation','Authentication', IgnoreCa
 }
 
 function Assert-IsolationReport($Report, [string]$ManifestSha256,
-                                [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
+                                [ValidateSet('Isolation','Authentication','ProcessSource', IgnoreCase=$false)][string]$Suite = 'Isolation') {
     if ($Report.schema -ne 1 -or $Report.native_windows_executed -cne $true -or
         $Report.suite -cne $Suite -or
         $Report.production_readiness -cne $false -or $Report.manifest_sha256 -cne $ManifestSha256 -or
@@ -42,6 +46,182 @@ function Assert-IsolationReport($Report, [string]$ManifestSha256,
     foreach ($name in $expected) {
         if ($names -cnotcontains $name -or $Report.checks.$name -cne 'passed') { throw ('Native isolation check did not pass: ' + $name) }
     }
+    if ($Suite -ceq 'ProcessSource') {
+        if ($Report.proof_scope -cne 'source_only') { throw 'Process source report claims unsupported scope' }
+        Assert-ProcessSourceMarkers $Report
+    }
+}
+
+function Get-ProcessSourceStageNames {
+    @('guard_verified','token_verified','session_owned','consumer_ready','children_exited',
+      'lifecycle_verified','schema_verified','cleanup_verified','passed')
+}
+
+function Get-ProcessSourceStages([string]$Log) {
+    if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
+    try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
+    catch { return }
+    foreach ($stage in Get-ProcessSourceStageNames) {
+        foreach ($line in $lines) {
+            if ([string]::Equals($line, ('ATHERNEX_PROCESS_PROBE_STAGE=' + $stage), [StringComparison]::Ordinal)) {
+                $stage
+                break
+            }
+        }
+    }
+}
+
+function Get-ProcessSourceFailures([string]$Log) {
+    # Emit each fixed category at most once, never the captured line or error.
+    $allowed = @('schema_provenance','schema_identity','schema_bounds','schema_shape',
+        'property_missing','property_type','property_scalar','property_size',
+        'record_provenance','record_bounds','session_ownership','session_configuration',
+        'session_cleanup','native_loss','callback_loss','consumer_lifecycle',
+        'controlled_lifecycle','controlled_timeout','token_state','api_failure','other')
+    if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
+    try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
+    catch { return }
+    foreach ($category in $allowed) {
+        foreach ($line in $lines) {
+            if ([string]::Equals($line, ('ATHERNEX_PROCESS_PROBE_FAILURE=' + $category), [StringComparison]::Ordinal)) {
+                $category
+                break
+            }
+        }
+    }
+}
+
+function Get-ProcessSourceDiagnostics([string]$Log) {
+    if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
+    try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
+    catch { return }
+    $count = 0
+    foreach ($line in $lines) {
+        foreach ($operation in @('start_trace','open_trace','process_trace','query_trace','stop_trace','close_trace',
+                                  'tdh_information','tdh_size','tdh_property','token_query')) {
+            $pattern = '\A' + [regex]::Escape('ATHERNEX_PROCESS_PROBE_DIAGNOSTIC=' + $operation + ':') + '(0|[1-9][0-9]{0,9})\z'
+            $match = [regex]::Match($line, $pattern, [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+            [uint32]$code = 0
+            if ($match.Success -and [uint32]::TryParse($match.Groups[1].Value,
+                [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$code)) {
+                @{ operation=$operation; win32_error=$code }
+                $count += 1
+                if ($count -ge 32) { return }
+                break
+            }
+        }
+    }
+}
+
+function Get-ProcessSourceSchema([string]$Log) {
+    # Hashes describe initialized/canonical TDH metadata only, never event values.
+    if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
+    try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
+    catch { return }
+    $count = 0
+    foreach ($line in $lines) {
+        $match = [regex]::Match($line,
+            '\AATHERNEX_PROCESS_PROBE_SCHEMA=(start|end):(0|[1-9][0-9]{0,2}):(32|64):([1-9][0-9]?):([0-9a-f]{64})\z',
+            [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+        [byte]$version = 0
+        [byte]$properties = 0
+        if ($match.Success -and [byte]::TryParse($match.Groups[2].Value,
+            [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$version) -and
+            [byte]::TryParse($match.Groups[4].Value,
+            [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$properties) -and
+            $properties -ge 1 -and $properties -le 64) {
+            @{ event=$match.Groups[1].Value; version=$version; pointer_bits=[int]$match.Groups[3].Value;
+                property_count=$properties; metadata_sha256=$match.Groups[5].Value }
+            $count += 1
+            if ($count -ge 32) { return }
+        }
+    }
+}
+
+function Assert-ProcessSourceMarkers($Report) {
+    if ($null -eq $Report.process_source_failures -or @($Report.process_source_failures).Count -ne 0) {
+        throw 'Process source proof has missing or contradictory failure evidence'
+    }
+    $expected = @(Get-ProcessSourceStageNames)
+    if (@($Report.process_source_stages).Count -ne $expected.Count) { throw 'Process source proof is incomplete' }
+    foreach ($stage in $expected) {
+        if (@($Report.process_source_stages) -cnotcontains $stage) { throw 'Process source proof is incomplete' }
+    }
+    foreach ($event in @('start','end')) {
+        if (@($Report.process_source_schema.event) -cnotcontains $event) { throw 'Process source schema proof is incomplete' }
+    }
+}
+
+function Assert-ProcessSourceInputs([string]$OutputDirectory, [string]$ManifestSha256, [string]$ExpectedSource = '') {
+    $path = Join-Path $OutputDirectory 'inputs.json'
+    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ManifestSha256) {
+        throw 'Process source input manifest changed'
+    }
+    $manifest = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    $expected = @('endpoint.exe','native.exe','verify_windows_isolation_ci.ps1','verify_windows_service_ci.ps1')
+    if ($manifest.schema -ne 1 -or $manifest.suite -cne 'ProcessSource' -or
+        $manifest.github_sha -cnotmatch '\A[0-9a-f]{40}\z' -or
+        ($ExpectedSource -and $manifest.github_sha -cne $ExpectedSource) -or
+        @($manifest.sha256.PSObject.Properties.Name).Count -ne $expected.Count) { throw 'Invalid process source input manifest' }
+    foreach ($name in $expected) {
+        if ($manifest.sha256.$name -cnotmatch '\A[0-9a-f]{64}\z' -or
+            (Get-FileHash -LiteralPath (Join-Path $OutputDirectory $name) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $manifest.sha256.$name) {
+            throw 'Staged process source input changed'
+        }
+    }
+    $manifest
+}
+
+function Invoke-ProcessSourceEvidence([string]$OutputDirectory, [string]$TaskName, $Action,
+                                     [string]$ManifestSha256, [string]$ExpectedSource) {
+    if ($ManifestSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $ExpectedSource -cnotmatch '\A[0-9a-f]{40}\z') {
+        throw 'Invalid process source evidence binding'
+    }
+    $result = Join-Path $OutputDirectory 'process-source-worker.private.json'
+    $log = Join-Path $OutputDirectory 'check-0.log'
+    $public = @{ schema=1; suite='ProcessSource'; proof_scope='source_only'; production_readiness=$false;
+        manifest_sha256=$ManifestSha256; native_process_source_validation_passed=$false;
+        stages=@(); process_source_stages=@(); process_source_failures=@(); process_source_diagnostics=@(); process_source_schema=@();
+        checks=[ordered]@{}; error='native_process_source_not_verified' }
+    foreach ($check in Get-IsolationChecks ProcessSource) { $public.checks[$check.test] = 'not_verified' }
+    try {
+        $null = Assert-ProcessSourceInputs $OutputDirectory $ManifestSha256 $ExpectedSource
+        $public.stages += 'inputs_verified'
+        Invoke-ServiceFixtureTask $TaskName $Action $result $ManifestSha256 540 {
+            param($Report, $Digest)
+            Assert-IsolationReport $Report $Digest ProcessSource
+        }
+        # The helper returns only after task ownership and cleanup checks pass.
+        $public.stages += 'task_completed_and_removed'
+        $null = Assert-ProcessSourceInputs $OutputDirectory $ManifestSha256 $ExpectedSource
+        $report = Get-Content -LiteralPath $result -Raw | ConvertFrom-Json
+        Assert-IsolationReport $report $ManifestSha256 ProcessSource
+        $public.process_source_stages = @(Get-ProcessSourceStages $log)
+        $public.process_source_failures = @(Get-ProcessSourceFailures $log)
+        $public.process_source_schema = @(Get-ProcessSourceSchema $log)
+        Assert-ProcessSourceMarkers $public
+        $public.stages += 'report_verified'
+        foreach ($check in Get-IsolationChecks ProcessSource) { $public.checks[$check.test] = 'passed' }
+        $public.native_process_source_validation_passed = $true
+        $public.error = $null
+    } catch {
+        try { $_ | Out-File -LiteralPath (Join-Path $OutputDirectory 'process-source-validation.private.log') -Append -ErrorAction Stop } catch { }
+    }
+    # These are bounded projections of complete fixed marker lines, even on failure.
+    $public.process_source_stages = @(Get-ProcessSourceStages $log)
+    $public.process_source_failures = @(Get-ProcessSourceFailures $log)
+    $public.process_source_diagnostics = @(Get-ProcessSourceDiagnostics $log)
+    $public.process_source_schema = @(Get-ProcessSourceSchema $log)
+    if ($public.native_process_source_validation_passed) {
+        try { Assert-ProcessSourceMarkers $public }
+        catch {
+            $public.native_process_source_validation_passed = $false
+            $public.error = 'native_process_source_not_verified'
+            foreach ($check in Get-IsolationChecks ProcessSource) { $public.checks[$check.test] = 'not_verified' }
+        }
+    }
+    $public | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'process-source-validation.json') -Encoding UTF8
+    if (-not $public.native_process_source_validation_passed) { throw 'Native process source proof failed; private evidence retained on worker' }
 }
 
 function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [string]$Log) {
@@ -193,7 +373,7 @@ function Get-AuthenticationRender([string]$Log) {
 }
 
 function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report,
-                                [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
+                                [ValidateSet('Isolation','Authentication','ProcessSource', IgnoreCase=$false)][string]$Suite = 'Isolation') {
     if ($Manifest.schema -ne 1 -or $Manifest.suite -cne $Suite) { throw 'Invalid native check input manifest suite' }
     $position = 0
     foreach ($check in Get-IsolationChecks $Suite) {
@@ -217,24 +397,39 @@ function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report,
                 $Report.authentication_source = @(Get-AuthenticationSource $log)
                 $Report.authentication_render = @(Get-AuthenticationRender $log)
             }
+            if ($Suite -ceq 'ProcessSource') {
+                $Report.process_source_stages = @(Get-ProcessSourceStages $log)
+                $Report.process_source_failures = @(Get-ProcessSourceFailures $log)
+                $Report.process_source_diagnostics = @(Get-ProcessSourceDiagnostics $log)
+                $Report.process_source_schema = @(Get-ProcessSourceSchema $log)
+            }
         }
         # Each test runs in a separate process with fresh fixture paths. WFP
         # rules name only that test's private image, never the runner binary.
         $position += 1
     }
     if ($Report.failures.Count) { throw 'One or more native isolation checks failed' }
+    if ($Suite -ceq 'ProcessSource') { Assert-ProcessSourceMarkers $Report }
 }
 
 function Invoke-IsolationWorkerChecks([string]$OutputDirectory, $Manifest, $Report,
-                                      [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
+                                      [ValidateSet('Isolation','Authentication','ProcessSource', IgnoreCase=$false)][string]$Suite = 'Isolation') {
     $authenticationOptIn = 'ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST'
     $previousOptIn = [Environment]::GetEnvironmentVariable($authenticationOptIn, 'Process')
+    $processOptIn = 'ATHERNEX_WINDOWS_PROCESS_EVENTS_PROBE_DISPOSABLE_HOST'
+    $previousProcessOptIn = [Environment]::GetEnvironmentVariable($processOptIn, 'Process')
     try {
         if ($manifest.schema -ne 1 -or $manifest.suite -cne $Suite) { throw 'Invalid native check input manifest suite' }
         # Set this only after the disposable LocalSystem worker and its suite
         # manifest have been verified. The native fixture repeats identity checks.
         $optIn = if ($Suite -ceq 'Authentication') { '1' } else { $null }
         [Environment]::SetEnvironmentVariable($authenticationOptIn, $optIn, 'Process')
+        if ($Suite -ceq 'ProcessSource') {
+            $null = Assert-ProcessSourceInputs $OutputDirectory $Report.manifest_sha256
+            [Environment]::SetEnvironmentVariable($processOptIn, '1', 'Process')
+        } else {
+            [Environment]::SetEnvironmentVariable($processOptIn, $null, 'Process')
+        }
         Invoke-IsolationChecks $OutputDirectory $manifest $report $Suite
     } catch {
         $Report.error = 'native_worker_failed'
@@ -242,11 +437,12 @@ function Invoke-IsolationWorkerChecks([string]$OutputDirectory, $Manifest, $Repo
         throw 'Native worker failed; private evidence retained on worker'
     } finally {
         [Environment]::SetEnvironmentVariable($authenticationOptIn, $previousOptIn, 'Process')
+        [Environment]::SetEnvironmentVariable($processOptIn, $previousProcessOptIn, 'Process')
     }
 }
 
 function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost,
-                                [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
+                                [ValidateSet('Isolation','Authentication','ProcessSource', IgnoreCase=$false)][string]$Suite = 'Isolation') {
     $ErrorActionPreference = 'Stop'
     if (-not $DisposableHost -or [Environment]::OSVersion.Platform -ne 'Win32NT' -or
         [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18' -or
@@ -266,14 +462,22 @@ function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost,
         $report.authentication_source = @()
         $report.authentication_render = @()
     }
+    if ($Suite -ceq 'ProcessSource') {
+        $report.proof_scope = 'source_only'
+        $report.process_source_stages = @()
+        $report.process_source_failures = @()
+        $report.process_source_diagnostics = @()
+        $report.process_source_schema = @()
+    }
     try { Invoke-IsolationWorkerChecks $OutputDirectory $manifest $report $Suite }
     finally {
-        $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDirectory ($Suite.ToLowerInvariant() + '-validation.json')) -Encoding UTF8
+        $filename = if ($Suite -ceq 'ProcessSource') { 'process-source-worker.private.json' } else { $Suite.ToLowerInvariant() + '-validation.json' }
+        $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDirectory $filename) -Encoding UTF8
     }
 }
 
 function Invoke-IsolationCi([string]$EndpointTests, [string]$NativeTests, [string]$OutputDirectory, [bool]$DisposableHost,
-                            [ValidateSet('Isolation','Authentication', IgnoreCase=$false)][string]$Suite = 'Isolation') {
+                            [ValidateSet('Isolation','Authentication','ProcessSource', IgnoreCase=$false)][string]$Suite = 'Isolation') {
     $ErrorActionPreference = 'Stop'
     if (-not $DisposableHost -or $env:GITHUB_ACTIONS -cne 'true' -or
         $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
@@ -284,6 +488,11 @@ function Invoke-IsolationCi([string]$EndpointTests, [string]$NativeTests, [strin
     }
     $sources = @{ 'endpoint.exe'=(Resolve-Path -LiteralPath $EndpointTests).Path;
                   'native.exe'=(Resolve-Path -LiteralPath $NativeTests).Path }
+    if ($Suite -ceq 'ProcessSource') {
+        if ($env:GITHUB_SHA -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Process source commit binding is missing' }
+        $sources['verify_windows_isolation_ci.ps1'] = $PSCommandPath
+        $sources['verify_windows_service_ci.ps1'] = Join-Path $PSScriptRoot 'verify_windows_service_ci.ps1'
+    }
     if (-not $OutputDirectory) { throw 'OutputDirectory is required' }
     $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
     if ((Test-Path -LiteralPath $OutputDirectory) -or -not (Test-Path -LiteralPath (Split-Path -Parent $OutputDirectory) -PathType Container)) {
@@ -324,6 +533,15 @@ catch { $_ | Out-File -LiteralPath (Join-Path $p.OutputDirectory 'worker.log') -
     $powershell = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell/v1.0/powershell.exe'
     $action = New-ScheduledTaskAction -Execute $powershell -Argument ('-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encoded)
     $taskName = 'Athernex' + $Suite + 'Validation-' + [Guid]::NewGuid().ToString('N')
+    if ($Suite -ceq 'ProcessSource') {
+        $null = Assert-ProcessSourceInputs $OutputDirectory $digest $env:GITHUB_SHA
+        & {
+            param($ProofDirectory, $ProofTask, $ProofAction, $ProofDigest, $ProofSource)
+            . (Join-Path $ProofDirectory 'verify_windows_service_ci.ps1')
+            Invoke-ProcessSourceEvidence $ProofDirectory $ProofTask $ProofAction $ProofDigest $ProofSource
+        } $OutputDirectory $taskName $action $digest $env:GITHUB_SHA
+        return
+    }
     # Import into a child scope so the service script's parameters cannot replace
     # this runner's paths or switches when it is dot-sourced.
     & {

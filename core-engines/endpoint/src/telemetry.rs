@@ -3,6 +3,8 @@ mod authentication;
 mod network_events;
 mod process_events;
 mod windows_authentication;
+#[cfg(all(test, windows))]
+mod windows_process_events_probe;
 use crate::Process as Command;
 use crate::{now_ms, secret, Client, Result, Store};
 use athernex_endpoint_protocol::{self as protocol, telemetry::*, EndpointEvent};

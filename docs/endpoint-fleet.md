@@ -590,6 +590,26 @@ cargo test --locked -p athernex-endpoint --lib --test authentication --no-run --
 python3 tools/verify_auth_events.py --manifest /tmp/authentication-tests.jsonl --agent target/release/athernex-endpoint
 ```
 
+The same native gates also run against the Debian 13 fixture:
+
+```sh
+docker build -t athernex-native-auth-fixture:debian13 -f infrastructure/endpoint/auth-tests/debian13.Dockerfile infrastructure/endpoint/auth-tests
+python3 tools/verify_auth_events.py --manifest /tmp/authentication-tests.jsonl --agent target/release/athernex-endpoint --image athernex-native-auth-fixture:debian13
+python3 tools/verify_auth_events.py --manifest /tmp/authentication-tests.jsonl --agent target/release/athernex-endpoint --image athernex-native-auth-fixture:debian13 --missing-provenance
+```
+
+Debian 13 acceptance exercised OpenSSH 10.0p1, PAM 1.7, sudo 1.9.16 and
+systemd 257. All five native checks passed with the existing producer rules;
+the observed terminal SSH reports came from `/usr/lib/openssh/sshd-session`.
+The fixture explicitly disables supported OpenSSH source penalties in its two
+private SSH configurations and verifies the effective setting, so its deliberate
+denial burst produces authentication reports instead of pre-authentication
+connection drops. Older servers retain their existing configuration. Exact-original,
+queue, restart, retention, detection and missing-provenance assertions remain
+required. These isolated containers share the host kernel; this evidence does
+not establish separate-host reliability, every PAM provider, localized messages
+or production detection quality.
+
 ### Optional Windows Security logons
 
 Set `"windows_authentication": true` alongside `"enabled": true` in the private
@@ -638,6 +658,24 @@ anchor mismatch without clearing the host Security log. This is not the full SCM
 agent lifecycle or a measured production coverage result. The gate must pass on its source commit before native behavior is considered
 validated. Uploaded artifacts contain only suite-bound status
 and executable hashes; account details and event XML stay on the disposable host.
+
+### Windows process source experiment
+
+The independent `windows-process-source` job is a test-only ETW source experiment
+on a disposable LocalSystem/session-zero host. It creates one named system logger
+with a fresh ownership GUID and requires actual Start/End events for eight owned
+child processes. Native TDH metadata must supply exact target PID, parent,
+session, exit status and process-key fields. Rundown cannot satisfy the lifecycle
+check. The fixture also requires zero source/callback losses, unchanged token
+state, removal of the owned session and completion of its consumer thread.
+
+This gate establishes source behavior only when it passes; it does not implement
+continuous Windows process collection, durable delivery, rollout coverage or PID
+reuse tracking. The public `process-source-validation.json` keeps
+`proof_scope: "source_only"` and `production_readiness: false`. It contains fixed
+status/failure categories and structural schema fingerprints. Raw events,
+command lines, account data and kernel addresses stay on the disposable VM;
+only the public report and its input manifest are uploaded.
 
 ## Storage lifecycle and recovery
 

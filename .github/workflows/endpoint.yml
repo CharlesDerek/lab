@@ -31,6 +31,7 @@ on:
       - 'tools/verify_native_protection.py'
       - 'tools/verify_native_adapter.py'
       - 'tools/native_read_barrier.py'
+      - 'tools/test_native_read_barrier.py'
       - 'tools/verify_macos_native.py'
       - 'tools/verify_native_service.py'
       - 'tools/prepare_native_protection_fixture.py'
@@ -99,6 +100,49 @@ jobs:
           path: |
             ${{ runner.temp }}/native-windows-authentication/inputs.json
             ${{ runner.temp }}/native-windows-authentication/authentication-validation.json
+          if-no-files-found: warn
+  windows-process-source:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify privileged runner failure handling and suite-bound evidence
+        run: |
+          python tools/test_windows_service_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Task runner control-flow tests failed' }
+          python tools/test_windows_isolation_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Native suite evidence tests failed' }
+      - name: Build and select exact native process source proof executable
+        shell: pwsh
+        env:
+          CARGO_PROFILE_TEST_DEBUG: 0
+        run: |
+          cargo test --locked --no-run --lib -p athernex-endpoint -p athernex-endpoint-native --message-format=json > "$env:RUNNER_TEMP/process-source-build.jsonl"
+          if ($LASTEXITCODE -ne 0) { throw 'Native process source proof build failed' }
+          $records = Get-Content -LiteralPath "$env:RUNNER_TEMP/process-source-build.jsonl" | ForEach-Object { $_ | ConvertFrom-Json }
+          foreach ($entry in @(@('athernex_endpoint','PROCESS_SOURCE_ENDPOINT_TESTS'), @('athernex_endpoint_native','PROCESS_SOURCE_NATIVE_TESTS'))) {
+            $matches = @($records | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -ceq $entry[0] -and $_.profile.test -eq $true -and $_.executable })
+            if ($matches.Count -ne 1) { throw ('Expected one test executable for ' + $entry[0]) }
+            ($entry[1] + '=' + $matches[0].executable) >> $env:GITHUB_ENV
+          }
+      - name: Prove only the native ETW process source as LocalSystem
+        timeout-minutes: 10
+        shell: pwsh
+        run: tools/verify_windows_isolation_ci.ps1 -Suite ProcessSource -EndpointTests "$env:PROCESS_SOURCE_ENDPOINT_TESTS" -NativeTests "$env:PROCESS_SOURCE_NATIVE_TESTS" -OutputDirectory "$env:RUNNER_TEMP/native-windows-process-source" -DisposableHost
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-windows-process-source
+          # Source proof only: no production collector or replay support claim.
+          # Raw events, paths, logger names and worker reports stay private.
+          path: |
+            ${{ runner.temp }}/native-windows-process-source/inputs.json
+            ${{ runner.temp }}/native-windows-process-source/process-source-validation.json
           if-no-files-found: warn
   windows-isolation:
     runs-on: windows-2022
@@ -227,6 +271,12 @@ jobs:
         run: python tools/verify_auth_events.py --manifest "$RUNNER_TEMP/process-event-tests.jsonl" --agent target/release/athernex-endpoint
       - name: Verify missing authentication producer identity remains visible
         run: python tools/verify_auth_events.py --manifest "$RUNNER_TEMP/process-event-tests.jsonl" --agent target/release/athernex-endpoint --missing-provenance
+      - name: Build private Debian 13 authentication test environment
+        run: docker build -f infrastructure/endpoint/auth-tests/debian13.Dockerfile -t athernex-native-auth-fixture:debian13 infrastructure/endpoint/auth-tests
+      - name: Verify Debian 13 native SSH/PAM authentication, queue recovery, agent crash and detection
+        run: python tools/verify_auth_events.py --image athernex-native-auth-fixture:debian13 --manifest "$RUNNER_TEMP/process-event-tests.jsonl" --agent target/release/athernex-endpoint
+      - name: Verify Debian 13 missing authentication producer identity remains visible
+        run: python tools/verify_auth_events.py --image athernex-native-auth-fixture:debian13 --manifest "$RUNNER_TEMP/process-event-tests.jsonl" --agent target/release/athernex-endpoint --missing-provenance
       - name: Verify real blocking, evidence delivery, failure reporting and recovery
         run: python tools/verify_native_protection.py --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
       - name: Verify signed engine staging, native activation and interrupted recovery
@@ -237,6 +287,8 @@ jobs:
         run: python tools/verify_engine_update.py --fleet --server target/release/athernex-siem --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
       - name: Verify real engine canary promotion, server restart and failed-canary containment
         run: python tools/verify_engine_update.py --rollout --server target/release/athernex-siem --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
+      - name: Verify native read barrier response acknowledgment and failure handling
+        run: python3 -m unittest tools/test_native_read_barrier.py
       - name: Verify native adapter scan transport with real ClamAV
         run: python tools/verify_native_adapter.py --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
       - name: Validate Windows kernel wire layouts and malformed input handling

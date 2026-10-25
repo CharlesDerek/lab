@@ -10,6 +10,7 @@ from pathlib import Path
 import select
 import struct
 import threading
+import time
 
 
 class ReadBarrier:
@@ -23,6 +24,8 @@ class ReadBarrier:
         self.denied = 0
         self.allowed = 0
         self.error = None
+        self.changed = threading.Condition()
+        self.finished = False
         self.stop = threading.Event()
         libc = ctypes.CDLL(None, use_errno=True)
         libc.fanotify_init.argtypes = [ctypes.c_uint, ctypes.c_uint]
@@ -80,21 +83,47 @@ class ReadBarrier:
                         response = struct.pack('=iI', file_fd, 1 if allowed else 2)
                         if os.write(self.fd, response) != len(response):
                             raise RuntimeError('Incomplete permission response')
-                        if allowed:
-                            self.allowed += 1
-                        else:
-                            self.denied += 1
+                        # The response can unblock the opener before this
+                        # thread resumes. Publish its completed acknowledgment
+                        # under the same condition used by fixture waiters.
+                        with self.changed:
+                            if allowed:
+                                self.allowed += 1
+                            else:
+                                self.denied += 1
+                            self.changed.notify_all()
                     finally:
                         os.close(file_fd)
                     offset += length
         except Exception as error:
-            self.error = error
+            with self.changed:
+                self.error = error
+                self.changed.notify_all()
         finally:
             os.close(self.fd)
+            with self.changed:
+                self.finished = True
+                self.changed.notify_all()
 
     def check(self):
-        if self.error is not None or not self.thread.is_alive():
+        if self.error is not None or self.finished or not self.thread.is_alive():
             raise RuntimeError(f'Read barrier stopped: {self.error}')
+
+    def denial_count(self):
+        with self.changed:
+            self.check()
+            return self.denied
+
+    def wait_for_denial(self, before, timeout=3):
+        deadline = time.monotonic() + timeout
+        with self.changed:
+            while self.denied <= before:
+                self.check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError('Read barrier denial acknowledgment timed out')
+                self.changed.wait(remaining)
+            self.check()
 
     def close(self):
         self.stop.set()

@@ -27,6 +27,22 @@ TESTS = [('unit', 'telemetry::authentication::native_test::native_authentication
 MISSING_PROVENANCE = [('unit', 'telemetry::authentication::sudo_test::missing_sudo_executable_provenance_is_visible_without_inventing_authentication')]
 
 
+def configure_fixture_burst(configuration):
+    """Permit the deliberate denial burst in this private SSH fixture."""
+    def effective():
+        return subprocess.run(['/usr/sbin/sshd', '-T', '-f', str(configuration)],
+                              check=True, capture_output=True, text=True, timeout=10).stdout.splitlines()
+
+    # OpenSSH 9.8 introduced enabled-by-default source penalties. Connection
+    # drops are not authentication denials, so the controlled burst must opt
+    # out when this server supports the setting. Older servers reject it.
+    if any(line.startswith('persourcepenalties ') for line in effective()):
+        with configuration.open('a') as output:
+            output.write('PerSourcePenalties no\n')
+        if [line for line in effective() if line.startswith('persourcepenalties ')] != ['persourcepenalties no']:
+            raise RuntimeError('Private SSH fixture source-penalty policy was not applied')
+
+
 def inside():
     # This fixture writes PAM policy. Refuse host execution even if someone sets
     # the marker environment variable and calls --inside-container directly.
@@ -54,6 +70,8 @@ def inside():
     os.chown(authorized, 60000, 60000)
     (root/'sshd.conf').write_text('Port 2222\nListenAddress 127.0.0.1\nHostKey /fixture/host\nPidFile /fixture/sshd.pid\nAuthorizedKeysFile .ssh/authorized_keys\nUsePAM no\nPasswordAuthentication no\nPubkeyAuthentication yes\nPermitRootLogin no\nLogLevel VERBOSE\n')
     (root/'pam-sshd.conf').write_text('Port 2223\nListenAddress 127.0.0.1\nHostKey /fixture/host\nPidFile /fixture/pam-sshd.pid\nUsePAM yes\nPasswordAuthentication yes\nPubkeyAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nAllowUsers fixture\nLogLevel VERBOSE\n')
+    for configuration in (root/'sshd.conf', root/'pam-sshd.conf'):
+        configure_fixture_burst(configuration)
     # Both PAM stacks exist only in this network-isolated fixture's tmpfs.
     # pam_permit deliberately models fallback success after pam_unix fails;
     # it must never become host policy or production provisioning.
