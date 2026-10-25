@@ -273,7 +273,7 @@ fn signed_images(state: &Path, session: &str, helper: &Path) -> Result<(Vec<u8>,
         // Distinct signing identifiers produce separate clean/blocked bytes.
         let sign = |label: &str| -> Result<Vec<u8>> {
             let path = state.join(format!("image-template-{label}"));
-            service::write(&path, &original, 0o700)?;
+            service::write_health_image(&path, &original)?;
             let (code, output) = child::run(
                 Command::new("/usr/bin/codesign")
                     .args([

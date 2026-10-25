@@ -1,5 +1,21 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
+
+#[test]
+fn image_budget_does_not_expand_journals_or_replace_bytes_after_refusal() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("image");
+    let bytes = vec![b'x'; 262145];
+    assert!(write(&path, &bytes, 0o600).is_err());
+    assert!(!path.exists());
+    write_health_image(&path, &bytes).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o700);
+    assert!(write_health_image(&path, &vec![0; 16 * 1024 * 1024 + 1]).is_err());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+}
+
 fn plan() -> Plan {
     Plan {
         engine_libraries: Vec::new(),

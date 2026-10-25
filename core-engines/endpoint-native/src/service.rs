@@ -177,14 +177,23 @@ pub fn read_plan(path: &Path) -> Result<Plan> {
     Ok(plan)
 }
 pub(crate) fn write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    if bytes.len() > 262144
+    write_bounded(path, bytes, mode, 262144)
+}
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn write_health_image(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_bounded(path, bytes, 0o700, 16 * 1024 * 1024)
+}
+fn write_bounded(path: &Path, bytes: &[u8], mode: u32, limit: usize) -> Result<()> {
+    if bytes.len() > limit
         || fs::read_dir(path.parent().ok_or("Missing service directory")?)?
             .take(4097)
             .collect::<std::io::Result<Vec<_>>>()?
             .len()
             > 4096
     {
-        return Err("Native service journal capacity exhausted; review required".into());
+        return Err(
+            "Native service write exceeds its byte or directory budget; review required".into(),
+        );
     }
     let mut random = [0; 16];
     getrandom::fill(&mut random)?;
