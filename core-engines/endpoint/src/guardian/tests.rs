@@ -207,6 +207,36 @@ fn confirmed_controller_and_agent_bytes_are_checked_before_launch() {
 }
 
 #[test]
+fn process_image_identity_accepts_native_path_spelling_and_rejects_alias_roles() {
+    let f = fixture();
+    let canonical = std::env::current_exe().unwrap().canonicalize().unwrap();
+    #[cfg(windows)]
+    let ordinary = PathBuf::from(canonical.to_str().unwrap().strip_prefix(r"\\?\").unwrap());
+    #[cfg(not(windows))]
+    let ordinary = canonical.clone();
+    assert!(current_image_is(&canonical).unwrap());
+    assert!(current_image_is(&ordinary).unwrap());
+    assert!(!current_image_is(&f.agent).unwrap());
+    assert!(current_image_is(&f.state.join("missing-image")).is_err());
+
+    let (mut config, _) = configuration(&f.state).unwrap();
+    config.updates = Default::default();
+    assert!(paths(&config, &ordinary, &f.agent).is_err());
+    assert!(paths(&config, &f.controller, &ordinary).is_err());
+    #[cfg(windows)]
+    {
+        let alias = PathBuf::from(f.agent.to_str().unwrap().strip_prefix(r"\\?\").unwrap());
+        assert!(paths(&config, &f.agent, &alias).is_err());
+    }
+    #[cfg(unix)]
+    {
+        let link = f.state.join("image-link");
+        std::os::unix::fs::symlink(&canonical, &link).unwrap();
+        assert!(current_image_is(&link).is_err());
+    }
+}
+
+#[test]
 #[cfg(any(target_os = "linux", windows))]
 fn fleet_request_requires_separate_policy_and_retains_an_immutable_receipt() {
     let f = fixture();

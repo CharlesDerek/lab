@@ -222,14 +222,17 @@ pub(crate) fn quiescent(state: &Path) -> Result<Option<StateLock>> {
     Ok(Some(acquire(state)?))
 }
 fn paths(config: &Config, controller: &Path, agent: &Path) -> Result<()> {
-    if controller == agent
-        || std::env::current_exe()?.canonicalize()? == controller
-        || std::env::current_exe()?.canonicalize()? == agent
+    update::check_destination(controller)?;
+    update::check_destination(agent)?;
+    let controller_image = controller.canonicalize()?;
+    let agent_image = agent.canonicalize()?;
+    let current_image = std::env::current_exe()?.canonicalize()?;
+    if controller_image == agent_image
+        || current_image == controller_image
+        || current_image == agent_image
     {
         return Err("Launcher, controller and agent must be distinct executable copies".into());
     }
-    update::check_destination(controller)?;
-    update::check_destination(agent)?;
     if config.updates.enabled()
         && (config.updates.install_path.as_deref() != Some(agent)
             || config
@@ -247,6 +250,12 @@ fn paths(config: &Config, controller: &Path, agent: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+fn current_image_is(path: &Path) -> Result<bool> {
+    // Keep policy/lease spellings intact, but compare both process images in
+    // canonical form (Windows adds a verbatim prefix). Reject links first.
+    update::no_links(path)?;
+    Ok(std::env::current_exe()?.canonicalize()? == path.canonicalize()?)
 }
 fn admit(config: &Config, r: &Request, state: &Path) -> Result<()> {
     if let Some(d) = &r.deployment {
@@ -442,7 +451,7 @@ pub(crate) fn supervised(state: &Path) -> bool {
         };
         Ok(crate::supervisor::child_context(state).is_some()
             && crate::supervisor::controller_is(state, parent)?
-            && std::env::current_exe()?.canonicalize()? == l.agent
+            && current_image_is(&l.agent)?
             && guard_parent(parent).is_ok())
     };
     check().unwrap_or(false)
@@ -489,7 +498,7 @@ pub(crate) fn enter(state: &Path) -> Result<()> {
     loop {
         if let Some(l) = context(state)? {
             if l.controller_pid == Some(std::process::id())
-                && std::env::current_exe()?.canonicalize()? == l.controller
+                && current_image_is(&l.controller)?
                 && crate::file_hash(&l.controller)? == l.controller_sha256
             {
                 guard_parent(l.launcher_pid)?;
@@ -528,7 +537,7 @@ pub(crate) fn controller_allowed(state: &Path, t: &Transaction) -> Result<bool> 
         return Ok(false);
     };
     Ok(l.controller_pid == Some(std::process::id())
-        && std::env::current_exe()?.canonicalize()? == l.controller
+        && current_image_is(&l.controller)?
         && crate::file_hash(&l.controller)? == t.release.release.sha256
         && guard_parent(l.launcher_pid).is_ok())
 }
@@ -539,7 +548,7 @@ pub(crate) fn work_allowed(state: &Path, t: &Transaction) -> Result<bool> {
     let Some(parent) = l.controller_pid else {
         return Ok(false);
     };
-    Ok(std::env::current_exe()?.canonicalize()? == l.agent
+    Ok(current_image_is(&l.agent)?
         && crate::supervisor::controller_is(state, parent)?
         && guard_parent(parent).is_ok())
 }
