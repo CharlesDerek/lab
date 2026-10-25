@@ -63,6 +63,135 @@ fn scratch_access_probe(path: &Path) {
     );
 }
 
+fn scratch_acl_probe(ready: &Health, token: &Token) {
+    use std::{
+        mem::size_of_val,
+        os::windows::{
+            fs::OpenOptionsExt,
+            io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        },
+        ptr::null_mut,
+    };
+    use windows_sys::Win32::{
+        Foundation::LocalFree,
+        Security::{Authorization::*, *},
+        Storage::FileSystem::*,
+    };
+    let mut raw_token = null_mut();
+    assert_ne!(
+        unsafe {
+            DuplicateToken(
+                token.handle().as_raw_handle(),
+                SecurityImpersonation,
+                &mut raw_token,
+            )
+        },
+        0
+    );
+    let impersonation = unsafe { OwnedHandle::from_raw_handle(raw_token) };
+    let mut privilege = TOKEN_PRIVILEGES::default();
+    let mut returned = 0;
+    assert_ne!(
+        unsafe {
+            GetTokenInformation(
+                impersonation.as_raw_handle(),
+                TokenPrivileges,
+                (&mut privilege as *mut TOKEN_PRIVILEGES).cast(),
+                size_of_val(&privilege) as u32,
+                &mut returned,
+            )
+        },
+        0
+    );
+    assert_eq!(privilege.PrivilegeCount, 1);
+    eprintln!(
+        "scanner retained privilege enabled={}",
+        privilege.Privileges[0].Attributes & SE_PRIVILEGE_ENABLED != 0
+    );
+    let objects = [
+        ("root", ready.target.volume.clone()),
+        ("scratch", ready.path.to_str().unwrap().to_owned()),
+        (
+            "volume-device",
+            ready.target.volume.trim_end_matches('\\').to_owned(),
+        ),
+        (
+            "physical-device",
+            format!(r"\\.\PhysicalDrive{}", ready.target.disk_number),
+        ),
+    ];
+    struct Descriptor(*mut std::ffi::c_void);
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            unsafe {
+                LocalFree(self.0);
+            }
+        }
+    }
+    for (kind, path) in objects {
+        let opened = std::fs::OpenOptions::new()
+            .access_mode(READ_CONTROL)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path);
+        let file = match opened {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!(
+                    "scratch ACL object={kind}, open error={:?}",
+                    error.raw_os_error()
+                );
+                continue;
+            }
+        };
+        let mut raw = null_mut();
+        let error = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                &mut raw,
+            )
+        };
+        let descriptor = Descriptor(raw);
+        if error != 0 {
+            eprintln!("scratch ACL object={kind}, query error={error}");
+            continue;
+        }
+        for access in [FILE_TRAVERSE, FILE_READ_ATTRIBUTES, FILE_ADD_FILE] {
+            let mapping = GENERIC_MAPPING {
+                GenericRead: FILE_GENERIC_READ,
+                GenericWrite: FILE_GENERIC_WRITE,
+                GenericExecute: FILE_GENERIC_EXECUTE,
+                GenericAll: FILE_ALL_ACCESS,
+            };
+            let mut privileges = [0u64; 128];
+            let mut length = size_of_val(&privileges) as u32;
+            let (mut granted, mut allowed) = (0, 0);
+            assert_ne!(
+                unsafe {
+                    AccessCheck(
+                        descriptor.0,
+                        impersonation.as_raw_handle(),
+                        access,
+                        &mapping,
+                        privileges.as_mut_ptr().cast(),
+                        &mut length,
+                        &mut granted,
+                        &mut allowed,
+                    )
+                },
+                0
+            );
+            eprintln!("scratch ACL object={kind}, access={access:#x}, allowed={allowed}, granted={granted:#x}");
+        }
+    }
+}
+
 fn raw_device_access_is_denied() {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::{
@@ -318,6 +447,7 @@ fn owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit() {
     changed.directory.file_id[0] ^= 0xff;
     assert!(validate_observation(&state, &changed, token.logon_sid()).is_err());
     assert!(recovery::clean(&state).is_err());
+    scratch_acl_probe(&ready, &token);
     run_scanner(&state, &Token::new().unwrap(), &ready, true);
     // Inherited access on an existing SYSTEM-created child is an independent
     // diagnostic of the scanner's create-file permissions on the directory.

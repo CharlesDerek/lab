@@ -1032,7 +1032,7 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `f155939`](https://github.com/CharlesDerek/lab/actions/runs/40218467592)
+and task cleanup using mocked commands. The [hosted run at `2c7d90c`](https://github.com/CharlesDerek/lab/actions/runs/40218949104)
 passed ten of eleven checks on Windows Server 2022 as LocalSystem in session
 zero. The retained report was checked against its source commit and input-manifest
 hash. Scanner startup/cleanup, private-state access, both workspace cleanup cases,
@@ -1043,12 +1043,13 @@ already does for `SystemRoot`. Native formatting, filesystem preparation and
 worker readiness pass. The unrelated logon is denied access as expected, but the
 intended scanner logon also receives access denied on its first file creation.
 Test-only probes show that directory metadata, traversal and an existing fixture
-file are also denied. The attachment now grants only `FILE_TRAVERSE` to the
-validated scanner logon; filesystem permissions remain separate. The next native
-run checks this change together with explicit refusal of raw volume/disk data,
-attribute and security access for both scanner logons, using SYSTEM read controls
-on the exact identity-checked devices. Capacity enforcement and full worker
-cleanup remain unverified.
+file are also denied. A traversal-only attachment grant did not resolve this
+refusal and has been removed. Both scanner logons were denied raw volume/disk
+data, attribute and security access, with SYSTEM read controls on the exact
+identity-checked devices. Test-only access checks now compare the actual root,
+scratch and device ACLs against the restricted token, reporting only object
+kinds, rights and results. Capacity enforcement and full worker cleanup remain
+unverified.
 
 Initialization creates the owned MSR when the new GPT is empty, verifies its
 arrival, then adds data. The read-only partition-device query uses numbers derived

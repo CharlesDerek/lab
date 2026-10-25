@@ -326,25 +326,12 @@ impl FreshDisk {
         Ok(Self(image))
     }
     pub fn attach(self) -> Result<AttachedDisk> {
-        self.attach_with_security(windows_scanner::descriptor(
-            "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)",
-        )?)
-    }
-    /// Permit this logon to traverse the attached device's namespace. Raw
-    /// device data, attributes and security remain restricted to SYSTEM/admins;
-    /// the freshly formatted filesystem grants its own separate scratch rights.
-    pub fn attach_for_scanner(self, logon: &str) -> Result<AttachedDisk> {
-        validate_logon(logon)?;
-        self.attach_with_security(windows_scanner::descriptor(&format!(
-            "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x20;;;{logon})"
-        ))?)
-    }
-    fn attach_with_security(self, security: windows_scanner::Allocation) -> Result<AttachedDisk> {
         let _privilege = privilege::ManageVolume::acquire()?;
         self.0.verify()?;
         if self.0.loaded()? {
             return Err("Scratch image was already attached".into());
         }
+        let security = windows_scanner::descriptor("O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)")?;
         let parameters = ATTACH_VIRTUAL_DISK_PARAMETERS {
             Version: ATTACH_VIRTUAL_DISK_VERSION_1,
             ..Default::default()
