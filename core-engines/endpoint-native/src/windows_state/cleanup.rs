@@ -47,7 +47,10 @@ fn information<T: Default>(file: &File, class: FILE_INFO_BY_HANDLE_CLASS) -> Res
         )
     } == 0
     {
-        return Err(io::Error::last_os_error().into());
+        let error = io::Error::last_os_error();
+        #[cfg(test)]
+        eprintln!("Cleanup GetFileInformationByHandleEx class {class}: {error}");
+        return Err(error.into());
     }
     Ok(info)
 }
@@ -61,8 +64,10 @@ pub(super) fn identity(file: &File) -> Result<WorkspaceIdentity> {
         file_id: info.FileId.Identifier,
     })
 }
-fn status(code: i32) -> Result<()> {
+fn status(code: i32, _operation: &str) -> Result<()> {
     if code != 0 {
+        #[cfg(test)]
+        eprintln!("Cleanup {_operation}: NTSTATUS 0x{:08x}", code as u32);
         return Err(
             io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(code) } as i32).into(),
         );
@@ -100,28 +105,31 @@ fn open(parent: &File, leaf: &[u16], directory: bool) -> Result<File> {
         } else {
             0
         };
-    status(unsafe {
-        NtCreateFile(
-            &mut raw,
-            access,
-            &attributes,
-            &mut io,
-            null(),
-            0,
-            FILE_SHARE_READ,
-            FILE_OPEN,
-            FILE_SYNCHRONOUS_IO_NONALERT
-                | FILE_OPEN_REPARSE_POINT
-                | FILE_OPEN_NO_RECALL
-                | if directory {
-                    FILE_DIRECTORY_FILE
-                } else {
-                    FILE_NON_DIRECTORY_FILE
-                },
-            null(),
-            0,
-        )
-    })?;
+    status(
+        unsafe {
+            NtCreateFile(
+                &mut raw,
+                access,
+                &attributes,
+                &mut io,
+                null(),
+                0,
+                FILE_SHARE_READ,
+                FILE_OPEN,
+                FILE_SYNCHRONOUS_IO_NONALERT
+                    | FILE_OPEN_REPARSE_POINT
+                    | FILE_OPEN_NO_RECALL
+                    | if directory {
+                        FILE_DIRECTORY_FILE
+                    } else {
+                        FILE_NON_DIRECTORY_FILE
+                    },
+                null(),
+                0,
+            )
+        },
+        "NtCreateFile",
+    )?;
     if raw.is_null() {
         return Err("Windows cleanup returned no file handle".into());
     }
@@ -175,6 +183,8 @@ fn batch(directory: &File, restart: bool) -> Result<Option<Vec<Entry>>> {
         {
             return Ok(None);
         }
+        #[cfg(test)]
+        eprintln!("Cleanup directory enumeration: {error}");
         return Err(error.into());
     }
     let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast(), wire::BUFFER) };
@@ -195,11 +205,17 @@ fn unlink(file: File, parent: &File) -> Result<()> {
         )
     } == 0
     {
-        return Err(io::Error::last_os_error().into());
+        let error = io::Error::last_os_error();
+        #[cfg(test)]
+        eprintln!("Cleanup SetFileInformationByHandle FileDispositionInfoEx: {error}");
+        return Err(error.into());
     }
     drop(file);
     let mut io = IO_STATUS_BLOCK::default();
-    status(unsafe { NtFlushBuffersFileEx(parent.as_raw_handle(), 0, null(), 0, &mut io) })
+    status(
+        unsafe { NtFlushBuffersFileEx(parent.as_raw_handle(), 0, null(), 0, &mut io) },
+        "NtFlushBuffersFileEx",
+    )
 }
 fn clear(directory: &File, volume: u64, depth: usize, budget: &mut Budget) -> Result<()> {
     let mut restart = true;

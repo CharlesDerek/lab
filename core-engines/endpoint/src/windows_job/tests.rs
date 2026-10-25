@@ -68,6 +68,83 @@ fn process(pid: u32) -> OwnedHandle {
 fn finished(handle: &OwnedHandle, millis: u32) -> bool {
     unsafe { WaitForSingleObject(handle.as_raw_handle(), millis) == WAIT_OBJECT_0 }
 }
+// Read-only diagnostics for loader failure. Do not broaden the restricted token
+// or change system/runtime ACLs to make a fixture executable start.
+fn log_scanner_runtime_access(token: &athernex_endpoint_native::windows_scanner::Token) {
+    use std::{os::windows::fs::OpenOptionsExt, path::PathBuf};
+    use windows_sys::Win32::{
+        Security::{ImpersonateLoggedOnUser, RevertToSelf},
+        Storage::FileSystem::{FILE_GENERIC_EXECUTE, FILE_GENERIC_READ},
+        System::{
+            ProcessStatus::{K32EnumProcessModules, K32GetModuleFileNameExW},
+            Threading::GetCurrentProcess,
+        },
+    };
+    let mut modules = [null_mut(); 128];
+    let mut bytes = 0;
+    let process = unsafe { GetCurrentProcess() };
+    if unsafe {
+        K32EnumProcessModules(
+            process,
+            modules.as_mut_ptr(),
+            size_of_val(&modules) as u32,
+            &mut bytes,
+        )
+    } == 0
+    {
+        eprintln!(
+            "Cannot enumerate scanner runtime diagnostics: {}",
+            io::Error::last_os_error()
+        );
+        return;
+    }
+    let mut paths = Vec::new();
+    for module in modules
+        .iter()
+        .take((bytes as usize / size_of::<HANDLE>()).min(modules.len()))
+    {
+        let mut name = [0u16; 2048];
+        let size = unsafe {
+            K32GetModuleFileNameExW(process, *module, name.as_mut_ptr(), name.len() as u32)
+        } as usize;
+        if size > 0 && size < name.len() {
+            let path = PathBuf::from(OsString::from_wide(&name[..size]));
+            if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
+            {
+                paths.push(path);
+            }
+        }
+    }
+    struct Revert;
+    impl Drop for Revert {
+        fn drop(&mut self) {
+            if unsafe { RevertToSelf() } == 0 {
+                std::process::abort();
+            }
+        }
+    }
+    if unsafe { ImpersonateLoggedOnUser(token.handle().as_raw_handle()) } == 0 {
+        eprintln!(
+            "Cannot impersonate scanner for runtime diagnostics: {}",
+            io::Error::last_os_error()
+        );
+        return;
+    }
+    let _revert = Revert;
+    for path in paths {
+        let result = fs::OpenOptions::new()
+            .access_mode(FILE_GENERIC_READ | FILE_GENERIC_EXECUTE)
+            .open(&path);
+        let name = path.file_name().unwrap().to_string_lossy();
+        eprintln!(
+            "scanner runtime read/execute {}: {:?}",
+            name.chars().take(128).collect::<String>(),
+            result.map(|_| ()).map_err(|e| e.raw_os_error())
+        );
+    }
+}
 fn wait_release(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !path.exists() {
@@ -375,6 +452,9 @@ fn scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_s
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(code) = control.poll().unwrap() {
+            if code as u32 == 0xc0000135 {
+                log_scanner_runtime_access(&token);
+            }
             assert_eq!(
                 code,
                 0,
@@ -851,6 +931,9 @@ fn scanner_launch_has_checked_identity_job_limits_and_owned_cleanup() {
         .any(|v| v == b"SCANNER_READY")
     {
         if let Some(code) = service.poll().unwrap() {
+            if code as u32 == 0xc0000135 {
+                log_scanner_runtime_access(&token);
+            }
             panic!(
                 "scanner fixture exited with {code} (0x{:08x}): {}",
                 code as u32,

@@ -20,6 +20,12 @@ REGISTER = ROOT / 'core-engines/endpoint/src/installer/register.ps1'
 WRAPPER = r'''
 param([string]$Script, [string]$Mode)
 $ErrorActionPreference = 'Stop'
+# Let the real PowerShell/CLR initialize with the host environment. Replacing
+# SystemRoot before process startup prevents Windows cryptographic DLL loading.
+# Once the wrapper is running, every installer OS command below is mocked.
+$env:ProgramFiles = $env:ATHERNEX_FIXTURE_PROGRAM_FILES
+$env:ProgramData = $env:ATHERNEX_FIXTURE_PROGRAM_DATA
+$env:SystemRoot = $env:ATHERNEX_FIXTURE_SYSTEM_ROOT
 $global:trace = [Collections.Generic.List[object]]::new()
 $global:serviceStopped = $false
 $global:serviceStarted = $false
@@ -155,8 +161,9 @@ class InstallerTests(unittest.TestCase):
             wrapper.write_text(WRAPPER, encoding='utf-8')
             trace = folder / 'trace.json'
             env = dict(os.environ, ATHERNEX_TRACE=str(trace), ATHERNEX_CASE=case,
-                       ProgramFiles=str(folder / 'Program Files'), ProgramData=str(folder / 'ProgramData'),
-                       SystemRoot=str(folder / 'Windows'),
+                       ATHERNEX_FIXTURE_PROGRAM_FILES=str(folder / 'Program Files'),
+                       ATHERNEX_FIXTURE_PROGRAM_DATA=str(folder / 'ProgramData'),
+                       ATHERNEX_FIXTURE_SYSTEM_ROOT=str(folder / 'Windows'),
                        ATHERNEX_INSTALL_STATE=r'C:\ProgramData\State with spaces',
                        ATHERNEX_INSTALL_AGENT=r'C:\Program Files\Endpoint\agent.exe',
                        ATHERNEX_INSTALL_CONTROLLER=r'C:\Program Files\Endpoint\controller.exe',
