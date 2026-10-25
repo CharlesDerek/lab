@@ -101,7 +101,7 @@ class IsolationRunnerTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
             value = json.loads((root/'result.json').read_text(encoding='utf-8-sig'))
             if wrapper_source == WRAPPER:
-                self.assertEqual(value['count'], 6)
+                self.assertEqual(value['count'], 8)
             return value
 
     def test_exact_native_identity_and_complete_report_are_required(self):
@@ -126,7 +126,7 @@ class IsolationRunnerTests(unittest.TestCase):
 
     def test_independent_failures_collect_remaining_checks_but_changed_input_stops_execution(self):
         for case, executed, passed, failures, failed in [
-                ('passed', 6, 6, 0, False), ('first-fails', 6, 5, 1, True),
+                ('passed', 8, 8, 0, False), ('first-fails', 8, 7, 1, True),
                 ('changed-input', 0, 0, 0, True)]:
             with self.subTest(case=case):
                 value = self.run_case(case, WORKER_WRAPPER)

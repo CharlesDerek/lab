@@ -73,6 +73,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Task runner control-flow tests failed' }
           python tools/test_windows_isolation_ci.py -v
           if ($LASTEXITCODE -ne 0) { throw 'Isolation evidence tests failed' }
+          python tools/test_windows_scratch_formatter.py --powershell "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -v
+          if ($LASTEXITCODE -ne 0) { throw 'Scratch formatter rejection tests failed' }
       - name: Build and select exact native isolation test executables
         shell: pwsh
         env:
@@ -86,7 +88,7 @@ jobs:
             if ($matches.Count -ne 1) { throw ('Expected one test executable for ' + $entry[0]) }
             ($entry[1] + '=' + $matches[0].executable) >> $env:GITHUB_ENV
           }
-      - name: Verify scanner identity, filesystem isolation, WFP enforcement and recovery as LocalSystem
+      - name: Verify scanner identity, WFP confinement, bounded scratch disk and crash recovery as LocalSystem
         timeout-minutes: 10
         shell: pwsh
         run: tools/verify_windows_isolation_ci.ps1 -EndpointTests "$env:ISOLATION_ENDPOINT_TESTS" -NativeTests "$env:ISOLATION_NATIVE_TESTS" -OutputDirectory "$env:RUNNER_TEMP/native-windows-isolation" -DisposableHost

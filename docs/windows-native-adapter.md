@@ -196,8 +196,9 @@ passed installation, policy readback, changed-journal refusal and outgoing TCP
 denials. Its UDP assertion failed because `sendto` returned success, which
 [does not establish delivery](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-sendto).
 The fixture now checks both IPv4 and IPv6 receivers, with working controls before,
-during and after policy enforcement. Successful enforcement and removal of the
-complete policy remain to be validated.
+during and after policy enforcement. The [run at `1c13d49`](https://github.com/CharlesDerek/lab/actions/runs/40212422060)
+passed these checks, forbidden TCP/listener checks, the permitted loopback round
+trip and idempotent policy removal after confirmed job exit.
 
 A fresh workspace contains copies of the executable, adjacent DLLs and flat
 signature files, with a combined 768 MiB staging budget and at most 256 source
@@ -408,8 +409,8 @@ datagrams before installation and after removal. An unexpected socket error
 cannot satisfy these checks. Changed-journal cleanup must be refused. Successful
 cleanup follows confirmed job exit. The test keeps its temporary workspace and
 prints its path; on failure, its private journal and scoped persistent rules
-remain available for recovery. Its latest native execution still failed; the
-complete network gate has not passed.
+remain available for recovery. It passed on the hosted Windows Server 2022 VM
+as LocalSystem in session zero at commit `1c13d49`.
 It does not restart BFE or change global firewall settings.
 
 The additional native gate
@@ -1002,17 +1003,25 @@ and [disposable Windows runner model](https://docs.github.com/en/actions/referen
 
 ## Hosted isolation validation
 
-The independent `windows-isolation` job runs six existing opt-in tests through
+The independent `windows-isolation` job runs eight existing opt-in tests through
 `tools/verify_windows_isolation_ci.ps1` as LocalSystem in session zero. They cover
 the scanner's restricted identity and job limits, private-state and engine access
 controls, workspace cleanup with external links and pinned files, partial scratch
-image recovery, and image-scoped WFP enforcement with a working loopback control.
-These tests do not load a driver, attach a disk, or format a volume.
+image recovery, image-scoped WFP enforcement with a working loopback control,
+owned scratch capacity and network-policy recovery after owner crashes.
+The scratch test creates and attaches one new private 256 MiB fixed VHDX. It
+formats only that volume after checking its GUID, partition identity, extent,
+unformatted state and lack of a drive letter; it never adopts an existing disk.
+The restricted scanner must reach native disk-full, while another scanner logon
+cannot write. Live owners and unreconciled network records must prevent cleanup;
+confirmed owner exit permits idempotent image/journal cleanup. No driver is loaded.
+The formatter's refusal tests run first against a mocked Storage module using
+the production Windows PowerShell interpreter.
 
 The runner stages only the two compiled library test executables in a new private
 directory. SHA-256 hashes bind the input manifest and each execution. Each exact
 test must appear in the ignored-test listing, exit successfully, and report one
-executed success. The final report must contain all six checks and the expected
+executed success. The final report must contain all eight checks and the expected
 native account, session and input-manifest hash. Missing, filtered or skipped tests
 cannot satisfy the gate. A bounded owned task and disposable VM contain a stalled
 fixture; failures retain scoped WFP/workspace journals for inspection and do not
@@ -1020,13 +1029,13 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `0f0b88b`](https://github.com/CharlesDerek/lab/actions/runs/40203647817)
-passed the private-state/engine access test, both workspace cleanup tests and
-partial scratch image recovery as LocalSystem. The
-[run at `7174961`](https://github.com/CharlesDerek/lab/actions/runs/40211580306)
-also passed scanner startup and cleanup, bringing the result to five of six.
-The remaining network test reached policy installation, readback and outgoing
-TCP denial before its UDP assertion failed. The complete six-check gate has
-**not passed**. This gate does not establish signed
+and task cleanup using mocked commands. The [hosted run at `1c13d49`](https://github.com/CharlesDerek/lab/actions/runs/40212422060)
+passed all six original checks on Windows Server 2022 as LocalSystem in session
+zero. The source commit and manifest hash were checked against the retained
+report: scanner startup/cleanup, private-state access, both workspace cleanup
+cases, partial scratch-image recovery and WFP enforcement/removal all passed.
+The two additional full scratch and crash-recovery checks are newly enabled and
+have no native result yet, so the expanded eight-check gate is still pending.
+This gate does not establish signed
 minifilter prevention, complete scanner confinement or hostile-administrator
 tamper resistance.

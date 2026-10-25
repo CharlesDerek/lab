@@ -1,7 +1,8 @@
 <#
 Run the existing opt-in isolation checks as LocalSystem on a disposable hosted VM.
-No driver is loaded and no disk is attached or formatted. WFP rules are scoped to
-a fresh fixture image. A failed check retains its private recovery journals.
+No driver is loaded. The scratch test creates, attaches, formats and fills only
+its new private 256 MiB VHDX; no existing disk is adopted. WFP rules are scoped
+to fresh fixture images. Failed checks retain their private recovery journals.
 Dot-sourcing defines helpers only.
 #>
 param([string]$EndpointTests, [string]$NativeTests, [string]$OutputDirectory,
@@ -14,7 +15,9 @@ function Get-IsolationChecks {
         @{ binary='native.exe'; test='windows_state::cleanup::tests::cleanup_preserves_external_links_streams_attributes_and_retries_pinned_entries' },
         @{ binary='native.exe'; test='windows_state::cleanup::tests::cleanup_refuses_root_redirection_and_reclaims_only_empty_unrecorded_orphans' },
         @{ binary='endpoint.exe'; test='protection::windows::scratch::tests::recovery_preserves_live_corrupt_changed_and_pinned_images_and_replays_deletion' },
-        @{ binary='endpoint.exe'; test='windows_job::tests::scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_service' }
+        @{ binary='endpoint.exe'; test='windows_job::tests::scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_service' },
+        @{ binary='endpoint.exe'; test='protection::windows::scratch::tests::owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit' },
+        @{ binary='endpoint.exe'; test='protection::windows::recovery::tests::recovery_reconciles_aborted_installs_owner_crashes_and_committed_deletions' }
     )
 }
 
@@ -69,8 +72,8 @@ function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report) {
             $Report.checks[$check.test] = 'failed'
             $Report.failures[$check.test] = $_.Exception.Message
         }
-        # Each test runs in a separate process with fresh fixture paths. The
-        # WFP check is last, so retained rules cannot affect later checks.
+        # Each test runs in a separate process with fresh fixture paths. WFP
+        # rules name only that test's private image, never the runner binary.
         $position += 1
     }
     if ($Report.failures.Count) { throw 'One or more native isolation checks failed' }
