@@ -7,6 +7,13 @@ fn failure(category: &str) -> Box<dyn std::error::Error + Send + Sync> {
     "Native audit setup source barrier failed".into()
 }
 
+fn supported_policy_version(version: Option<u8>) -> bool {
+    // Microsoft's 4719 page documents version 0. The source-bound disposable
+    // Server 2022 native validation also observed version 1. Both must still
+    // supply the exact named scope, subject and change fields checked below.
+    matches!(version, Some(0 | 1))
+}
+
 fn changes(value: &str) -> Result<(u32, u32)> {
     // These are raw event resource tokens, never localized formatted messages.
     // Primary mapping: Azure/Azure-Sentinel, Tools/ParameterizedFunction/
@@ -126,10 +133,12 @@ impl SourceBarrier {
                     super::super::diagnostics::source("setup_policy_provider_mismatch");
                     return Err(failure("setup_barrier_scope_invalid"));
                 }
-                if identity.version != Some(0) {
+                if identity.version == Some(1) {
+                    super::super::diagnostics::source("setup_policy_version_1");
+                }
+                if !supported_policy_version(identity.version) {
                     super::super::diagnostics::source(match identity.version {
                         None => "setup_policy_version_missing",
-                        Some(1) => "setup_policy_version_1",
                         _ => "setup_policy_version_other",
                     });
                     return Err(failure("setup_barrier_scope_invalid"));
@@ -189,6 +198,15 @@ impl SourceBarrier {
 }
 
 pub(in super::super) fn verify_setup_delta_parser() {
+    assert!(supported_policy_version(Some(0)));
+    assert!(supported_policy_version(Some(1)));
+    assert!(!supported_policy_version(None));
+    for version in 2..=u8::MAX {
+        assert!(
+            !supported_policy_version(Some(version)),
+            "An unsupported synthetic policy version was accepted"
+        );
+    }
     assert!(changes("%%8448, %%8450").is_ok_and(|value| value == (3, 0)));
     assert!(changes("%%8451, %%8449").is_ok_and(|value| value == (0, 3)));
     for invalid in [
