@@ -1032,7 +1032,7 @@ prove successful cleanup.
 
 Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
-and task cleanup using mocked commands. The [hosted run at `2c7d90c`](https://github.com/CharlesDerek/lab/actions/runs/40218949104)
+and task cleanup using mocked commands. The [hosted run at `c1c7030`](https://github.com/CharlesDerek/lab/actions/runs/40219591064)
 passed ten of eleven checks on Windows Server 2022 as LocalSystem in session
 zero. The retained report was checked against its source commit and input-manifest
 hash. Scanner startup/cleanup, private-state access, both workspace cleanup cases,
@@ -1043,13 +1043,15 @@ already does for `SystemRoot`. Native formatting, filesystem preparation and
 worker readiness pass. The unrelated logon is denied access as expected, but the
 intended scanner logon also receives access denied on its first file creation.
 Test-only probes show that directory metadata, traversal and an existing fixture
-file are also denied. A traversal-only attachment grant did not resolve this
-refusal and has been removed. Both scanner logons were denied raw volume/disk
+file are also denied. The actual ACL checks show that both the filesystem root
+and the volume device deny traversal to the restricted token, despite its
+enabled traversal privilege. Both boundaries now grant only `FILE_TRAVERSE` to
+the validated scanner logon. The root grant does not inherit or permit listing,
+creation or security changes. Both scanner logons were denied raw volume/disk
 data, attribute and security access, with SYSTEM read controls on the exact
-identity-checked devices. Test-only access checks now compare the actual root,
-scratch and device ACLs against the restricted token, reporting only object
-kinds, rights and results. Capacity enforcement and full worker cleanup remain
-unverified.
+identity-checked devices. The combined traversal correction, capacity enforcement
+and full worker cleanup await native verification. Test-only ACL diagnostics
+include the integrity label and report only object kinds, rights and results.
 
 Initialization creates the owned MSR when the new GPT is empty, verifies its
 arrival, then adds data. The read-only partition-device query uses numbers derived
@@ -1065,10 +1067,11 @@ access denied. State persistence now retries only access/sharing/lock errors for
 up to two seconds, using the same synchronized temporary file. It never unlinks
 the old destination or changes permissions; persistent denial still fails. Two
 native tests cover transient reader release and persistent refusal with unchanged
-old contents and no temporary-file leak. The Windows unit-test step containing
-both tests passed at `e115ccb`; its automatic installation, launcher-owned
-controller maintenance and controller delivery steps also passed. Remaining
-platform/fleet checks are tracked separately.
+old contents and no temporary-file leak. Both tests were individually confirmed
+passing in the completed Windows job log at `e115ccb`. Its complete platform job
+also passed automatic installation, launcher/controller recovery, agent and
+controller fleet promotion, installer checks and native SCM lifecycle. This
+does not satisfy the separate scratch isolation or production prevention gates.
 
 Image creation and verification now use `VirtualDiskId`, matching Microsoft's
 [VHDX identity implementation](https://github.com/microsoft/go-winio/blob/main/vhd/vhd.go).

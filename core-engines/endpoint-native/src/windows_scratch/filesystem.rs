@@ -200,7 +200,7 @@ impl UnformattedVolume {
         let root_id = identity(&root, &self.target.volume)?;
         space(&root, self.target.bytes)?;
         self.verify()?;
-        security::set_root(&root)?;
+        security::set_root(&root, logon)?;
         flush(&root)?;
         let scratch = create_scratch(&root, logon)?;
         let path = PathBuf::from(format!("{}scratch", self.target.volume));
@@ -232,7 +232,7 @@ impl ReadyVolume {
         {
             return Err("Scratch root or directory identity changed".into());
         }
-        security::verify(&self.root, &security::root()?)?;
+        security::verify(&self.root, &security::root(&self.logon)?)?;
         security::verify(&self.scratch, &security::scratch(&self.logon)?)?;
         space(&self.root, self.volume.target.bytes)
     }

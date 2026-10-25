@@ -8,8 +8,13 @@ use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
     PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
 };
-pub(super) fn root() -> Result<windows_scanner::Allocation> {
-    windows_scanner::descriptor("O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)S:(ML;;NW;;;ME)")
+pub(super) fn root(logon: &str) -> Result<windows_scanner::Allocation> {
+    validate_logon(logon)?;
+    // The restricted scanner must reach its child without listing or changing
+    // the volume root. This grant applies only to the root, never descendants.
+    windows_scanner::descriptor(&format!(
+        "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x20;;;{logon})S:(ML;;NW;;;ME)"
+    ))
 }
 pub(super) fn scratch(logon: &str) -> Result<windows_scanner::Allocation> {
     validate_logon(logon)?;
@@ -107,8 +112,8 @@ pub(super) fn verify(file: &File, descriptor: &windows_scanner::Allocation) -> R
     }
     Ok(())
 }
-pub(super) fn set_root(file: &File) -> Result<()> {
-    let descriptor = root()?;
+pub(super) fn set_root(file: &File, logon: &str) -> Result<()> {
+    let descriptor = root(logon)?;
     let parts = parts(&descriptor)?;
     check(unsafe {
         SetSecurityInfo(

@@ -149,7 +149,10 @@ fn scratch_acl_probe(ready: &Health, token: &Token) {
             GetSecurityInfo(
                 file.as_raw_handle(),
                 SE_FILE_OBJECT,
-                OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                OWNER_SECURITY_INFORMATION
+                    | GROUP_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | LABEL_SECURITY_INFORMATION,
                 null_mut(),
                 null_mut(),
                 null_mut(),
