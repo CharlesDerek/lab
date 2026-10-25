@@ -3,6 +3,8 @@
 //! Closing the noninherited job handle on owner death kills its descendants.
 //! This is lifecycle ownership, not a sandbox for privileged/delegated services.
 mod command;
+#[cfg(test)]
+mod debug;
 mod desktop;
 mod environment;
 mod handles;
@@ -454,6 +456,17 @@ fn spawn(
         // The creation worker has already exited with its job empty. Only this
         // restricted scanner connects to its private station and desktop.
         startup.StartupInfo.lpDesktop = desktop.as_mut().unwrap().startup.as_mut_ptr();
+        let flags = EXTENDED_STARTUPINFO_PRESENT
+            | CREATE_UNICODE_ENVIRONMENT
+            | CREATE_NO_WINDOW
+            | CREATE_SUSPENDED;
+        #[cfg(test)]
+        let flags = flags
+            | if debug::enabled() {
+                windows_sys::Win32::System::Threading::DEBUG_ONLY_THIS_PROCESS
+            } else {
+                0
+            };
         unsafe {
             CreateProcessAsUserW(
                 token.handle().as_raw_handle(),
@@ -462,10 +475,7 @@ fn spawn(
                 &attributes,
                 &attributes,
                 1,
-                EXTENDED_STARTUPINFO_PRESENT
-                    | CREATE_UNICODE_ENVIRONMENT
-                    | CREATE_NO_WINDOW
-                    | CREATE_SUSPENDED,
+                flags,
                 environment.as_ptr().cast(),
                 directory.map_or(null(), |d| d.as_ptr()),
                 &startup.StartupInfo,

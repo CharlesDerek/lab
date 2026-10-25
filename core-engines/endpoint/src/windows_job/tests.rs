@@ -982,11 +982,12 @@ fn scanner_launch_has_checked_identity_job_limits_and_owned_cleanup() {
     let images = workspace.directory("engine", false).unwrap();
     let scratch = workspace.directory("temporary", true).unwrap();
     let mut source = fs::File::open(std::env::current_exe().unwrap()).unwrap();
+    let image_name = format!("scanner-{}.exe", crate::secret().unwrap());
     images
-        .copy("scanner.exe", &mut source, &mut (512 * 1024 * 1024))
+        .copy(&image_name, &mut source, &mut (512 * 1024 * 1024))
         .unwrap();
-    let _image = images.pin("scanner.exe").unwrap();
-    let mut invocation = Command::new(images.path().join("scanner.exe"));
+    let _image = images.pin(&image_name).unwrap();
+    let mut invocation = Command::new(images.path().join(&image_name));
     invocation
         .env_clear()
         .env("SystemRoot", std::env::var_os("SystemRoot").unwrap())
@@ -1046,6 +1047,14 @@ fn scanner_launch_has_checked_identity_job_limits_and_owned_cleanup() {
                 log_scanner_runtime_access(&token);
             } else if code as u32 == 0xc0000142 {
                 log_scanner_station_access(&token);
+                // Preserve the original undebugged failure. A second launch
+                // collects bounded loader diagnostics and cannot pass this test.
+                let _loader_snaps = super::debug::LoaderSnaps::enable(&image_name).unwrap();
+                let mut diagnostic = super::debug::launch(|| {
+                    Service::start_scanner(&invocation, &token, 4096, |_, _| Ok(()))
+                })
+                .unwrap();
+                super::debug::capture_startup(&mut diagnostic).unwrap();
             }
             panic!(
                 "scanner fixture exited with {code} (0x{:08x}): {}",
