@@ -1043,6 +1043,11 @@ UNC/device namespaces, traversal, alternate streams and ambiguous components.
 Public response paths keep their existing syntax restrictions, and the worker
 still opens state through the pinned-directory and private-ACL checks. Native
 scratch formatting, capacity enforcement and complete cleanup remain pending.
+The [run at `cfe231b`](https://github.com/CharlesDerek/lab/actions/runs/40213187210)
+accepted the corrected request and created the image, then refused its reported
+identity/allocation/capacity metadata before attachment. Diagnostics now report
+the numeric fields and identity-match results, without image paths or random
+identifiers; all verification conditions remain enforced.
 This gate does not establish signed
 minifilter prevention, complete scanner confinement or hostile-administrator
 tamper resistance.

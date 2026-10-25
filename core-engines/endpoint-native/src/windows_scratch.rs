@@ -156,19 +156,27 @@ impl Image {
                 .ProviderSubtype
         };
         let size = unsafe { self.query(GET_VIRTUAL_DISK_INFO_SIZE)?.Anonymous.Size };
+        let identity_matches = same_guid(&identifier, &guid(&self.spec, Identifier::Image));
+        let storage_matches = kind.DeviceId == VIRTUAL_STORAGE_TYPE_DEVICE_VHDX
+            && same_guid(&kind.VendorId, &VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT);
+        let file_bytes = self.file.metadata()?.len();
         // Provider subtype 2 is fixed; dynamic/differencing images are refused.
-        if !same_guid(&identifier, &guid(&self.spec, Identifier::Image))
-            || kind.DeviceId != VIRTUAL_STORAGE_TYPE_DEVICE_VHDX
-            || !same_guid(&kind.VendorId, &VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT)
+        if !identity_matches
+            || !storage_matches
             || subtype != 2
             || size.VirtualSize != self.spec.bytes
             || size.BlockSize != 2 * MIB as u32
             || size.SectorSize != 512
             || size.PhysicalSize < self.spec.bytes
             || size.PhysicalSize > self.spec.bytes + MAX_OVERHEAD
-            || self.file.metadata()?.len() > self.spec.bytes + MAX_OVERHEAD
+            || file_bytes > self.spec.bytes + MAX_OVERHEAD
         {
-            return Err("Scratch image identity, fixed allocation or capacity changed".into());
+            // Numeric metadata and match results diagnose provider differences
+            // without exposing the image path or its random identifiers.
+            return Err(format!(
+                "Scratch image identity, fixed allocation or capacity changed: identity={identity_matches}, storage={storage_matches}, subtype={subtype}, virtual={}/{}, block={}, sector={}, physical={}, file={file_bytes}",
+                size.VirtualSize, self.spec.bytes, size.BlockSize, size.SectorSize, size.PhysicalSize
+            ).into());
         }
         Ok(())
     }
