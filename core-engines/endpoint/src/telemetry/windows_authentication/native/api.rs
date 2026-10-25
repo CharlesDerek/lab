@@ -23,10 +23,10 @@ impl Drop for Handle {
     }
 }
 pub(super) fn failure(operation: &str) -> Box<dyn std::error::Error + Send + Sync> {
-    format!("{operation} failed with Windows error {}", unsafe {
-        GetLastError()
-    })
-    .into()
+    let code = unsafe { GetLastError() };
+    #[cfg(test)]
+    super::super::diagnostics::native("source_api", code);
+    format!("{operation} failed with Windows error {code}").into()
 }
 pub(super) fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain([0]).collect()
@@ -42,6 +42,8 @@ pub(super) fn next(query: &Handle) -> Result<Option<Handle>> {
         if code == ERROR_NO_MORE_ITEMS {
             return Ok(None);
         }
+        #[cfg(test)]
+        super::super::diagnostics::native("source_next", code);
         return Err(
             format!("Windows Security enumeration failed with Windows error {code}").into(),
         );
@@ -54,7 +56,7 @@ pub(super) fn next(query: &Handle) -> Result<Option<Handle>> {
 }
 pub(super) fn text(event: &Handle, flags: u32, max_bytes: usize) -> Result<String> {
     let (mut required, mut count) = (0, 0);
-    if unsafe {
+    let rendered = unsafe {
         EvtRender(
             0,
             event.0,
@@ -64,8 +66,14 @@ pub(super) fn text(event: &Handle, flags: u32, max_bytes: usize) -> Result<Strin
             &mut required,
             &mut count,
         )
-    } != 0
-        || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER
+    };
+    let code = unsafe { GetLastError() };
+    #[cfg(test)]
+    if rendered == 0 && code != ERROR_INSUFFICIENT_BUFFER {
+        super::super::diagnostics::native("source_render_probe", code);
+    }
+    if rendered != 0
+        || code != ERROR_INSUFFICIENT_BUFFER
         || required < 2
         || required as usize > max_bytes * 2 + 2
         || required % 2 != 0
@@ -110,7 +118,7 @@ pub(super) struct Values {
 impl Values {
     pub fn render(context: &Handle, event: &Handle, count: usize) -> Result<Self> {
         let (mut required, mut actual) = (0, 0);
-        if unsafe {
+        let rendered = unsafe {
             EvtRender(
                 context.0,
                 event.0,
@@ -120,8 +128,14 @@ impl Values {
                 &mut required,
                 &mut actual,
             )
-        } != 0
-            || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER
+        };
+        let code = unsafe { GetLastError() };
+        #[cfg(test)]
+        if rendered == 0 && code != ERROR_INSUFFICIENT_BUFFER {
+            super::super::diagnostics::native("source_render_probe", code);
+        }
+        if rendered != 0
+            || code != ERROR_INSUFFICIENT_BUFFER
             || required as usize > 16_384
             || (required as usize) < count * size_of::<EVT_VARIANT>()
         {

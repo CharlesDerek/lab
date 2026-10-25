@@ -123,7 +123,11 @@ impl Reader {
             unsafe { EvtOpenLog(0, windows_sys::core::w!("Security"), EvtOpenChannelPath) },
             "Windows Security log metadata open",
         )?;
+        #[cfg(test)]
+        super::diagnostics::source("log_opened");
         let created = policy::log_created(&log)?;
+        #[cfg(test)]
+        super::diagnostics::source("log_identity_ready");
         if self.last_policy.elapsed() >= Duration::from_secs(1) {
             self.policy_error = match policy::check() {
                 Ok(()) => String::new(),
@@ -131,6 +135,8 @@ impl Reader {
             };
             self.last_policy = Instant::now();
         }
+        #[cfg(test)]
+        super::diagnostics::source("audit_policy_checked");
         let error = if !policy::enabled()? {
             "Windows Security channel is disabled".into()
         } else if policy::log_full(&log)? {
@@ -138,6 +144,8 @@ impl Reader {
         } else {
             self.policy_error.clone()
         };
+        #[cfg(test)]
+        super::diagnostics::source("channel_health_checked");
         Ok((created, error))
     }
     fn checkpoint(
@@ -171,9 +179,17 @@ impl Reader {
         let _security = privilege::SecurityPrivilege::acquire().ok();
         let (created, error) = self.source()?;
         let query = Self::query(true)?;
+        #[cfg(test)]
+        super::diagnostics::source("baseline_query_ready");
         let event = api::next(&query)?.ok_or("Windows Security log has no baseline record")?;
+        #[cfg(test)]
+        super::diagnostics::source("baseline_record_ready");
         let identity = Identity::read(&self.context, &event)?;
+        #[cfg(test)]
+        super::diagnostics::source("baseline_identity_ready");
         let checkpoint = Self::checkpoint(&event, &identity, created, error.is_empty())?;
+        #[cfg(test)]
+        super::diagnostics::source("baseline_bookmark_ready");
         Ok((checkpoint, error))
     }
     fn seek_anchor(&self, query: &Handle, previous: &Checkpoint) -> Result<bool> {
@@ -193,6 +209,8 @@ impl Reader {
         } == 0
         {
             let code = unsafe { GetLastError() };
+            #[cfg(test)]
+            super::diagnostics::native("source_seek", code);
             return match code {
                 ERROR_NOT_FOUND
                 | ERROR_EVT_QUERY_RESULT_STALE

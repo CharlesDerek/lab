@@ -92,7 +92,8 @@ function Get-AuthenticationStages([string]$Log) {
 function Get-AuthenticationDiagnostics([string]$Log) {
     # Numeric API failures only, under fixed operation names. This field is
     # diagnostic evidence and cannot make a failed or skipped test pass.
-    $allowed = @('privilege_acquire','policy_query','policy_clear','policy_apply')
+    $allowed = @('privilege_acquire','policy_query','policy_clear','policy_apply',
+        'source_api','source_next','source_seek','source_render_probe')
     if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
     try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
     catch { return }
@@ -107,6 +108,29 @@ function Get-AuthenticationDiagnostics([string]$Log) {
                 @{ operation=$operation; win32_error=$code }
                 $count += 1
                 if ($count -ge 32) { return }
+                break
+            }
+        }
+    }
+}
+
+function Get-AuthenticationSource([string]$Log) {
+    # A bounded set of observed milestones/error categories, in canonical order.
+    # The fixture classifies private errors locally; no error text is accepted.
+    $allowed = @('connection_ready','worker_entered','durable_state_ready','initial_health_saved',
+        'reader_opened','log_opened','log_identity_ready','audit_policy_checked','channel_health_checked',
+        'baseline_query_ready','baseline_record_ready','baseline_identity_ready','baseline_bookmark_ready',
+        'baseline_committed','worker_ready','collector_started','startup_timeout','startup_disconnected',
+        'startup_failed','health_read_failed','health_missing','health_incomplete','worker_failed',
+        'invalid_property_type','invalid_native_identity','invalid_render_size','invalid_render_text',
+        'invalid_log_metadata','invalid_bookmark','empty_baseline','source_error_other')
+    if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return }
+    try { $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop) }
+    catch { return }
+    foreach ($category in $allowed) {
+        foreach ($line in $lines) {
+            if ([string]::Equals($line, ('ATHERNEX_AUTH_SOURCE=' + $category), [StringComparison]::Ordinal)) {
+                $category
                 break
             }
         }
@@ -134,6 +158,7 @@ function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report,
             if ($Suite -ceq 'Authentication') {
                 $Report.authentication_stages = @(Get-AuthenticationStages $log)
                 $Report.authentication_diagnostics = @(Get-AuthenticationDiagnostics $log)
+                $Report.authentication_source = @(Get-AuthenticationSource $log)
             }
         }
         # Each test runs in a separate process with fresh fixture paths. WFP
@@ -161,6 +186,7 @@ function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost,
     if ($Suite -ceq 'Authentication') {
         $report.authentication_stages = @()
         $report.authentication_diagnostics = @()
+        $report.authentication_source = @()
     }
     $authenticationOptIn = 'ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST'
     $previousOptIn = [Environment]::GetEnvironmentVariable($authenticationOptIn, 'Process')

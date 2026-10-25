@@ -136,8 +136,28 @@ fn run(policy: &host::Policy, account: &host::Account) {
     let db = state.join("endpoint.sqlite3");
     let store = Store::open(&state).unwrap();
     println!("\nATHERNEX_AUTH_STAGE=source_starting");
-    let collector = Collector::start(&store).unwrap();
-    until(|| health(&store).unwrap().unwrap().healthy(now_ms()));
+    let collector = Collector::start(&store).unwrap_or_else(|error| {
+        diagnostics::source("startup_failed");
+        diagnostics::classify(error.as_ref());
+        panic!("Native Security collector did not start");
+    });
+    diagnostics::source("collector_started");
+    until(|| {
+        let status = health(&store)
+            .unwrap_or_else(|_| {
+                diagnostics::source("health_read_failed");
+                panic!("Native Security health could not be read");
+            })
+            .unwrap_or_else(|| {
+                diagnostics::source("health_missing");
+                panic!("Native Security health is missing");
+            });
+        let healthy = status.healthy(now_ms());
+        if !healthy {
+            diagnostics::source("health_incomplete");
+        }
+        healthy
+    });
     println!("\nATHERNEX_AUTH_STAGE=source_ready");
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();

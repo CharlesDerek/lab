@@ -157,6 +157,10 @@ function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [
         'ATHERNEX_AUTH_DIAGNOSTIC=policy_clear:5',
         'ATHERNEX_AUTH_DIAGNOSTIC=policy_apply:4294967295',
         'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:0',
+        'ATHERNEX_AUTH_DIAGNOSTIC=source_api:5',
+        'ATHERNEX_AUTH_DIAGNOSTIC=source_next:1314',
+        'ATHERNEX_AUTH_DIAGNOSTIC=source_seek:15011',
+        'ATHERNEX_AUTH_DIAGNOSTIC=source_render_probe:122',
         'ATHERNEX_AUTH_DIAGNOSTIC=unknown_private_payload:5',
         'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:5 private_payload',
         'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:-1',
@@ -170,6 +174,19 @@ function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [
         "ATHERNEX_AUTH_DIAGNOSTIC=policy_query:5$([char]0x00ad)",
         "ATHERNEX_AUTH_DIAGNOSTIC=policy_query:5$([char]0)",
         "ATHERNEX_AUTH_DIAGNOSTIC=policy_query:$([char]0x0665)",
+        'ATHERNEX_AUTH_SOURCE=connection_ready',
+        'ATHERNEX_AUTH_SOURCE=worker_entered',
+        'ATHERNEX_AUTH_SOURCE=invalid_property_type',
+        'ATHERNEX_AUTH_SOURCE=startup_failed',
+        'ATHERNEX_AUTH_SOURCE=connection_ready',
+        'ATHERNEX_AUTH_SOURCE=unknown_private_payload',
+        'ATHERNEX_AUTH_SOURCE=reader_opened private_payload',
+        'ATHERNEX_AUTH_SOURCE=reader_opened:private_payload',
+        'ATHERNEX_AUTH_SOURCE=READER_OPENED',
+        ' ATHERNEX_AUTH_SOURCE=reader_opened',
+        'test fixture ... ATHERNEX_AUTH_SOURCE=reader_opened',
+        "ATHERNEX_AUTH_SOURCE=reader_opened$([char]0x00ad)",
+        "ATHERNEX_AUTH_SOURCE=reader_opened$([char]0)",
         'ATHERNEX_AUTH_STAGE=cleanup_verified'
     ) | Set-Content -LiteralPath $Log
     if ($Case -ceq 'diagnostic-flood') {
@@ -190,6 +207,7 @@ catch { $failure = $_.Exception.Message }
 @{ failed=($null -ne $failure); has_stages=$report.ContainsKey('authentication_stages');
    has_diagnostics=$report.ContainsKey('authentication_diagnostics');
    diagnostics=@($report.authentication_diagnostics);
+   has_source=$report.ContainsKey('authentication_source'); source=@($report.authentication_source);
    stages=@($report.authentication_stages); failures=$report.failures.Count;
    passed=@($report.checks.Values | Where-Object { $_ -ceq 'passed' }).Count } |
     ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
@@ -310,12 +328,20 @@ class IsolationRunnerTests(unittest.TestCase):
                     {'operation': 'policy_clear', 'win32_error': 5},
                     {'operation': 'policy_apply', 'win32_error': 4294967295},
                     {'operation': 'policy_query', 'win32_error': 0},
+                    {'operation': 'source_api', 'win32_error': 5},
+                    {'operation': 'source_next', 'win32_error': 1314},
+                    {'operation': 'source_seek', 'win32_error': 15011},
+                    {'operation': 'source_render_probe', 'win32_error': 122},
+                ])
+                self.assertEqual(value['source'], [] if case == 'missing-log' else [
+                    'connection_ready', 'worker_entered', 'startup_failed', 'invalid_property_type'
                 ])
         value = self.run_case('passed', STAGES_WRAPPER, 'Isolation')
         self.assertFalse(value['failed'], value)
         self.assertEqual(value['passed'], 11)
         self.assertFalse(value['has_stages'])
         self.assertFalse(value['has_diagnostics'])
+        self.assertFalse(value['has_source'])
 
     def test_authentication_diagnostics_allow_only_fixed_operations_and_bounded_decimal_codes(self):
         value = self.run_case('passed', STAGES_WRAPPER, 'Authentication')
@@ -327,6 +353,10 @@ class IsolationRunnerTests(unittest.TestCase):
             {'operation': 'policy_clear', 'win32_error': 5},
             {'operation': 'policy_apply', 'win32_error': 4294967295},
             {'operation': 'policy_query', 'win32_error': 0},
+            {'operation': 'source_api', 'win32_error': 5},
+            {'operation': 'source_next', 'win32_error': 1314},
+            {'operation': 'source_seek', 'win32_error': 15011},
+            {'operation': 'source_render_probe', 'win32_error': 122},
         ])
         self.assertNotIn('private_payload', json.dumps(value))
         value = self.run_case('diagnostic-flood', STAGES_WRAPPER, 'Authentication')
@@ -334,6 +364,15 @@ class IsolationRunnerTests(unittest.TestCase):
         self.assertEqual(value['diagnostics'], [
             {'operation': 'policy_query', 'win32_error': code} for code in range(32)
         ])
+
+    def test_authentication_source_evidence_excludes_raw_errors_and_unknown_or_injected_categories(self):
+        value = self.run_case('passed', STAGES_WRAPPER, 'Authentication')
+        self.assertFalse(value['failed'], value)
+        self.assertTrue(value['has_source'])
+        self.assertEqual(value['source'], [
+            'connection_ready', 'worker_entered', 'startup_failed', 'invalid_property_type'
+        ])
+        self.assertNotIn('private_payload', json.dumps(value))
 
 
 if __name__ == '__main__':

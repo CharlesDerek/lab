@@ -1,4 +1,6 @@
 //! Read-only Windows Security collection with atomic bookmark/outbox admission.
+#[cfg(all(test, windows))]
+mod diagnostics;
 #[cfg(windows)]
 mod native;
 #[cfg(all(test, windows))]
@@ -208,6 +210,8 @@ fn run_worker(
     receive: mpsc::Receiver<()>,
     started: mpsc::Sender<std::result::Result<(), String>>,
 ) {
+    #[cfg(test)]
+    diagnostics::source("worker_entered");
     struct Live(std::sync::Arc<std::sync::atomic::AtomicBool>);
     impl Drop for Live {
         fn drop(&mut self) {
@@ -218,13 +222,24 @@ fn run_worker(
     let (mut health, previous) = match load_state(&connection) {
         Ok(state) => state,
         Err(error) => {
+            #[cfg(test)]
+            {
+                diagnostics::source("startup_failed");
+                diagnostics::classify(error.as_ref());
+            }
             let _ = started.send(Err(error.to_string()));
             return;
         }
     };
+    #[cfg(test)]
+    diagnostics::source("durable_state_ready");
     let prepared = (|| -> Result<(native::Reader, Checkpoint)> {
         set_metadata(&connection, "windows_authentication_health", &health)?;
+        #[cfg(test)]
+        diagnostics::source("initial_health_saved");
         let mut reader = native::Reader::open()?;
+        #[cfg(test)]
+        diagnostics::source("reader_opened");
         let checkpoint = match previous {
             Some(checkpoint) => checkpoint,
             None => {
@@ -260,6 +275,8 @@ fn run_worker(
                 )?;
                 set_metadata(&connection, "windows_authentication_health", &health)?;
                 tx.commit()?;
+                #[cfg(test)]
+                diagnostics::source("baseline_committed");
                 checkpoint
             }
         };
@@ -268,6 +285,11 @@ fn run_worker(
     let (mut reader, mut checkpoint) = match prepared {
         Ok(pair) => pair,
         Err(error) => {
+            #[cfg(test)]
+            {
+                diagnostics::source("startup_failed");
+                diagnostics::classify(error.as_ref());
+            }
             health.state = "degraded".into();
             health.error = error.to_string().chars().take(256).collect();
             let _ = set_metadata(&connection, "windows_authentication_health", &health);
@@ -276,6 +298,8 @@ fn run_worker(
         }
     };
     guard.0.store(true, Ordering::Release);
+    #[cfg(test)]
+    diagnostics::source("worker_ready");
     let _ = started.send(Ok(()));
     let result = (|| -> Result<()> {
         let mut pending = None;
@@ -307,6 +331,11 @@ fn run_worker(
     match result {
         Ok(()) => health.state = "stopped".into(),
         Err(error) => {
+            #[cfg(test)]
+            {
+                diagnostics::source("worker_failed");
+                diagnostics::classify(error.as_ref());
+            }
             health.state = "degraded".into();
             health.loss_signals = health.loss_signals.saturating_add(1);
             health.error = error.to_string().chars().take(256).collect();
@@ -332,6 +361,8 @@ impl<'a> Collector<'a> {
         #[cfg(windows)]
         {
             let connection = store.collector_connection()?;
+            #[cfg(test)]
+            diagnostics::source("connection_ready");
             let live = store.windows_authentication_live.clone();
             let (stop, receive) = mpsc::channel();
             let (started, ready) = mpsc::channel();
@@ -344,7 +375,16 @@ impl<'a> Collector<'a> {
                 owner: PhantomData,
             };
             ready
-                .recv_timeout(std::time::Duration::from_secs(5))?
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .inspect_err(|error| {
+                    #[cfg(test)]
+                    diagnostics::source(match error {
+                        mpsc::RecvTimeoutError::Timeout => "startup_timeout",
+                        mpsc::RecvTimeoutError::Disconnected => "startup_disconnected",
+                    });
+                    #[cfg(not(test))]
+                    let _ = error;
+                })?
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
             Ok(collector)
         }
