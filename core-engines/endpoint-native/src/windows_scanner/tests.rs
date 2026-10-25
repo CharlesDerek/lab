@@ -65,8 +65,33 @@ fn scanner_reads_copies_writes_scratch_and_cannot_read_private_state_or_change_e
     let private_path = state.path().join("credentials.json");
     let image = engine.path().join("engine.dll");
     let output = scratch.path().join("scan.tmp");
+    let shared_path = state.path().join("public-medium");
+    let mut shared = private.create_for_scanner("public-medium").unwrap();
+    shared.write_all(b"public fixture bytes").unwrap();
+    public_fixture(&shared, "(A;;FA;;;BU)");
+    drop(shared);
+    let authenticated_path = state.path().join("authenticated-only");
+    let authenticated = private.create_for_scanner("authenticated-only").unwrap();
+    public_fixture(&authenticated, "(A;;FRFX;;;AU)");
+    drop(authenticated);
     impersonate(&token, || {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
         assert_eq!(fs::read(&image).unwrap(), b"fixture-engine");
+        assert_eq!(fs::read(&shared_path).unwrap(), b"public fixture bytes");
+        assert_eq!(
+            fs::write(&shared_path, b"changed").unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(fs::OpenOptions::new()
+            .access_mode(WRITE_DAC)
+            .open(&shared_path)
+            .is_err());
+        assert!(fs::remove_file(&shared_path).is_err());
+        assert_eq!(
+            fs::read(&authenticated_path).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
         assert_eq!(
             fs::read(&private_path).unwrap_err().kind(),
             std::io::ErrorKind::PermissionDenied
@@ -126,89 +151,22 @@ fn scanner_reads_copies_writes_scratch_and_cannot_read_private_state_or_change_e
     });
     impersonate(&token, || fs::remove_file(&output).unwrap());
     assert_eq!(fs::read(&image).unwrap(), b"fixture-engine");
-    if let Err(error) = log_runtime_read_candidate(&token, &private_path) {
-        eprintln!("Scanner runtime read diagnostic failed: {error}");
-    }
+    assert_eq!(fs::read(&shared_path).unwrap(), b"public fixture bytes");
+    verify_runtime_reads(&token);
 }
 
-// Test-only investigation of the native STATUS_DLL_NOT_FOUND failure. This
-// candidate token is never launched or returned to production code. Compare
-// read/execute opens only; do not modify any system ACL or scanner policy.
-fn log_runtime_read_candidate(current: &Token, private: &std::path::Path) -> Result<()> {
+// System runtime DLLs must be readable under the actual production token.
+// Resolve already loaded modules while still SYSTEM; never change their ACLs.
+fn verify_runtime_reads(token: &Token) {
     use std::{
         ffi::OsString,
         os::windows::{ffi::OsStringExt, fs::OpenOptionsExt},
         path::PathBuf,
     };
     use windows_sys::Win32::{
-        Security::WinBuiltinUsersSid,
         Storage::FileSystem::{FILE_GENERIC_EXECUTE, FILE_GENERIC_READ},
         System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW},
     };
-    let (original, logon) = logon()?;
-    let user = query(original.as_raw_handle(), TokenUser)?;
-    if unsafe { IsWellKnownSid(value::<TOKEN_USER>(&user)?.User.Sid, WinLocalServiceSid) } == 0 {
-        return Err("Runtime probe did not receive a LocalService token".into());
-    }
-    let data = query(original.as_raw_handle(), TokenGroups)?;
-    let entries = groups(&data)?;
-    let users_enabled = entries.iter().any(|g| {
-        (unsafe { IsWellKnownSid(g.Sid, WinBuiltinUsersSid) != 0 })
-            && g.Attributes & SE_GROUP_ENABLED as u32 != 0
-    });
-    eprintln!("Scanner runtime probe: original BuiltinUsers enabled={users_enabled}");
-    if !users_enabled {
-        return Err("Runtime probe requires an existing enabled BuiltinUsers group".into());
-    }
-    let disabled: Vec<_> = entries
-        .iter()
-        .filter(|g| !retained(g) && unsafe { IsWellKnownSid(g.Sid, WinBuiltinUsersSid) == 0 })
-        .copied()
-        .collect();
-    let world = sid("S-1-1-0")?;
-    let users = sid("S-1-5-32-545")?;
-    let logon_sid = sid(&logon)?;
-    let restricted = [world.0, users.0, logon_sid.0].map(|sid| SID_AND_ATTRIBUTES {
-        Sid: sid,
-        Attributes: 0,
-    });
-    let mut raw = null_mut();
-    if unsafe {
-        CreateRestrictedToken(
-            original.as_raw_handle(),
-            DISABLE_MAX_PRIVILEGE,
-            disabled.len() as u32,
-            disabled.as_ptr(),
-            0,
-            null(),
-            restricted.len() as u32,
-            restricted.as_ptr(),
-            &mut raw,
-        )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let candidate = unsafe { OwnedHandle::from_raw_handle(raw) };
-    drop(original);
-    let low = sid("S-1-16-4096")?;
-    let label = TOKEN_MANDATORY_LABEL {
-        Label: SID_AND_ATTRIBUTES {
-            Sid: low.0,
-            Attributes: SE_GROUP_INTEGRITY as u32,
-        },
-    };
-    if unsafe {
-        SetTokenInformation(
-            candidate.as_raw_handle(),
-            TokenIntegrityLevel,
-            (&label as *const TOKEN_MANDATORY_LABEL).cast(),
-            size_of::<TOKEN_MANDATORY_LABEL>() as u32 + GetLengthSid(low.0),
-        )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error().into());
-    }
     let mut modules = Vec::new();
     for name in [
         "ntdll.dll",
@@ -220,35 +178,56 @@ fn log_runtime_read_candidate(current: &Token, private: &std::path::Path) -> Res
         let wide: Vec<_> = name.encode_utf16().chain([0]).collect();
         let module = unsafe { GetModuleHandleW(wide.as_ptr()) };
         if module.is_null() {
-            eprintln!("Scanner runtime probe {name}: not loaded in parent");
+            // GNU and MSVC executables do not use identical CRT dependencies.
+            assert!(name == "ucrtbase.dll" || name == "vcruntime140.dll");
             continue;
         }
         let mut path = [0u16; 2048];
         let length =
             unsafe { GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32) } as usize;
-        if length == 0 || length >= path.len() {
-            return Err("Runtime probe could not resolve an existing module".into());
-        }
+        assert!(length > 0 && length < path.len());
         modules.push((name, PathBuf::from(OsString::from_wide(&path[..length]))));
     }
-    for (label, token) in [
-        ("current", current.handle()),
-        ("BuiltinUsers candidate", candidate.as_handle()),
-    ] {
-        impersonate_handle(token, || {
-            for (name, path) in &modules {
-                let result = fs::OpenOptions::new()
-                    .access_mode(FILE_GENERIC_READ | FILE_GENERIC_EXECUTE)
-                    .open(path)
-                    .map(|_| ())
-                    .map_err(|e| e.raw_os_error());
-                eprintln!("Scanner runtime probe {label} {name}: {result:?}");
-            }
-            let private = fs::File::open(private)
-                .map(|_| ())
-                .map_err(|e| e.raw_os_error());
-            eprintln!("Scanner runtime probe {label} private-state read: {private:?}");
-        });
-    }
-    Ok(())
+    impersonate(token, || {
+        for (name, path) in modules {
+            fs::OpenOptions::new()
+                .access_mode(FILE_GENERIC_READ | FILE_GENERIC_EXECUTE)
+                .open(path)
+                .unwrap_or_else(|error| panic!("Scanner cannot read/execute {name}: {error}"));
+        }
+    });
+}
+
+// Only fresh synthetic fixture files are assigned public ACLs. A low-integrity
+// token must still refuse medium-integrity writes even when their DACL allows it.
+fn public_fixture(file: &fs::File, grants: &str) {
+    use windows_sys::Win32::Security::{
+        Authorization::{SetSecurityInfo, SE_FILE_OBJECT},
+        GetSecurityDescriptorSacl, DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    let security = descriptor(&format!("D:P(A;;FA;;;SY){grants}S:(ML;;NW;;;ME)")).unwrap();
+    let (mut present, mut defaulted, mut sacl) = (0, 0, null_mut());
+    assert_ne!(
+        unsafe { GetSecurityDescriptorSacl(security.0, &mut present, &mut sacl, &mut defaulted) },
+        0
+    );
+    assert_ne!(present, 0);
+    assert!(!sacl.is_null());
+    assert_eq!(
+        unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION
+                    | LABEL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                dacl(&security).unwrap(),
+                sacl,
+            )
+        },
+        0
+    );
 }

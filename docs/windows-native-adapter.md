@@ -120,9 +120,14 @@ assumed from the account name. Startup verifies that the returned token contains
 exactly the allocated logon SID. The LocalSystem caller must have the enabled
 TCB privilege required by this API; failures stop startup. Then
 `CreateRestrictedToken` removes privileges other than change notification and
-disables groups other than Everyone, the logon SID and the integrity group.
-Restricting SIDs are Everyone and that logon SID; the token is lowered to low
-integrity. Both the token supplied to process creation and the launched process
+disables groups other than Everyone, BuiltinUsers, the logon SID and the integrity
+group. Restricting SIDs are Everyone, BuiltinUsers and that logon SID; the token
+is lowered to low integrity. The original token must already have enabled
+BuiltinUsers membership. This permits standard-user-readable system DLLs and
+other public objects; it does not grant access to private endpoint state or
+enable AuthenticatedUsers-only access. Medium-integrity writes remain forbidden,
+including to files whose DACL grants BuiltinUsers write access. Public objects
+with low integrity can still be writable. Both the token supplied to process creation and the launched process
 token are checked. The process/thread owner is explicitly SYSTEM, and their
 DACL grants access to SYSTEM and the scanner logon. An empty desktop selection
 uses the noninteractive logon station instead of inheriting the supervisor's
@@ -140,6 +145,15 @@ These choices follow Microsoft's [LocalService logon example](https://learn.micr
 [integrity control rules](https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control),
 and [process creation desktop rules](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw).
 Their runtime behavior still needs native validation.
+
+A [read-only native probe](https://github.com/CharlesDerek/lab/actions/runs/40204329951)
+confirmed that the earlier Everyone/logon-only token could not read five loaded
+Windows runtime DLLs. Retaining BuiltinUsers in both access checks allowed those
+reads while private-state access was denied. The regular native access test now
+requires runtime reads, rejects AuthenticatedUsers-only access, and checks that
+BuiltinUsers-writable medium-integrity files cannot be changed, deleted or have
+their ACL modified. Process startup and network enforcement must also pass their
+separate native tests before scanner isolation can be considered verified.
 
 A fresh workspace contains copies of the executable, adjacent DLLs and flat
 signature files, with a combined 768 MiB staging budget and at most 256 source

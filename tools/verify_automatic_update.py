@@ -128,7 +128,10 @@ def main():
             info=json.loads(subprocess.check_output([str(source),'release-check','a'*64],text=True))
             release=publish(source,1,info['version']);deployment=propose(release)
             eventually(lambda:completed(deployment,'installed'))
-            assert health()['installed_release']==release
+            # Installation receipts and periodic endpoint health are delivered
+            # independently. Require the matching health report within the
+            # existing deadline instead of assuming both arrive together.
+            eventually(lambda:health().get('installed_release')==release)
             installed_at=int(time.time()*1000)
             # A fresh process makes a new observation possible even on a quiet
             # host. Partial snapshots are valid; require delivered evidence.

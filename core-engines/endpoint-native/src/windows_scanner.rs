@@ -1,6 +1,6 @@
 //! A reduced LocalService token for the scanner. This is not a network sandbox:
-//! public readable objects remain readable and low-integrity public objects may
-//! remain writable. Private service state never grants this identity access.
+//! Everyone/BuiltinUsers-readable objects remain readable; low-integrity public
+//! objects may remain writable. Private service state grants neither group access.
 use crate::Result;
 use std::{
     mem::{offset_of, size_of},
@@ -18,12 +18,12 @@ use windows_sys::Win32::{
         CreateRestrictedToken, GetLengthSid, GetSecurityDescriptorDacl, GetTokenInformation,
         IsWellKnownSid, LookupPrivilegeValueW, SetTokenInformation, TokenDefaultDacl, TokenGroups,
         TokenIntegrityLevel, TokenMandatoryPolicy, TokenOwner, TokenPrivileges,
-        TokenRestrictedSids, TokenSessionId, TokenUser, WinLocalServiceSid, WinLowLabelSid,
-        WinWorldSid, ACL, DISABLE_MAX_PRIVILEGE, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT,
-        LUID_AND_ATTRIBUTES, PSID, SECURITY_ATTRIBUTES, SE_CHANGE_NOTIFY_NAME, SID_AND_ATTRIBUTES,
-        TOKEN_DEFAULT_DACL, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL,
-        TOKEN_MANDATORY_POLICY, TOKEN_MANDATORY_POLICY_NO_WRITE_UP, TOKEN_OWNER, TOKEN_PRIVILEGES,
-        TOKEN_USER,
+        TokenRestrictedSids, TokenSessionId, TokenUser, WinBuiltinUsersSid, WinLocalServiceSid,
+        WinLowLabelSid, WinWorldSid, ACL, DISABLE_MAX_PRIVILEGE, LOGON32_LOGON_SERVICE,
+        LOGON32_PROVIDER_DEFAULT, LUID_AND_ATTRIBUTES, PSID, SECURITY_ATTRIBUTES,
+        SE_CHANGE_NOTIFY_NAME, SID_AND_ATTRIBUTES, TOKEN_DEFAULT_DACL, TOKEN_GROUPS,
+        TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_MANDATORY_POLICY,
+        TOKEN_MANDATORY_POLICY_NO_WRITE_UP, TOKEN_OWNER, TOKEN_PRIVILEGES, TOKEN_USER,
     },
     System::SystemServices::{
         SE_GROUP_ENABLED, SE_GROUP_ENABLED_BY_DEFAULT, SE_GROUP_INTEGRITY, SE_GROUP_LOGON_ID,
@@ -138,6 +138,7 @@ fn retained(group: &SID_AND_ATTRIBUTES) -> bool {
     is_logon(group)
         || group.Attributes & SE_GROUP_INTEGRITY as u32 != 0
         || unsafe { IsWellKnownSid(group.Sid, WinWorldSid) != 0 }
+        || unsafe { IsWellKnownSid(group.Sid, WinBuiltinUsersSid) != 0 }
 }
 
 /// Built-in service accounts can share logon contexts. Supply our own globally
@@ -246,9 +247,14 @@ impl Token {
         }
         let disabled: Vec<_> = entries.iter().filter(|g| !retained(g)).copied().collect();
         let world = sid("S-1-1-0")?;
+        let users = sid("S-1-5-32-545")?;
         let restricted = [
             SID_AND_ATTRIBUTES {
                 Sid: world.0,
+                Attributes: 0,
+            },
+            SID_AND_ATTRIBUTES {
+                Sid: users.0,
                 Attributes: 0,
             },
             SID_AND_ATTRIBUTES {
@@ -257,7 +263,9 @@ impl Token {
             },
         ];
         let mut raw = null_mut();
-        // Full restriction, never WRITE_RESTRICTED or SANDBOX_INERT.
+        // Full restriction, never WRITE_RESTRICTED or SANDBOX_INERT. Both ACL
+        // checks must permit standard-user-readable runtime DLLs. Retain only
+        // the original BuiltinUsers membership; never add an account/group.
         if unsafe {
             CreateRestrictedToken(
                 original.as_raw_handle(),
@@ -376,6 +384,7 @@ pub fn verify(token: BorrowedHandle<'_>, expected_logon: &str) -> Result<()> {
     }
     let data = query(token, TokenGroups)?;
     let mut logons = 0;
+    let mut users = 0;
     for group in groups(&data)? {
         if is_logon(group) {
             if group.Attributes & SE_GROUP_ENABLED as u32 == 0
@@ -385,6 +394,13 @@ pub fn verify(token: BorrowedHandle<'_>, expected_logon: &str) -> Result<()> {
                 return Err("Scanner logon identity changed".into());
             }
             logons += 1;
+        } else if unsafe { IsWellKnownSid(group.Sid, WinBuiltinUsersSid) != 0 } {
+            if group.Attributes & SE_GROUP_ENABLED as u32 == 0
+                || group.Attributes & SE_GROUP_USE_FOR_DENY_ONLY as u32 != 0
+            {
+                return Err("Scanner lost its standard-user runtime access".into());
+            }
+            users += 1;
         } else if !retained(group) && group.Attributes & SE_GROUP_USE_FOR_DENY_ONLY as u32 == 0 {
             return Err("Scanner retained an unexpected group".into());
         }
@@ -392,12 +408,18 @@ pub fn verify(token: BorrowedHandle<'_>, expected_logon: &str) -> Result<()> {
     if logons != 1 {
         return Err("Scanner token lost its logon identity".into());
     }
+    if users != 1 {
+        return Err("Scanner must retain exactly one BuiltinUsers group".into());
+    }
     let data = query(token, TokenRestrictedSids)?;
     let restricted = groups(&data)?;
-    if restricted.len() != 2
+    if restricted.len() != 3
         || !restricted
             .iter()
             .any(|g| unsafe { IsWellKnownSid(g.Sid, WinWorldSid) } != 0)
+        || !restricted
+            .iter()
+            .any(|g| unsafe { IsWellKnownSid(g.Sid, WinBuiltinUsersSid) } != 0)
         || !restricted
             .iter()
             .any(|g| sid_text(g.Sid).is_ok_and(|s| s == expected_logon))

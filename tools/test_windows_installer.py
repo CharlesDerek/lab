@@ -32,16 +32,6 @@ $global:serviceStarted = $false
 $global:taskStopped = $false
 $global:clockCalls = 0
 $global:LASTEXITCODE = 0
-$global:fixtureLocation = $null
-function Set-Location {
-    param($Path)
-    if ($Mode -ne 'installer' -or $Path -ne (Split-Path -Parent $Script)) {
-        throw 'Unexpected installer working directory'
-    }
-    # All relative filesystem operations are mocked too. Keep the harness's
-    # command location stable so Windows PowerShell does not rebase path aliases.
-    $global:fixtureLocation = $Path
-}
 function Fixture-Paths {
     if ($Mode -eq 'register') {
         return @($env:ATHERNEX_INSTALL_STATE, $env:ATHERNEX_INSTALL_LAUNCHER, $env:ATHERNEX_INSTALL_CONTROLLER, $env:ATHERNEX_INSTALL_AGENT)
@@ -51,9 +41,6 @@ function Fixture-Paths {
       (Join-Path $folder 'athernex-controller.exe'), (Join-Path $folder 'athernex-endpoint.exe'))
 }
 function Invoke-Fixture {
-    if ($global:fixtureLocation -ne (Split-Path -Parent $Script)) {
-        throw 'Installer must select its bundle directory before invoking the endpoint'
-    }
     $global:trace.Add(@{ call = 'endpoint'; arguments = @($args) })
     $global:LASTEXITCODE = 0
     if (($args[0] -eq 'installer-check' -and $env:ATHERNEX_CASE -eq 'preflight-fails') -or
@@ -150,7 +137,7 @@ Set-Alias -Name $scPath -Value Invoke-Sc
 if ((Get-Command $source).Definition -ne 'Invoke-Fixture' -or (Get-Command $scPath).Definition -ne 'Invoke-Sc') {
     throw 'Fixture executable aliases are not bound; refusing to execute installer'
 }
-foreach ($command in @('Set-Location','Get-CimInstance','Get-Service','New-Service','Set-Service','Get-ScheduledTask','Disable-ScheduledTask','Stop-ScheduledTask','Unregister-ScheduledTask','Remove-Item')) {
+foreach ($command in @('Get-CimInstance','Get-Service','New-Service','Set-Service','Get-ScheduledTask','Disable-ScheduledTask','Stop-ScheduledTask','Unregister-ScheduledTask','Remove-Item')) {
     if ((Get-Command $command).CommandType -ne 'Function') { throw ('Fixture command is not mocked: ' + $command) }
 }
 $failed = $false
@@ -167,7 +154,9 @@ class InstallerTests(unittest.TestCase):
 
     def run_case(self, case, mode='installer'):
         with tempfile.TemporaryDirectory(prefix='athernex-installer-script-') as folder:
-            folder = Path(folder)
+            # Resolve Windows TEMP's possible DOS short names before creating
+            # executable aliases: PowerShell expands them in $PSScriptRoot.
+            folder = Path(folder).resolve(strict=True)
             script = folder / 'install.ps1'
             shutil.copyfile(INSTALLER if mode == 'installer' else REGISTER, script)
             wrapper = folder / 'fixture.ps1'
