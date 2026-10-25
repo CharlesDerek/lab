@@ -1034,8 +1034,15 @@ passed all six original checks on Windows Server 2022 as LocalSystem in session
 zero. The source commit and manifest hash were checked against the retained
 report: scanner startup/cleanup, private-state access, both workspace cleanup
 cases, partial scratch-image recovery and WFP enforcement/removal all passed.
-The two additional full scratch and crash-recovery checks are newly enabled and
-have no native result yet, so the expanded eight-check gate is still pending.
+The [expanded run at `887d9b2`](https://github.com/CharlesDerek/lab/actions/runs/40212737483)
+passed seven of eight, including all three owner-crash boundaries, live-owner
+refusal and idempotent network-policy recovery. The full scratch worker rejected
+its canonical verbatim DOS state path before image creation. Internal scratch
+and cleanup requests now accept that local path form while continuing to reject
+UNC/device namespaces, traversal, alternate streams and ambiguous components.
+Public response paths keep their existing syntax restrictions, and the worker
+still opens state through the pinned-directory and private-ACL checks. Native
+scratch formatting, capacity enforcement and complete cleanup remain pending.
 This gate does not establish signed
 minifilter prevention, complete scanner confinement or hostile-administrator
 tamper resistance.

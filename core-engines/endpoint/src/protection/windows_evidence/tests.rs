@@ -1,4 +1,55 @@
 use super::*;
+
+#[test]
+fn worker_state_paths_allow_canonical_local_names_without_broadening_response_paths() {
+    for local in [
+        r"C:\Fixture\private",
+        r"d:\Fixture\資料",
+        r"C:\Fixture\.state",
+    ] {
+        let canonical = format!(r"\\?\{local}");
+        assert!(worker_state_path(local));
+        assert!(worker_state_path(&canonical));
+        assert!(drive_path(local));
+        assert!(!drive_path(&canonical));
+    }
+    for invalid in [
+        "",
+        r"C:\",
+        r"C:relative",
+        r"\relative",
+        r"C:\state\..\private",
+        r"C:\state\.\private",
+        r"C:\state\\private",
+        r"C:\state\private\",
+        r"C:\state\private.",
+        r"C:\state\private ",
+        r"C:\state\private:stream",
+        r"C:\state/private",
+        r"C:\state\*",
+        r"C:\state\?",
+        "C:\\state\\bad\0name",
+        "C:\\state\\bad\nname",
+        r"\\server\share\private",
+        r"UNC\server\share\private",
+        r"GLOBALROOT\Device\HarddiskVolume1\private",
+        r"\\.\PhysicalDrive0",
+        r"Volume{01234567-89ab-cdef-8123-456789abcdef}\private",
+        r"\\?\C:\Fixture\private",
+    ] {
+        if !invalid.starts_with(r"\\?\") {
+            assert!(!worker_state_path(invalid), "{invalid:?}");
+        }
+        assert!(
+            !worker_state_path(&format!(r"\\?\{invalid}")),
+            "{invalid:?}"
+        );
+    }
+    let boundary = format!("C:\\{}", "a".repeat(1017));
+    assert!(worker_state_path(&format!(r"\\?\{boundary}")));
+    assert!(!worker_state_path(&format!(r"\\?\{boundary}a")));
+}
+
 pub(super) fn scope() -> Scope {
     Scope {
         roots: vec![Root {

@@ -82,6 +82,13 @@ pub fn drive_path(path: &str) -> bool {
             !part.is_empty() && ![".", ".."].contains(&part) && !part.ends_with(['.', ' '])
         })
 }
+/// Internal workers receive the canonical name retained by Directory. Accept
+/// its verbatim DOS prefix without broadening public scope/response paths.
+/// This is syntax validation only; Directory::open still checks pinned ancestry,
+/// directory type, reparse refusal and the private security descriptor.
+pub fn worker_state_path(path: &str) -> bool {
+    path.len() <= 1024 && drive_path(path.strip_prefix(r"\\?\").unwrap_or(path))
+}
 impl Scope {
     pub fn config(&self) -> Result<Configuration> {
         if self.roots.iter().any(|r| !drive_path(&r.dos)) {
