@@ -43,7 +43,7 @@ fn actual_probes_distinguish_open_mapping_and_exec_outcomes() {
         assert_eq!(values[1]["outcome"], "allowed");
     }
     let executable = root.join("true");
-    fs::copy("/usr/bin/true", &executable).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_athernex-endpoint-native"), &executable).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let (code, values) = run("exec", &executable, None);
     assert_eq!(code, 0);

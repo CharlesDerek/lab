@@ -10,6 +10,9 @@ fn main() {
 fn run() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     match args.first().map(String::as_str) {
+        // Copied and re-signed health images exercise real native exec without
+        // opening service state, starting a scanner, or acquiring entitlements.
+        Some("--athernex-health-image") if args.len() == 1 => Ok(()),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Some("health-status") if args.len() == 2 => {
             let plan=athernex_endpoint_native::service::read_plan(std::path::Path::new(&args[1]))?;
@@ -19,7 +22,7 @@ fn run() -> Result<()> {
         Some("prepare-health-fixture") if args.len() == 2 => {
             let plan=athernex_endpoint_native::service::read_plan(std::path::Path::new(&args[1]))?;
             let _quiet=athernex_endpoint_native::service::quiescent(&plan)?;
-            let prepared=athernex_endpoint_native::health::prepare(&plan)?;
+            let prepared=athernex_endpoint_native::health::prepare(&plan,&std::env::current_exe()?)?;
             athernex_endpoint_native::health::baseline(&prepared,&plan.policy,&std::env::current_exe()?)?;
             println!("{}",serde_json::to_string(&prepared.manifest)?);Ok(())
         }

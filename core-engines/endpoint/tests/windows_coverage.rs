@@ -168,6 +168,16 @@ async fn windows_loss_notices_survive_offline_delivery_export_and_server_restart
         .unwrap()
         .unwrap()
         .unwrap();
+    // The server's connection tasks can release their state just after the
+    // graceful-shutdown future completes. Wait for that ownership transfer
+    // before testing a fresh process's exclusive ledger acquisition.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while Arc::strong_count(&app.engine) != 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("server connection tasks retained the ledger after shutdown");
     drop(app);
     let engine = Engine::open(&database).unwrap();
     let events = originals

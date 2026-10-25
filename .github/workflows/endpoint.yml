@@ -187,6 +187,8 @@ jobs:
           python-version: '3.12'
       - name: Test endpoint enforcement, receipt automation and protocol
         timeout-minutes: 20
+        env:
+          CARGO_PROFILE_TEST_DEBUG: 0
         run: cargo test --locked --no-fail-fast -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native
       - name: Test native evidence sealing and verified backup recovery
         run: cargo test --locked -p athernex-siem --test storage_segments complete_backup_verifies_and_restores_history

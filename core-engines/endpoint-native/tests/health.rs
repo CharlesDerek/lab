@@ -27,12 +27,9 @@ fn prepared_samples_execute_and_map_before_protection_without_claiming_blocking(
         scanner_gid: 1234,
         startup_secs: 5,
     };
-    let prepared = health::prepare(&plan).unwrap();
-    let baseline = health::baseline(
-        &prepared,
-        &plan.policy,
-        std::path::Path::new(env!("CARGO_BIN_EXE_athernex-endpoint-native")),
-    );
+    let helper = std::path::Path::new(env!("CARGO_BIN_EXE_athernex-endpoint-native"));
+    let prepared = health::prepare(&plan, helper).unwrap();
+    let baseline = health::baseline(&prepared, &plan.policy, helper);
     #[cfg(target_os = "macos")]
     if baseline.is_err() {
         // Diagnostics concern only the executable samples created above. Keep
@@ -56,7 +53,10 @@ fn prepared_samples_execute_and_map_before_protection_without_claiming_blocking(
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
-            let status = std::process::Command::new(&sample.path).status().unwrap();
+            let status = std::process::Command::new(&sample.path)
+                .arg("--athernex-health-image")
+                .status()
+                .unwrap();
             eprintln!("Direct sample execution: {status:?}");
         }
     }

@@ -1,5 +1,7 @@
 use super::*;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+// These tests exercise sample identity and proof contracts. The integration
+// tests prepare and execute copies of the actual native helper on macOS.
 fn fixture() -> (tempfile::TempDir, service::Plan) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
@@ -97,7 +99,7 @@ fn all_roots_need_complete_fresh_operation_specific_proof() {
     let second = plan.policy.roots[0].parent().unwrap().join("second");
     fs::create_dir(&second).unwrap();
     plan.policy.roots.push(second);
-    let prepared = prepare(&plan).unwrap();
+    let prepared = prepare(&plan, Path::new("/usr/bin/true")).unwrap();
     let manifest = &prepared.manifest;
     let original = proof(&plan, manifest);
     validate_proof(&original, manifest, &plan, 42, 43, now_ms()).unwrap();
@@ -141,7 +143,7 @@ fn all_roots_need_complete_fresh_operation_specific_proof() {
 fn synthetic_routing_never_uses_just_a_name_or_path_prefix() {
     let _serial = child::TEST_SERIAL.lock().unwrap();
     let (_temp, plan) = fixture();
-    let prepared = prepare(&plan).unwrap();
+    let prepared = prepare(&plan, Path::new("/usr/bin/true")).unwrap();
     let m = &prepared.manifest;
     let p = proof(&plan, m);
     let event = &p.checks[0].receipt;
@@ -163,7 +165,7 @@ fn synthetic_routing_never_uses_just_a_name_or_path_prefix() {
 fn preparation_refuses_links_preserves_foreign_bytes_and_binds_restart_samples() {
     let _serial = child::TEST_SERIAL.lock().unwrap();
     let (_temp, plan) = fixture();
-    let first = prepare(&plan).unwrap();
+    let first = prepare(&plan, Path::new("/usr/bin/true")).unwrap();
     let old = first.manifest.clone();
     let path = first.manifest.roots[0].samples[0].path.clone();
     let outside = plan.policy.state.join("unrelated");
@@ -171,14 +173,14 @@ fn preparation_refuses_links_preserves_foreign_bytes_and_binds_restart_samples()
     fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).unwrap();
     fs::remove_file(&path).unwrap();
     fs::hard_link(&outside, &path).unwrap();
-    assert!(prepare(&plan).is_err());
+    assert!(prepare(&plan, Path::new("/usr/bin/true")).is_err());
     assert_eq!(fs::read(&outside).unwrap(), b"unrelated bytes");
     fs::remove_file(&path).unwrap();
     std::os::unix::fs::symlink(&outside, &path).unwrap();
-    assert!(prepare(&plan).is_err());
+    assert!(prepare(&plan, Path::new("/usr/bin/true")).is_err());
     assert_eq!(fs::read(&outside).unwrap(), b"unrelated bytes");
     fs::remove_file(&path).unwrap();
-    let next = prepare(&plan).unwrap();
+    let next = prepare(&plan, Path::new("/usr/bin/true")).unwrap();
     assert_ne!(old.session, next.manifest.session);
     assert!(old.validate(&plan.policy).is_err());
     assert_eq!(
@@ -203,7 +205,7 @@ fn probe_directory_symlink_cannot_redirect_writes() {
         hash(plan.policy.state.as_os_str().as_encoded_bytes())
     );
     std::os::unix::fs::symlink(&plan.policy.state, plan.policy.roots[0].join(folder)).unwrap();
-    assert!(prepare(&plan).is_err());
+    assert!(prepare(&plan, Path::new("/usr/bin/true")).is_err());
     assert!(!plan.policy.state.join("clean-text").exists());
 }
 
@@ -211,7 +213,7 @@ fn probe_directory_symlink_cannot_redirect_writes() {
 fn immutable_proofs_survive_status_transition_but_authorization_gaps_invalidate_them() {
     let _serial = child::TEST_SERIAL.lock().unwrap();
     let (_temp, plan) = fixture();
-    let prepared = prepare(&plan).unwrap();
+    let prepared = prepare(&plan, Path::new("/usr/bin/true")).unwrap();
     let mut p = proof(&plan, &prepared.manifest);
     let status_path = plan.policy.state.join("native-status.json");
     let coverage = crate::coverage::Snapshot::begin(None, &plan.policy, 43, 7, false, now_ms())

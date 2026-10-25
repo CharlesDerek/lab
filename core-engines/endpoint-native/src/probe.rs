@@ -232,7 +232,11 @@ pub fn run(
             // execve has no execvp shell fallback for malformed executable
             // bytes. Probe exactly this image, with no inherited environment.
             let image = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())?;
-            let arguments = [image.as_ptr(), std::ptr::null()];
+            let arguments = [
+                image.as_ptr(),
+                c"--athernex-health-image".as_ptr(),
+                std::ptr::null(),
+            ];
             let environment = [std::ptr::null()];
             unsafe {
                 libc::execve(image.as_ptr(), arguments.as_ptr(), environment.as_ptr());

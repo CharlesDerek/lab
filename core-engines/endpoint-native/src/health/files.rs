@@ -256,17 +256,21 @@ fn bounded_bytes(path: &Path) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn signed_images(state: &Path, session: &str) -> Result<(Vec<u8>, Vec<u8>)> {
-    // Some distributions ship true as a root-managed symlink. Resolve that
-    // system template once, then enforce trusted ownership on the actual file
-    // and read it with descriptor traversal that follows no further links.
-    let source = Path::new("/usr/bin/true").canonicalize()?;
+fn signed_images(state: &Path, session: &str, helper: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
+    // Use our native helper on macOS: re-signing Apple's arm64e system images
+    // does not establish that they can execute as ordinary third-party code.
+    #[cfg(target_os = "macos")]
+    let source = helper.canonicalize()?;
+    #[cfg(target_os = "linux")]
+    let source = {
+        let _ = helper;
+        Path::new("/usr/bin/true").canonicalize()?
+    };
     broker::trusted(&source, false)?;
     let original = bounded_bytes(&source)?;
     #[cfg(target_os = "macos")]
     {
-        // Both relocated images need their own ad-hoc signature. A copied
-        // Apple platform binary is not a reliable executable clean control.
+        // Distinct signing identifiers produce separate clean/blocked bytes.
         let sign = |label: &str| -> Result<Vec<u8>> {
             let path = state.join(format!("image-template-{label}"));
             service::write(&path, &original, 0o700)?;
@@ -326,7 +330,9 @@ pub struct Prepared {
     pub(super) descriptors: Vec<[File; 4]>,
     _directories: Vec<(File, File)>,
 }
-pub fn prepare(plan: &service::Plan) -> Result<Prepared> {
+/// On macOS, helper is the trusted native adapter executable. Its copied health
+/// entry point exits successfully without starting services or authorization.
+pub fn prepare(plan: &service::Plan, helper: &Path) -> Result<Prepared> {
     plan.validate()?;
     broker::trusted(&plan.policy.state, true)?;
     broker::trusted(&plan.database, false)?;
@@ -337,7 +343,7 @@ pub fn prepare(plan: &service::Plan) -> Result<Prepared> {
     let _verdicts = owned_dir(&native, "probe-verdicts", owner)?;
     let private = plan.policy.state.join("health");
     let session = nonce()?;
-    let (image, bad_image) = signed_images(&private, &session)?;
+    let (image, bad_image) = signed_images(&private, &session, helper)?;
     let clean = b"Ordinary Athernex native health check".to_vec();
     let blocked = format!("ATHERNEX HARMLESS NATIVE HEALTH CHECK {session}").into_bytes();
     let contents = [clean, blocked, image, bad_image];

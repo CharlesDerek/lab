@@ -691,7 +691,7 @@ pub fn supervise(path: &Path, parent: Option<u32>) -> Result<()> {
         let hash = plan.digest()?;
         #[cfg(target_os = "macos")]
         let prepared = {
-            let prepared = crate::health::prepare(&plan)?;
+            let prepared = crate::health::prepare(&plan, &executable)?;
             crate::health::baseline(&prepared, &plan.policy, &executable)?;
             prepared
         };

@@ -183,13 +183,16 @@ impl Engine {
         let mut file = fs::File::create(pending.join("manifest.json"))?;
         file.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
         file.sync_all()?;
+        // Close all members before publishing the directory on Windows.
+        drop(file);
         verify_backup(&pending)?;
         #[cfg(unix)]
         {
             fs::File::open(&directory)?.sync_all()?;
             fs::File::open(&pending)?.sync_all()?;
         }
-        fs::rename(&pending, destination)?;
+        fs::rename(&pending, destination)
+            .map_err(|e| format!("Publish verified backup directory: {e}"))?;
         #[cfg(unix)]
         fs::File::open(parent)?.sync_all()?;
         Ok(())
