@@ -190,8 +190,14 @@ found that BFE returned flags `0x41` for a filter created with `0x1`: it had add
 [lookup metadata flag](https://learn.microsoft.com/en-us/windows/win32/api/fwpmtypes/ns-fwpmtypes-fwpm_filter0).
 Persistence, disabled/action flags, identities, weights and conditions still
 must match. A regression test toggles every other flag bit for all ten rule
-definitions, both with and without indexing, and requires rejection. Native WFP
-enforcement and recovery of the corrected policy remain to be validated.
+definitions, both with and without indexing, and requires rejection. The
+[next native run](https://github.com/CharlesDerek/lab/actions/runs/40211580306)
+passed installation, policy readback, changed-journal refusal and outgoing TCP
+denials. Its UDP assertion failed because `sendto` returned success, which
+[does not establish delivery](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-sendto).
+The fixture now checks both IPv4 and IPv6 receivers, with working controls before,
+during and after policy enforcement. Successful enforcement and removal of the
+complete policy remain to be validated.
 
 A fresh workspace contains copies of the executable, adjacent DLLs and flat
 signature files, with a combined 768 MiB staging budget and at most 256 source
@@ -393,12 +399,17 @@ first runs a control probe under the same image and restricted token to prove
 the host permits the tested operations. It then installs rules from a helper
 that exits without running destructors and checks the retained rules from a
 new session. A staged probe runs under the actual
-restricted scanner token and job: outgoing IPv4, IPv6 and UDP plus forbidden
-listeners must return `WSAEACCES`, while the configured loopback listener must
-complete a real round trip. Changed-journal cleanup must be refused. Successful
+restricted scanner token and job: outgoing IPv4/IPv6 TCP and forbidden listeners
+must return `WSAEACCES`, while the configured loopback listener must complete a
+real round trip. UDP checks require three attempted datagrams per address family
+and no delivery to either receiver while the policy is active. Both receivers
+must receive unrelated control traffic during enforcement and the scanner's
+datagrams before installation and after removal. An unexpected socket error
+cannot satisfy these checks. Changed-journal cleanup must be refused. Successful
 cleanup follows confirmed job exit. The test keeps its temporary workspace and
 prints its path; on failure, its private journal and scoped persistent rules
-remain available for recovery. This test has been cross-linked, not run here.
+remain available for recovery. Its latest native execution still failed; the
+complete network gate has not passed.
 It does not restart BFE or change global firewall settings.
 
 The additional native gate
@@ -1011,8 +1022,11 @@ Only fixture reports and logs are uploaded; staged executables and private
 workspace contents are excluded. Local runner tests validate evidence rejection
 and task cleanup using mocked commands. The [hosted run at `0f0b88b`](https://github.com/CharlesDerek/lab/actions/runs/40203647817)
 passed the private-state/engine access test, both workspace cleanup tests and
-partial scratch image recovery as LocalSystem. Scanner startup and the WFP
-control probe failed while loading runtime DLLs; network enforcement is still
-unverified. The complete six-check gate has **not passed**. This gate does not establish signed
+partial scratch image recovery as LocalSystem. The
+[run at `7174961`](https://github.com/CharlesDerek/lab/actions/runs/40211580306)
+also passed scanner startup and cleanup, bringing the result to five of six.
+The remaining network test reached policy installation, readback and outgoing
+TCP denial before its UDP assertion failed. The complete six-check gate has
+**not passed**. This gate does not establish signed
 minifilter prevention, complete scanner confinement or hostile-administrator
 tamper resistance.

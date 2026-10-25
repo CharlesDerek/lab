@@ -361,7 +361,6 @@ fn network_probe(result: &Path, control: bool) {
         .unwrap()
         .parse()
         .unwrap();
-    let udp = std::env::var("ATHERNEX_WINDOWS_NETWORK_UDP").unwrap();
     let forbidden = |error: io::Error| {
         // A timeout/refused connection cannot stand in for a policy denial.
         assert_eq!(
@@ -378,12 +377,25 @@ fn network_probe(result: &Path, control: bool) {
             forbidden(attempt.unwrap_err());
         }
     }
-    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let attempt = socket.send_to(b"denied", udp);
-    if control {
-        assert_eq!(attempt.unwrap(), 6);
-    } else {
-        forbidden(attempt.unwrap_err());
+    for (bind, variable) in [
+        ("127.0.0.1:0", "ATHERNEX_WINDOWS_NETWORK_UDP"),
+        ("[::1]:0", "ATHERNEX_WINDOWS_NETWORK_UDP6"),
+    ] {
+        let socket = UdpSocket::bind(bind).unwrap();
+        let destination = std::env::var(variable).unwrap();
+        for sequence in 0..3u8 {
+            let attempt = socket.send_to(&[sequence], &destination);
+            if control {
+                assert_eq!(attempt.unwrap(), 1);
+            } else {
+                // Winsock sendto success does not establish delivery. The
+                // parent must observe no packet at either working receiver.
+                match attempt {
+                    Ok(size) => assert_eq!(size, 1),
+                    Err(error) => forbidden(error),
+                }
+            }
+        }
     }
     for address in [
         format!("127.0.0.2:{allowed}"),
@@ -421,6 +433,9 @@ fn network_probe(result: &Path, control: bool) {
                 stream.read_exact(&mut bytes).unwrap();
                 assert_eq!(&bytes, b"SCANTEST");
                 stream.write_all(&bytes).unwrap();
+                // Let the client close first so the post-removal control can
+                // bind the same server port without a server TIME_WAIT entry.
+                assert_eq!(stream.read(&mut bytes).unwrap(), 0);
                 break;
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -430,6 +445,61 @@ fn network_probe(result: &Path, control: bool) {
             Err(error) => panic!("scanner accept failed: {error}"),
         }
     }
+}
+
+fn network_control(
+    invocation: &Command,
+    token: &athernex_endpoint_native::windows_scanner::Token,
+    result: &Path,
+    udp: &[std::net::UdpSocket],
+) {
+    let mut control = Service::start_scanner(invocation, token, 16384, |pid, birth| {
+        assert!(!result.exists(), "Scanner ran before ownership callback");
+        assert!(
+            !athernex_endpoint_native::windows_filter::peer::original_process_ended(pid, birth)
+                .unwrap()
+        );
+        Ok(())
+    })
+    .unwrap();
+    control.verify_scanner(token.logon_sid()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(code) = control.poll().unwrap() {
+            if code as u32 == 0xc0000135 {
+                log_scanner_runtime_access(token);
+            } else if code as u32 == 0xc0000142 {
+                log_scanner_station_access(token);
+            }
+            assert_eq!(
+                code,
+                0,
+                "network control failed: {}",
+                String::from_utf8_lossy(control.output())
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    control.stop().unwrap();
+    assert_eq!(wait_file(result)["control"], true);
+    for socket in udp {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut received = Vec::new();
+        for _ in 0..3 {
+            let mut datagram = [0u8; 16];
+            let (size, address) = socket.recv_from(&mut datagram).unwrap();
+            assert!(address.ip().is_loopback());
+            assert_eq!(size, 1);
+            received.push(datagram[0]);
+        }
+        received.sort_unstable();
+        assert_eq!(received, [0, 1, 2]);
+    }
+    fs::remove_file(result).unwrap();
 }
 
 #[test]
@@ -461,7 +531,10 @@ fn scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_s
     let denied = TcpListener::bind("127.0.0.1:0").unwrap();
     let denied_listen = TcpListener::bind("127.0.0.1:0").unwrap();
     let ipv6 = TcpListener::bind("[::1]:0").unwrap();
-    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp = [
+        UdpSocket::bind("127.0.0.1:0").unwrap(),
+        UdpSocket::bind("[::1]:0").unwrap(),
+    ];
     let policy = Policy::new(&image, port).unwrap();
     state.write_json("network.json", &policy).unwrap();
     println!(
@@ -494,7 +567,11 @@ fn scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_s
         )
         .env(
             "ATHERNEX_WINDOWS_NETWORK_UDP",
-            udp.local_addr().unwrap().to_string(),
+            udp[0].local_addr().unwrap().to_string(),
+        )
+        .env(
+            "ATHERNEX_WINDOWS_NETWORK_UDP6",
+            udp[1].local_addr().unwrap().to_string(),
         )
         .current_dir(images.path());
     drop(chosen);
@@ -525,42 +602,7 @@ fn scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_s
     // A control run under the same token/image proves the host and token can
     // perform these operations before our rules are installed.
     invocation.env(MODE, "network-control");
-    let mut control = Service::start_scanner(&invocation, &token, 16384, |pid, birth| {
-        assert!(!result.exists(), "Scanner ran before ownership callback");
-        assert!(
-            !athernex_endpoint_native::windows_filter::peer::original_process_ended(pid, birth)
-                .unwrap()
-        );
-        Ok(())
-    })
-    .unwrap();
-    control.verify_scanner(token.logon_sid()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(code) = control.poll().unwrap() {
-            if code as u32 == 0xc0000135 {
-                log_scanner_runtime_access(&token);
-            } else if code as u32 == 0xc0000142 {
-                log_scanner_station_access(&token);
-            }
-            assert_eq!(
-                code,
-                0,
-                "network control failed: {}",
-                String::from_utf8_lossy(control.output())
-            );
-            break;
-        }
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(10));
-    }
-    control.stop().unwrap();
-    assert_eq!(wait_file(&result)["control"], true);
-    udp.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-    let mut datagram = [0u8; 16];
-    let (size, _) = udp.recv_from(&mut datagram).unwrap();
-    assert_eq!(&datagram[..size], b"denied");
-    fs::remove_file(&result).unwrap();
+    network_control(&invocation, &token, &result, &udp);
     let installer = command("network-install", &state.path().join("unused"));
     let installed = run_with_input(
         &installer,
@@ -598,6 +640,29 @@ fn scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_s
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(10));
     }
+    assert_eq!(wait_file(&result)["ready"], true);
+    for socket in &udp {
+        // The unrelated parent can still reach each receiver while the image
+        // policy is active. Any scanner packet, before or after this marker,
+        // fails the check; an unavailable receiver cannot produce a pass.
+        let address = socket.local_addr().unwrap();
+        let sender = UdpSocket::bind((address.ip(), 0)).unwrap();
+        assert_eq!(sender.send_to(b"receiver-control", address).unwrap(), 16);
+        let mut datagram = [0u8; 32];
+        let (size, source) = socket.recv_from(&mut datagram).unwrap();
+        assert_eq!(source, sender.local_addr().unwrap());
+        assert_eq!(&datagram[..size], b"receiver-control");
+        let error = socket
+            .recv_from(&mut datagram)
+            .expect_err("Scanner UDP packet escaped");
+        assert!(
+            matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "Unexpected UDP receive failure: {error}"
+        );
+    }
     let mut client = TcpStream::connect_timeout(
         &format!("127.0.0.1:{port}").parse().unwrap(),
         Duration::from_secs(1),
@@ -613,6 +678,7 @@ fn scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_s
     let mut reply = [0u8; 8];
     client.read_exact(&mut reply).unwrap();
     assert_eq!(&reply, b"SCANTEST");
+    drop(client);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(code) = service.poll().unwrap() {
@@ -626,6 +692,9 @@ fn scanner_network_rules_survive_owner_exit_and_allow_only_configured_loopback_s
     engine.remove_after_job_exit(&policy).unwrap();
     engine.remove_after_job_exit(&policy).unwrap();
     assert!(engine.verify(&policy).is_err());
+    fs::remove_file(&result).unwrap();
+    invocation.env(MODE, "network-control");
+    network_control(&invocation, &token, &result, &udp);
     state.remove("network.json").unwrap();
     state.sync().unwrap();
 }
