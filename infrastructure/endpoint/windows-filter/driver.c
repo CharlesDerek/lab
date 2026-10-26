@@ -1,4 +1,4 @@
-/* Native file-open enforcement. This driver is never installed by a repo build.
+/* Development create and ordinary-read enforcement. Never installed by a repo build.
  * Runtime validation, assigned altitude and Microsoft signing are release gates. */
 #include "driver.h"
 AX_GLOBALS Ax;
@@ -55,16 +55,6 @@ static NTSTATUS AxQueryTeardown(PCFLT_RELATED_OBJECTS objects, FLT_INSTANCE_QUER
     UNREFERENCED_PARAMETER(objects); UNREFERENCED_PARAMETER(flags);
     return Ax.armed ? STATUS_FLT_DO_NOT_DETACH : STATUS_SUCCESS;
 }
-static NTSTATUS AxUnload(FLT_FILTER_UNLOAD_FLAGS flags) {
-    if (Ax.armed && !(flags & FLTFL_FILTER_UNLOAD_MANDATORY)) return STATUS_FLT_DO_NOT_DETACH;
-    FltCloseCommunicationPort(Ax.server);
-    FltCloseClientPort(Ax.filter, &Ax.client);
-    ExWaitForRundownProtectionRelease(&Ax.rundown);
-    FltUnregisterFilter(Ax.filter);
-    AxClosePins(Ax.pins);
-    Ax.pins = NULL;
-    return STATUS_SUCCESS;
-}
 static const FLT_CONTEXT_REGISTRATION AxContexts[] = {
     { FLT_STREAM_CONTEXT, 0, NULL, sizeof(AX_STREAM), AX_TAG, NULL, NULL, NULL },
     { FLT_SECTION_CONTEXT, 0, NULL, sizeof(AX_SECTION), AX_TAG, NULL, NULL, NULL },
@@ -72,6 +62,7 @@ static const FLT_CONTEXT_REGISTRATION AxContexts[] = {
 };
 static const FLT_OPERATION_REGISTRATION AxOperations[] = {
     { IRP_MJ_CREATE, 0, AxPreCreate, AxPostCreate, NULL },
+    { IRP_MJ_READ, FLTFL_OPERATION_REGISTRATION_SKIP_PAGING_IO, AxPreRead, AxPostRead, NULL },
     { IRP_MJ_WRITE, 0, AxPreMutation, AxPostMutation, NULL },
     { IRP_MJ_SET_INFORMATION, 0, AxPreMutation, AxPostMutation, NULL },
     { IRP_MJ_FILE_SYSTEM_CONTROL, 0, AxPreMutation, AxPostMutation, NULL },

@@ -523,6 +523,8 @@ jobs:
           "$RUNNER_TEMP/windows-filter-wire"
           cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -I infrastructure/endpoint/windows-filter/tests infrastructure/endpoint/windows-filter/test_scan.c -o "$RUNNER_TEMP/windows-filter-scan"
           "$RUNNER_TEMP/windows-filter-scan"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -I infrastructure/endpoint/windows-filter/tests infrastructure/endpoint/windows-filter/test_read.c -o "$RUNNER_TEMP/windows-filter-read"
+          "$RUNNER_TEMP/windows-filter-read"
       - name: Verify Windows filter stream transport with real ClamAV
         run: python tools/verify_windows_filter_transport.py --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
       - name: Verify owned scanner and adapter lifetimes with real ClamAV

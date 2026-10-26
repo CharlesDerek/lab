@@ -3,6 +3,7 @@
 #include <fltKernel.h>
 #include "wire.h"
 #define AX_TAG 0x53787441u /* 'SxtA', unchanged pool tag. */
+#define AX_READ_BUDGET (256ull * 1024 * 1024)
 
 typedef struct AX_STREAM {
     volatile LONG64 generation;
@@ -31,6 +32,10 @@ typedef struct AX_SCAN_CONTEXT {
     LONG64 generation;
     AX_METADATA metadata;
     AX_NOTIFICATION notification;
+    BOOLEAN snapshot_mode, snapshot_ready, snapshot_rundown;
+    PVOID snapshot, source_view;
+    ULONG64 snapshot_charge;
+    UCHAR snapshot_sha256[32];
 } AX_SCAN_CONTEXT;
 typedef struct AX_ADMISSION {
     ULONG64 admitted_at, deadline;
@@ -53,15 +58,29 @@ typedef struct AX_GLOBALS {
     volatile LONG armed, pending, poisoned, configuring;
     struct AX_PINS *pins;
     volatile LONG64 next_id, allowed, malware, errors, evidence_dropped;
+    volatile LONG64 read_bytes;
+    volatile LONG retained_views;
 } AX_GLOBALS;
 extern AX_GLOBALS Ax;
+NTSTATUS AxUnload(FLT_FILTER_UNLOAD_FLAGS flags);
 BOOLEAN AxIsClient(void);
 FLT_PREOP_CALLBACK_STATUS AxPreCreate(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects, PVOID *completion);
 FLT_POSTOP_CALLBACK_STATUS AxPostCreate(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects, PVOID completion, FLT_POST_OPERATION_FLAGS flags);
+FLT_PREOP_CALLBACK_STATUS AxPreRead(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects, PVOID *completion);
+FLT_POSTOP_CALLBACK_STATUS AxPostRead(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects, PVOID completion, FLT_POST_OPERATION_FLAGS flags);
 NTSTATUS AxAdmit(PUNICODE_STRING name, AX_ADMISSION *admission, BOOLEAN *admitted);
 ULONG64 AxRemaining(const AX_SCAN_CONTEXT *scan);
 NTSTATUS AxPrepareScan(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
     PUNICODE_STRING name, const AX_ADMISSION *admission, AX_SCAN_RESULT *result);
+NTSTATUS AxPrepareReadScan(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+    PUNICODE_STRING name, const AX_ADMISSION *admission, ULONG64 actor_pid,
+    ULONG64 actor_created, AX_SCAN_RESULT *result);
+BOOLEAN AxReserveReadBytes(ULONG64 bytes);
+void AxReleaseReadBytes(ULONG64 bytes);
+NTSTATUS AxMakeSnapshot(PFLT_CALLBACK_DATA data, AX_SCAN_CONTEXT *scan);
+BOOLEAN AxReleaseSnapshot(AX_SCAN_CONTEXT *scan);
+NTSTATUS AxOpenScanSection(AX_SCAN_CONTEXT *scan);
+NTSTATUS AxMapScan(uint64_t id, AX_MAPPING *mapping);
 void AxFinalizeScan(PFLT_CALLBACK_DATA data, AX_SCAN_RESULT *result);
 void AxFinishScan(AX_SCAN_RESULT *result);
 void AxApplied(AX_SCAN_CONTEXT *scan, AX_REPLY *reply, NTSTATUS status);

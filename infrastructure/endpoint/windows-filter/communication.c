@@ -47,81 +47,6 @@ NTSTATUS AxSectionConflict(PFLT_INSTANCE instance, PFLT_CONTEXT context, PFLT_CA
     InterlockedExchange(&((AX_SECTION *)context)->conflicted, 1);
     return STATUS_SUCCESS;
 }
-static AX_SCAN_CONTEXT *AxFindScan(uint64_t id) {
-    PLIST_ENTRY entry;
-    AX_SCAN_CONTEXT *found = NULL;
-    AxLock(&Ax.lock);
-    for (entry = Ax.scans.Flink; entry != &Ax.scans; entry = entry->Flink) {
-        AX_SCAN_CONTEXT *scan = CONTAINING_RECORD(entry, AX_SCAN_CONTEXT, entry);
-        if (scan->notification.request_id == id) {
-            InterlockedIncrement(&scan->references);
-            found = scan;
-            break;
-        }
-    }
-    AxUnlock(&Ax.lock);
-    return found;
-}
-static NTSTATUS AxMap(uint64_t id, AX_MAPPING *mapping) {
-    OBJECT_ATTRIBUTES attributes;
-    AX_METADATA current;
-    LARGE_INTEGER size;
-    HANDLE user_handle = NULL;
-    NTSTATUS status = STATUS_NOT_FOUND;
-    AX_SCAN_CONTEXT *scan = AxFindScan(id);
-    if (!scan) return status;
-    AxLock(&scan->lock);
-    if (!AxRemaining(scan) || scan->cancelled || scan->mapped || scan->section || scan->stream->writers ||
-        (scan->file->SectionObjectPointer && MmDoesFileHaveUserWritableReferences(scan->file->SectionObjectPointer))) {
-        status = STATUS_FILE_LOCK_CONFLICT;
-        goto done;
-    }
-    if (scan->notification.bytes == 0) {
-        size.QuadPart = 0;
-        goto verify;
-    }
-    status = FltAllocateContext(Ax.filter, FLT_SECTION_CONTEXT, sizeof(AX_SECTION), NonPagedPoolNx, (PFLT_CONTEXT *)&scan->section);
-    if (!NT_SUCCESS(status)) goto done;
-    RtlZeroMemory(scan->section, sizeof(*scan->section));
-    InitializeObjectAttributes(&attributes, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
-    status = FltCreateSectionForDataScan(scan->instance, scan->file, (PFLT_CONTEXT)scan->section,
-        SECTION_MAP_READ | SECTION_QUERY, &attributes, NULL, PAGE_READONLY, SEC_COMMIT, 0,
-        &scan->section_handle, &scan->section_object, &size);
-    if (!NT_SUCCESS(status)) {
-        FltReleaseContext((PFLT_CONTEXT)scan->section);
-        scan->section = NULL;
-        goto done;
-    }
-verify:
-    scan->generation = InterlockedCompareExchange64(&scan->stream->generation, 0, 0);
-    status = AxMetadata(scan->instance, scan->file, &current);
-    if (!NT_SUCCESS(status) || !AxSameMetadata(&scan->metadata, &current) ||
-        size.QuadPart != (LONGLONG)scan->notification.bytes || scan->stream->writers ||
-        (scan->section && scan->section->conflicted)) {
-        status = STATUS_FILE_LOCK_CONFLICT;
-        goto done;
-    }
-    /* A read-only user handle in the connected process, never a kernel pointer. */
-    status = scan->section_object ?
-        ObOpenObjectByPointer(scan->section_object, 0, NULL, SECTION_MAP_READ, NULL, KernelMode, &user_handle) : STATUS_SUCCESS;
-    if (NT_SUCCESS(status) && !AxRemaining(scan)) {
-        if (user_handle) ZwClose(user_handle);
-        user_handle = NULL;
-        status = STATUS_IO_TIMEOUT;
-    }
-    if (NT_SUCCESS(status)) {
-        RtlZeroMemory(mapping, sizeof(*mapping));
-        mapping->version = AX_VERSION;
-        mapping->request_id = id;
-        mapping->section_handle = (uint64_t)(ULONG_PTR)user_handle;
-        mapping->bytes = scan->notification.bytes;
-        scan->mapped = TRUE;
-    }
-done:
-    AxUnlock(&scan->lock);
-    AxReleaseScan(scan);
-    return status;
-}
 NTSTATUS AxMessage(PVOID connection, PVOID input, ULONG input_bytes, PVOID output, ULONG output_bytes, PULONG returned) {
     AX_HEADER header;
     NTSTATUS status = STATUS_INVALID_PARAMETER;
@@ -154,7 +79,7 @@ NTSTATUS AxMessage(PVOID connection, PVOID input, ULONG input_bytes, PVOID outpu
         break;
     case AX_MAP_SCAN:
         if (input_bytes != sizeof(AX_MAP_REQUEST) || output_bytes < sizeof(mapping) || !output) break;
-        status = AxMap(((AX_MAP_REQUEST *)request)->request_id, &mapping);
+        status = AxMapScan(((AX_MAP_REQUEST *)request)->request_id, &mapping);
         if (NT_SUCCESS(status)) { result = &mapping; result_bytes = sizeof(mapping); }
         break;
     case AX_GET_STATUS:

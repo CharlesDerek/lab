@@ -10,6 +10,10 @@
 #include "create.c"
 
 AX_GLOBALS Ax;
+/* The separate read harness executes the snapshot implementation. Create mode
+ * must never ask for a private snapshot, and owns no snapshot resources. */
+NTSTATUS AxMakeSnapshot(PFLT_CALLBACK_DATA d,AX_SCAN_CONTEXT *s) { (void)d;(void)s;assert(!"create requested snapshot");return STATUS_NOT_SUPPORTED; }
+BOOLEAN AxReleaseSnapshot(AX_SCAN_CONTEXT *s) { assert(!s->snapshot_mode&&!s->snapshot&&!s->source_view);return TRUE; }
 static AX_STREAM stream;
 static FILE_OBJECT file;
 static IO_SECURITY_CONTEXT security;
@@ -42,7 +46,7 @@ NTSTATUS FltGetStreamContext(PFLT_INSTANCE i,PFILE_OBJECT f,PFLT_CONTEXT *out) {
 NTSTATUS FltAllocateContext(PFLT_FILTER f,ULONG t,size_t size,ULONG p,PFLT_CONTEXT *out) { (void)f;(void)t;(void)size;(void)p;(void)out;assert(!"unexpected stream allocation");return STATUS_NOT_SUPPORTED; }
 NTSTATUS FltSetStreamContext(PFLT_INSTANCE i,PFILE_OBJECT f,ULONG flags,PFLT_CONTEXT c,PFLT_CONTEXT *old) { (void)i;(void)f;(void)flags;(void)c;(void)old;assert(!"unexpected stream attach");return STATUS_NOT_SUPPORTED; }
 void FltReleaseContext(PFLT_CONTEXT c) { if(c==&stream){assert(stream_refs);--stream_refs;}else{assert(section_refs);--section_refs;free(c);} }
-void FltObjectReference(PVOID p) { (void)p;++instance_refs; }
+NTSTATUS FltObjectReference(PVOID p) { (void)p;++instance_refs;return STATUS_SUCCESS; }
 void FltObjectDereference(PVOID p) { (void)p;assert(instance_refs);--instance_refs; }
 void ObReferenceObject(PVOID p) { assert(p==&file);++file_refs; }
 void ObDereferenceObject(PVOID p) { if(p==&file){assert(file_refs);--file_refs;}else{assert(section_object_refs);--section_object_refs;} }

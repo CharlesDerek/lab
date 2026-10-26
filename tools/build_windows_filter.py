@@ -59,13 +59,13 @@ def main():
     for directory in includes:
         command.extend(['-isystem', str(directory)])
     objects = []
-    for name in ['driver', 'scan', 'create', 'communication', 'policy']:
+    for name in ['driver', 'lifecycle', 'scan', 'create', 'read', 'snapshot', 'mapping', 'communication', 'policy']:
         obj = output / f'{name}.obj'
         subprocess.run([*command, '-c', str(source / f'{name}.c'), '-o', str(obj)], check=True)
         objects.append(str(obj))
     libraries = wdk / 'Lib' / args.kit_version / 'km/x64'
     available = {path.name.lower(): path for path in libraries.glob('*.lib')}
-    imports = [available[name] for name in ['ntoskrnl.lib', 'fltmgr.lib', 'bufferoverflowfastfailk.lib']]
+    imports = [available[name] for name in ['ntoskrnl.lib', 'fltmgr.lib', 'cng.lib', 'bufferoverflowfastfailk.lib']]
     driver = output / 'athernex-filter.sys'
     subprocess.run([str(linker), *linker_flags, '/driver', '/subsystem:native', '/entry:GsDriverEntry',
                     '/nodefaultlib', '/machine:x64', '/dynamicbase', '/nxcompat', '/guard:cf',

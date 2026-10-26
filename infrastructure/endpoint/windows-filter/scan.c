@@ -25,7 +25,8 @@ NTSTATUS AxAdmit(PUNICODE_STRING name, AX_ADMISSION *admission, BOOLEAN *admitte
             RtlPrefixUnicodeString(&prefix, name, TRUE)) {
             ULONG64 budget = (ULONG64)Ax.config.timeout_ms * 10000;
             ULONG64 now = AxNow();
-            if (!budget || now > MAXULONGLONG - budget) status = STATUS_IO_TIMEOUT;
+            if (Ax.poisoned) status = STATUS_FILE_LOCK_CONFLICT;
+            else if (!budget || now > MAXULONGLONG - budget) status = STATUS_IO_TIMEOUT;
             else if (Ax.pending >= (LONG)AX_PENDING) status = STATUS_INSUFFICIENT_RESOURCES;
             else {
                 admission->admitted_at = now;
@@ -89,13 +90,22 @@ void AxCloseScanSection(AX_SCAN_CONTEXT *scan) {
     }
 }
 void AxReleaseScan(AX_SCAN_CONTEXT *scan) {
+    BOOLEAN snapshot_rundown;
     if (InterlockedDecrement(&scan->references)) return;
+    if (!AxReleaseSnapshot(scan)) {
+        /* Preserve one exceptional retained-view owner; never admit its slot
+         * or free section callback storage while unmapping is unconfirmed. */
+        InterlockedIncrement(&scan->references);
+        return;
+    }
     AxCloseScanSection(scan);
     FltReleaseContext((PFLT_CONTEXT)scan->stream);
     ObDereferenceObject(scan->file);
     FltObjectDereference(scan->instance);
+    snapshot_rundown = scan->snapshot_rundown;
     ExFreePoolWithTag(scan, AX_TAG);
     InterlockedDecrement(&Ax.pending);
+    if (snapshot_rundown) ExReleaseRundownProtection(&Ax.rundown);
 }
 
 static BOOLEAN AxRequestCancelled(PFLT_CALLBACK_DATA data) {
@@ -107,8 +117,9 @@ static void AxErrorReply(AX_REPLY *reply, uint64_t id) {
     reply->verdict = AX_ERROR;
     reply->request_id = id;
 }
-NTSTATUS AxPrepareScan(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
-    PUNICODE_STRING name, const AX_ADMISSION *admission, AX_SCAN_RESULT *result) {
+static NTSTATUS AxPrepare(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+    PUNICODE_STRING name, const AX_ADMISSION *admission, BOOLEAN snapshot,
+    ULONG64 actor_pid, ULONG64 actor_created, AX_SCAN_RESULT *result) {
     AX_SCAN_CONTEXT *scan;
     AX_STREAM *stream = NULL;
     AX_METADATA after;
@@ -122,14 +133,21 @@ NTSTATUS AxPrepareScan(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
     if (!scan) { InterlockedDecrement(&Ax.pending); return STATUS_INSUFFICIENT_RESOURCES; }
     status = AxGetStream(objects, &stream);
     if (!NT_SUCCESS(status)) { ExFreePoolWithTag(scan, AX_TAG); InterlockedDecrement(&Ax.pending); return status; }
+    status = FltObjectReference(objects->Instance);
+    if (!NT_SUCCESS(status)) {
+        FltReleaseContext((PFLT_CONTEXT)stream);
+        ExFreePoolWithTag(scan, AX_TAG);
+        InterlockedDecrement(&Ax.pending);
+        return status;
+    }
     scan->references = 1;
     scan->stream = stream;
     scan->instance = objects->Instance;
     scan->file = objects->FileObject;
     scan->admitted_at = admission->admitted_at;
     scan->deadline = admission->deadline;
+    scan->snapshot_mode = snapshot;
     ExInitializePushLock(&scan->lock);
-    FltObjectReference(scan->instance);
     ObReferenceObject(scan->file);
     result->scan = scan;
     if (!AxRemaining(scan) || AxRequestCancelled(data)) return STATUS_IO_TIMEOUT;
@@ -146,12 +164,16 @@ NTSTATUS AxPrepareScan(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
     scan->notification.request_id = (uint64_t)InterlockedIncrement64(&Ax.next_id);
     scan->notification.bytes = scan->metadata.standard.EndOfFile.QuadPart;
     scan->notification.volume = scan->metadata.id.VolumeSerialNumber;
-    scan->notification.actor_pid = FltGetRequestorProcessId(data);
-    if (FltGetRequestorProcess(data)) scan->notification.actor_created = PsGetProcessCreateTimeQuadPart(FltGetRequestorProcess(data));
+    scan->notification.actor_pid = actor_pid;
+    scan->notification.actor_created = actor_created;
     RtlCopyMemory(scan->notification.file_id, scan->metadata.id.FileId.Identifier, 16);
     scan->notification.path_characters = name->Length / sizeof(WCHAR);
     RtlCopyMemory(scan->notification.path, name->Buffer, name->Length);
     RtlCopyMemory(scan->notification.policy_sha256, admission->policy_sha256, sizeof(scan->notification.policy_sha256));
+    if (snapshot) {
+        status = AxMakeSnapshot(data, scan);
+        if (!NT_SUCCESS(status)) return status;
+    }
     AxLock(&Ax.lock);
     InsertTailList(&Ax.scans, &scan->entry);
     scan->listed = TRUE;
@@ -171,6 +193,8 @@ NTSTATUS AxPrepareScan(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
     AxLock(&scan->lock);
     result->valid = status == STATUS_SUCCESS && bytes == sizeof(result->reply) &&
         AxReplyValid(&result->reply, scan->notification.request_id) && !scan->cancelled &&
+        (!snapshot || (scan->snapshot_ready && RtlCompareMemory(result->reply.sha256,
+            scan->snapshot_sha256, sizeof(scan->snapshot_sha256)) == sizeof(scan->snapshot_sha256))) &&
         scan->mapped && (!scan->section || !scan->section->conflicted) && !scan->stream->writers && !Ax.poisoned &&
         InterlockedCompareExchange64(&scan->stream->generation, 0, 0) == scan->generation &&
         !(scan->file->SectionObjectPointer && MmDoesFileHaveUserWritableReferences(scan->file->SectionObjectPointer)) &&
@@ -181,6 +205,17 @@ NTSTATUS AxPrepareScan(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
     AxUnlock(&scan->lock);
     AxCloseScanSection(scan);
     return STATUS_SUCCESS;
+}
+NTSTATUS AxPrepareScan(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+    PUNICODE_STRING name, const AX_ADMISSION *admission, AX_SCAN_RESULT *result) {
+    PEPROCESS actor = FltGetRequestorProcess(data);
+    return AxPrepare(data, objects, name, admission, FALSE,
+        FltGetRequestorProcessId(data), actor ? PsGetProcessCreateTimeQuadPart(actor) : 0, result);
+}
+NTSTATUS AxPrepareReadScan(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+    PUNICODE_STRING name, const AX_ADMISSION *admission, ULONG64 actor_pid,
+    ULONG64 actor_created, AX_SCAN_RESULT *result) {
+    return AxPrepare(data, objects, name, admission, TRUE, actor_pid, actor_created, result);
 }
 void AxFinalizeScan(PFLT_CALLBACK_DATA data, AX_SCAN_RESULT *result) {
     AX_SCAN_CONTEXT *scan = result->scan;

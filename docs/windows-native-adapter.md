@@ -17,7 +17,8 @@ observed blocking health remain work to do.
 
 `infrastructure/endpoint/windows-filter/` contains an x64 minifilter for local
 NTFS volumes on Windows 10 version 2004 or later. It registers post-create file
-checks and a Filter Manager communication port. The matching client is
+checks, ordinary nonpaging IRP read callbacks and a Filter Manager communication
+port. The matching ABI2 client is
 `core-engines/endpoint-native/src/windows_filter/`.
 
 - A single LocalSystem process connects. The driver retains the exact process
@@ -40,11 +41,18 @@ checks and a Filter Manager communication port. The matching client is
   request. The driver verifies metadata, concurrent writers and section
   conflicts. The client reads the mapped bytes through `ReadProcessMemory`,
   streams all bytes to ClamAV, and computes SHA-256 over those same bytes.
+- A guarded read first directs lower I/O into an owned shadow buffer. A PASSIVE
+  worker copies the complete file from its own data-scan section into a private
+  snapshot and computes its SHA-256 with Windows CNG. The scanner's full-file
+  digest must match, and every returned shadow byte must equal the corresponding
+  snapshot range. Only a final clean decision can copy those bytes to the
+  original destination. The private snapshot is never exported to the client.
 - Four client workers connect only to loopback. The actual established TCP
   server tuple must belong to the specified live PID and process creation time.
   This binds transport to a process; the future supervisor must also establish
   trusted executable/configuration provenance and own the daemon's lifetime.
-- Only an exact successful, matching, clean reply permits an open. Timeout,
+- Only an exact successful, matching, clean reply permits an open or guarded
+  read. Timeout,
   scanner loss, malformed replies, changed metadata, unsupported sources or
   capacity exhaustion deny it. A section is released before cancelling an open.
   Policy remains armed when the scanner exits.
@@ -53,8 +61,10 @@ checks and a Filter Manager communication port. The matching client is
   kernel drops, client queue drops and reply failures are counted separately.
 
 Each admitted scan receives one monotonic authorization deadline before scan
-setup. The final create decision rechecks that deadline after metadata validation
-and section closure; expired replies cannot authorize an open. The clock is
+setup. The final create/read decision rechecks that deadline after metadata
+validation and section closure; expired replies cannot authorize an open or
+authorize release of read bytes. A read's budget includes its lower I/O,
+snapshot copy and hash, and scanner exchange. The clock is
 [KeQueryInterruptTimePrecise](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-kequeryinterrupttimeprecise),
 which is unaffected by wall-clock resets and includes the sleep-state time bias.
 The message wait still uses one absolute wall-clock deadline derived from the
@@ -62,28 +72,54 @@ remaining budget, covering delivery and reply, and requires exact
 `STATUS_SUCCESS` because `STATUS_TIMEOUT` is a success-class NTSTATUS. See the
 [FltSendMessage contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/fltkernel/nf-fltkernel-fltsendmessage).
 This is an authorization cutoff, not a hard duration bound on filesystem APIs,
-section closure or callback return. Observed request cancellation is checked
-synchronously; no asynchronous cancel-safe read queue is implemented.
+section closure, view faults or callback return. Deferred I/O workers supply
+PASSIVE execution; they are not an asynchronous cancel-safe IRP queue.
+Cancellation is checked immediately before byte authorization. A cancellation
+racing after that point cannot revoke a CPU copy already begun.
 
 The operation-neutral scan core retains its capacity reservation through the
-create adapter's applied decision and notification. Only the create adapter calls
+adapter's applied decision and notification. Only the create adapter calls
 `FltCancelFileOpen`; all scan sections close before that cancellation. A portable
 ASan/UBSan harness compiles the actual scan core and create adapter with mocked
 kernel effects, including late replies, metadata/close delays, close conflicts,
-observed cancellation and final-reference ownership. It does not execute the
-communication `AxMap` path: the mock supplies mapping state. These controls do
-not prove real lock scheduling, loaded-driver behavior or Driver Verifier
-acceptance, and add no read or mapping enforcement coverage.
+observed cancellation and final-reference ownership. The read harness also
+compiles the actual read, mapping and snapshot code, with OS and CNG effects
+mocked. It distinguishes the original postoperation buffer/MDL from the swapped
+lower-I/O buffer, exercises reentrant completion, and checks that only authorized
+bytes reach the caller. These controls do not prove real lock scheduling,
+Windows CNG execution, loaded-driver behavior or Driver Verifier acceptance.
 Read-only section ownership and cleanup follow
 [FltCreateSectionForDataScan](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/fltkernel/nf-fltkernel-fltcreatesectionfordatascan)
 and [FltCloseSectionForDataScan](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/fltkernel/nf-fltkernel-fltclosesectionfordatascan).
 
+Read requests and complete file snapshots each have a 128 MiB ceiling. All owned
+shadow and snapshot payloads share a checked 256 MiB reservation budget; the
+64-operation limit separately bounds their fixed context and MDL overhead.
+Snapshot reservations remain held through the final scan reference. This does
+not bound the operating system's file cache or arbitrary client memory. A failed
+system-view unmap retains the view, section, slot, byte charge and driver lifetime
+reference, poisons further admissions, and refuses the original read. Ordinary
+unload is refused; mandatory unload reaches the retained rundown wait and cannot
+report completed teardown. That exceptional failure can require host recovery.
+
+Clean reads retain the lower filesystem's status, byte count and offset behavior.
+Lower I/O has already occurred before a later refusal, so its cache and file
+position effects may remain; the driver does not race an offset rollback.
+System buffers, existing destination MDLs and user buffers locked in the PASSIVE
+post worker retain their original I/O ownership. Filter Manager owns a published
+shadow MDL; the driver owns its shadow pool. These rules follow the
+[SwapBuffers sample](https://github.com/microsoft/Windows-driver-samples/blob/main/filesys/miniFilter/swapBuffers/swapBuffers.c)
+and [deferred I/O callback contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/fltkernel/nf-fltkernel-fltqueuedeferredioworkitem).
+
 ## Current coverage limits
 
-This is a **file-open decision implementation**, not complete execution or
-memory-mapping protection. Existing handles, existing mappings, changes after a
-clean decision, hard-link aliases outside the configured roots, and complete
-read/execute/mapped-image coverage still need design and native validation.
+The implemented open and ordinary-read paths do not establish complete execution
+or memory-mapping protection. The read path has no loaded-driver acceptance yet.
+Paging, raw-volume/internal-stream access, new MDL reads, unsafe name/deferral
+contexts, existing mappings, hard-link aliases outside the configured roots and
+complete read/execute/mapped-image coverage still need design or native
+validation. New protected MDL reads and unresolved ordinary requests refuse;
+MDL-completion cleanup passes through. Fast I/O is redirected to ordinary IRPs.
 Section-synchronization callbacks currently invalidate concurrent verdicts;
 they do not claim to block executable mappings.
 
@@ -1059,10 +1095,11 @@ open. Missing checks or receipts cannot produce a successful overall report.
 The scenario continues after unsuccessful blocking checks to exercise quarantine,
 committed recovery without replay or receipt replacement, restore, and a fresh
 denial of the restored file's new identity. It also verifies that the original
-filter session remains active before cleanup. The current driver only enforces
-file-open decisions: based on that implementation, the existing-handle/mapping
-and post-clean-write checks are expected to remain unsuccessful. This fixture
-has not been executed on Windows, and compiling it does not resolve those gaps.
+filter session remains active before cleanup. The development ordinary-read path
+adds an implementation for existing-handle reads, but section creation, paging,
+resident mappings and the complete mutation boundary remain unresolved. All
+thirteen gates remain unchanged and unexecuted on Windows; compilation and host
+controls do not establish their acceptance.
 
 The synthetic signature preconditions can be tested independently on Linux:
 
