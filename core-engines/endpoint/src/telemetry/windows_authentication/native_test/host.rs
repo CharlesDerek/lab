@@ -13,8 +13,24 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain([0]).collect()
 }
 pub(super) fn require_disposable() {
+    require_disposable_for(Suite::Component);
+}
+#[derive(Clone, Copy)]
+pub(super) enum Suite {
+    Component,
+    Agent,
+}
+impl Suite {
+    fn opt_in(self) -> &'static str {
+        match self {
+            Self::Component => "ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST",
+            Self::Agent => "ATHERNEX_WINDOWS_AUTHENTICATION_AGENT_DISPOSABLE_HOST",
+        }
+    }
+}
+pub(super) fn require_disposable_for(suite: Suite) {
     assert!(
-        std::env::var("ATHERNEX_WINDOWS_AUTHENTICATION_DISPOSABLE_HOST").as_deref() == Ok("1"),
+        std::env::var(suite.opt_in()).as_deref() == Ok("1"),
         "Disposable authentication fixture was not explicitly enabled"
     );
     assert!(
@@ -155,14 +171,19 @@ fn set_setup_step(desired: &[AUDIT_POLICY_INFORMATION], clear: bool) -> bool {
 pub(super) struct Policy {
     original: Vec<AUDIT_POLICY_INFORMATION>,
     restored: bool,
+    suite: Suite,
 }
 impl Policy {
     pub fn start() -> Self {
-        require_disposable();
+        Self::start_for(Suite::Component)
+    }
+    pub fn start_for(suite: Suite) -> Self {
+        require_disposable_for(suite);
         println!("\nATHERNEX_AUTH_STAGE=policy_capture_starting");
         let mut guard = Self {
             original: policies().expect("Cannot capture original audit policy"),
             restored: false,
+            suite,
         };
         println!("\nATHERNEX_AUTH_STAGE=policy_captured");
         if let Err(error) = guard.initialize() {
@@ -230,7 +251,7 @@ impl Policy {
         Ok(())
     }
     pub fn set_logon(&self, flags: u32) {
-        require_disposable();
+        require_disposable_for(self.suite);
         let mut desired = self.original.clone();
         desired[0].AuditingInformation = flags;
         desired[1].AuditingInformation = 2;
@@ -280,7 +301,10 @@ pub(super) struct Account {
 }
 impl Account {
     pub fn create() -> Self {
-        require_disposable();
+        Self::create_for(Suite::Component)
+    }
+    pub fn create_for(suite: Suite) -> Self {
+        require_disposable_for(suite);
         // Account names and comments can be queried by other local users. Their
         // random values must disclose no material used to derive the password.
         let account_suffix = crate::secret().expect("Fixture randomness unavailable");

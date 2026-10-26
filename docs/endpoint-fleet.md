@@ -659,6 +659,26 @@ agent lifecycle or a measured production coverage result. The gate must pass on 
 validated. Uploaded artifacts contain only suite-bound status
 and executable hashes; account details and event XML stay on the disposable host.
 
+The separate `windows-authentication-agent` job stages the release agent and one
+exact ignored fixture under a protected LocalSystem/session-zero directory. The
+agent runs its normal capture and delivery loop while the fixture holds HTTP,
+fills both durable queues with owned records, verifies a stable bookmark under
+backpressure, and kills and restarts the held agent process. Logons written during
+downtime must replay from the retained Security log, with identical queued
+envelopes. A deliberate audit-policy gap must remain visible after restoration.
+Real HTTP delivery must acknowledge the originals before removing queued rows;
+authenticated export, duplicate/conflicting replay, device separation, AX-001,
+escaped portal evidence and server restart are also required. Account deletion,
+policy restoration, unchanged token context and child-process cleanup are checked.
+
+The agent fixture has a separate explicit opt-in and keeps the component gate.
+Its public artifact contains exactly `inputs.json` and
+`authentication-agent-validation.json`, bound to the source revision and five
+staged inputs. It exposes fixed status fields with `proof_scope: "actual_agent"`
+and `production_readiness: false`; accounts, XML, credentials and raw logs remain
+private. Native acceptance is pending. This fixture does not establish SCM
+lifecycle, signing, production coverage or resistance to a compromised administrator.
+
 ### Windows process source experiment
 
 The independent `windows-process-source` job is a test-only ETW source experiment

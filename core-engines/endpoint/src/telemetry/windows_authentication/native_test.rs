@@ -15,6 +15,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+mod agent_test;
 mod host;
 
 #[track_caller]
