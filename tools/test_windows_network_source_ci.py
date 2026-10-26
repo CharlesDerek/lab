@@ -459,13 +459,14 @@ class NetworkSourceRunnerTests(unittest.TestCase):
         self.assertEqual(public['diagnostics']['status'], 'available')
         diagnostic = public['diagnostics']['checks'][TESTS[0]]
         self.assertEqual(set(diagnostic), {'progress', 'stages', 'failures', 'api_errors', 'schemas',
-                                          'ownership', 'configuration'})
+                                          'ownership', 'configuration', 'schema_attempts'})
         self.assertEqual(diagnostic['stages'], STAGES)
         self.assertEqual([row['kind'] for row in diagnostic['schemas']], KINDS)
         self.assertEqual(diagnostic['failures'], [])
         self.assertEqual(diagnostic['api_errors'], [])
         self.assertEqual(diagnostic['ownership'], [])
         self.assertEqual(diagnostic['configuration'], [])
+        self.assertEqual(diagnostic['schema_attempts'], [])
         cases = ['publish-task-failure', 'publish-cleanup-failure', 'publish-report-failure', 'publish-report-error',
                  'publish-report-change', 'publish-missing-report', 'publish-wrong-source', 'publish-wrong-digest',
                  *['publish-change:'+name for name in INPUTS+['inputs.json']]]
@@ -537,7 +538,7 @@ class NetworkSourceRunnerTests(unittest.TestCase):
             'tcp4_send:0:64:1:'+('a'*63), 'tcp4_send:0:64:1:'+('a'*65), 'tcp4_send:0:64:1:private_fixture_payload']]
         self.assertEqual(self.run_case('markers', {'logs': [invalid]})['markers'],
                          {'stages': [], 'failures': [], 'api_errors': [], 'schemas': [],
-                          'ownership': [], 'configuration': []})
+                          'ownership': [], 'configuration': [], 'schema_attempts': []})
         bounds = ['ATHERNEX_NETWORK_SOURCE_DIAGNOSTIC=query_trace:0']*40
         bounds += [f'ATHERNEX_NETWORK_SOURCE_SCHEMA=tcp4_send:{version}:64:1:'+('a'*64) for version in range(40)]
         markers = self.run_case('markers', {'logs': [bounds]})['markers']
@@ -621,6 +622,89 @@ class NetworkSourceRunnerTests(unittest.TestCase):
             public = self.assert_public_failed(self.run_case('publish-passed', {
                 'report': {field: ['private_fixture_payload']}, 'task_error': 'Native service task failed: 1'}))
             self.assertEqual(public['diagnostics'], {'status': 'invalid', 'checks': {}})
+
+    def test_schema_attempts_are_bounded_typed_structural_failure_context(self):
+        prefix = 'ATHERNEX_NETWORK_SOURCE_SCHEMA_ATTEMPT='
+        expected = []
+        for index, kind in enumerate(KINDS):
+            expected.append({'kind': kind, 'version': 0 if index == 0 else 255,
+                'pointer_bits': 32 if index == 0 else 64, 'property_count': 1 if index == 0 else 64,
+                'sha256': 'a'*64, 'property_index': 0 if index == 0 else 63,
+                'input_type': 0 if index == 0 else 65535, 'output_type': 65535 if index == 0 else 0,
+                'expected_bytes': [1, 2, 4, 8, 16][index % 5], 'user_data_length': 1 if index == 0 else 49152})
+        fields = ['kind', 'version', 'pointer_bits', 'property_count', 'sha256', 'property_index',
+                  'input_type', 'output_type', 'expected_bytes', 'user_data_length']
+        lines = [prefix+':'.join(str(row[field]) for field in fields) for row in expected]
+        for encoding in ['utf8', 'utf8bom', 'utf16le']:
+            markers = self.run_case('markers', {'logs': [lines], 'log_encoding': encoding})['markers']
+            self.assertEqual(markers['schema_attempts'], expected)
+            self.assertEqual(markers['schemas'], [])
+            for row in markers['schema_attempts']:
+                for field, value in row.items():
+                    self.assertIs(type(value), str if field in ['kind', 'sha256'] else int)
+        invalid = []
+        for line in lines:
+            invalid += [' '+line, line+' ', '\t'+line, line+'private_fixture_payload', line.lower(),
+                        line+'\x00', line+'\u200b', line.replace('ATHERNEX', 'ＡＴＨＥＲＮＥＸ'),
+                        json.dumps([line]), json.dumps({'marker': line}), line+'\\rextra']
+        sample = ['tcp4_send', '0', '64', '2', 'a'*64, '1', '8', '0', '4', '48']
+        invalid_values = ['-0', '-1', '+1', '01', '4294967296', '99999999999', '١', '１', '1.0', '1e2', '',
+                          '[1]', '{"value":1}', 'true', 'null', '1\u00ad']
+        for index in [1, 2, 3, 5, 6, 7, 8, 9]:
+            for value in invalid_values:
+                changed = sample.copy()
+                changed[index] = value
+                invalid.append(prefix+':'.join(changed))
+        out_of_range = [(1, '256'), (2, '16'), (2, '128'), (3, '0'), (3, '65'),
+                        (5, '2'), (5, '63'), (5, '64'), (6, '65536'), (7, '65536'),
+                        (8, '0'), (8, '3'), (8, '17'), (9, '0'), (9, '49153')]
+        out_of_range += [(0, value) for value in ['unknown', 'TCP4_SEND', 'tcp4_\u00adsend', '["tcp4_send"]']]
+        out_of_range += [(4, value) for value in ['A'*64, 'a'*63, 'a'*65, '["'+('a'*64)+'"]', 'private_fixture_payload']]
+        for index, value in out_of_range:
+            changed = sample.copy()
+            changed[index] = value
+            invalid.append(prefix+':'.join(changed))
+        invalid += [prefix+':'.join(sample[:-1]), prefix+':'.join(sample+['0'])]
+        markers = self.run_case('markers', {'logs': [invalid]})['markers']
+        self.assertEqual(markers['schema_attempts'], [])
+        self.assertEqual(markers['schemas'], [])
+        bounds = [prefix+f'tcp4_send:{version}:64:1:'+('a'*64)+':0:0:0:1:1' for version in range(40)]
+        markers = self.run_case('markers', {'logs': [bounds]})['markers']
+        self.assertEqual([row['version'] for row in markers['schema_attempts']], list(range(16)))
+
+    def test_schema_attempts_never_authorize_success_or_replace_controlled_schemas(self):
+        lines = ['ATHERNEX_NETWORK_SOURCE_SCHEMA_ATTEMPT='+kind+':2:64:12:'+('a'*64)+':0:8:0:4:48' for kind in KINDS]
+        for line in lines:
+            with self.subTest(line=line):
+                worker = self.run_case('worker-passed', {'source_markers': [line]})
+                self.assertTrue(worker['failed'])
+                self.assertEqual(worker['checkpoint']['checks'], dict.fromkeys(TESTS, 'not_verified'))
+                self.assertEqual(worker['checkpoint']['progress'], dict.fromkeys(TESTS, 'failed'))
+                public = self.assert_public_failed(self.run_case('publish-passed', {'source_markers': [line]}))
+                self.assertEqual(public['runner_failure'], 'source_proof_failed')
+                diagnostic = public['diagnostics']['checks'][TESTS[0]]
+                self.assertEqual(len(diagnostic['schema_attempts']), 1)
+                self.assertEqual([row['kind'] for row in diagnostic['schemas']], KINDS)
+        public = self.assert_public_failed(self.run_case('publish-passed', {'post_task_markers': [lines[0]]}))
+        self.assertEqual(public['runner_failure'], 'source_proof_failed')
+        for value in [None, '', {}, 0, False, ['tcp4_send'], {'kind': 'tcp4_send'}]:
+            self.assertTrue(self.run_case('markers-assert', {'marker_overrides': {'schema_attempts': value}})['failed'])
+        self.assertFalse(self.run_case('markers-assert', {'marker_overrides': {'schema_attempts': []}})['failed'])
+        public = self.assert_public_failed(self.run_case('publish-passed', {
+            'report': {'schema_attempts': ['private_fixture_payload']}, 'task_error': 'Native service task failed: 1'}))
+        self.assertEqual(public['diagnostics'], {'status': 'invalid', 'checks': {}})
+        failed_report = {'checks': dict.fromkeys(TESTS, 'not_verified'), 'progress': dict.fromkeys(TESTS, 'failed'),
+                         'error': 'native_worker_failed'}
+        public = self.assert_public_failed(self.run_case('publish-passed', {
+            'report': failed_report, 'logs': [lines], 'task_error': 'Native service task failed: 1'}))
+        self.assertEqual(public['runner_failure'], 'task_failed_with_report')
+        diagnostic = public['diagnostics']['checks'][TESTS[0]]
+        self.assertEqual(diagnostic['progress'], 'failed')
+        self.assertEqual(len(diagnostic['schema_attempts']), 14)
+        self.assertEqual(diagnostic['schemas'], [])
+        for case in ['publish-wrong-source', 'publish-wrong-digest', 'publish-change:inputs.json']:
+            public = self.assert_public_failed(self.run_case(case, {'source_markers': lines}))
+            self.assertEqual(public['diagnostics'], {'status': 'unbound', 'checks': {}})
 
     def test_runner_failure_categories_never_publish_exception_text(self):
         known = {

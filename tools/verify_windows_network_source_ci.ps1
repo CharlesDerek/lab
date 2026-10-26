@@ -154,7 +154,7 @@ function Get-NetworkSourceLogMarkers([string]$Log, [switch]$RequireLog) {
     $operations = @(Get-NetworkSourceApiOperations)
     $kinds = @(Get-NetworkSourceSchemaKinds)
     $ownership = @(Get-NetworkSourceOwnershipNames)
-    $result = @{ stages=@(); failures=@(); api_errors=@(); schemas=@(); ownership=@(); configuration=@() }
+    $result = @{ stages=@(); failures=@(); api_errors=@(); schemas=@(); ownership=@(); configuration=@(); schema_attempts=@() }
     $schemaSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     try {
         if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) {
@@ -213,6 +213,27 @@ function Get-NetworkSourceLogMarkers([string]$Log, [switch]$RequireLog) {
                         property_count=$properties; sha256=$Matches[5] }
                 }
             }
+            if ($result.schema_attempts.Count -lt 16 -and $line -cmatch '\AATHERNEX_NETWORK_SOURCE_SCHEMA_ATTEMPT=([a-z0-9_]+):(0|[1-9][0-9]{0,2}):(32|64):([1-9][0-9]?):([0-9a-f]{64}):(0|[1-9][0-9]?):(0|[1-9][0-9]{0,4}):(0|[1-9][0-9]{0,4}):(1|2|4|8|16):([1-9][0-9]{0,4})\z') {
+                $kind = $Matches[1]
+                $version = [byte]0
+                $properties = [int]$Matches[4]
+                $index = [int]$Matches[6]
+                $inputType = [uint16]0
+                $outputType = [uint16]0
+                $length = [int]$Matches[10]
+                if ([Array]::IndexOf([string[]]$kinds, $kind) -ge 0 -and $properties -le 64 -and
+                    $index -lt $properties -and $length -le 49152 -and
+                    [byte]::TryParse($Matches[2], [Globalization.NumberStyles]::None,
+                        [Globalization.CultureInfo]::InvariantCulture, [ref]$version) -and
+                    [uint16]::TryParse($Matches[7], [Globalization.NumberStyles]::None,
+                        [Globalization.CultureInfo]::InvariantCulture, [ref]$inputType) -and
+                    [uint16]::TryParse($Matches[8], [Globalization.NumberStyles]::None,
+                        [Globalization.CultureInfo]::InvariantCulture, [ref]$outputType)) {
+                    $result.schema_attempts += @{ kind=$kind; version=$version; pointer_bits=[int]$Matches[3];
+                        property_count=$properties; sha256=$Matches[5]; property_index=$index;
+                        input_type=$inputType; output_type=$outputType; expected_bytes=[int]$Matches[9]; user_data_length=$length }
+                }
+            }
         }
     } catch { throw 'Network-source diagnostic log unavailable' }
     $result
@@ -222,7 +243,8 @@ function Assert-NetworkSourceMarkers($Markers) {
     if ($null -eq $Markers.failures -or $null -eq $Markers.api_errors -or
         @($Markers.failures).Count -ne 0 -or @($Markers.api_errors).Count -ne 0 -or
         $Markers.ownership -isnot [array] -or $Markers.configuration -isnot [array] -or
-        $Markers.ownership.Count -ne 0 -or $Markers.configuration.Count -ne 0) {
+        $Markers.schema_attempts -isnot [array] -or $Markers.ownership.Count -ne 0 -or
+        $Markers.configuration.Count -ne 0 -or $Markers.schema_attempts.Count -ne 0) {
         throw 'Network-source proof has contradictory failure evidence'
     }
     $expected = @(Get-NetworkSourceStageNames)
@@ -284,12 +306,13 @@ function Get-NetworkSourceDiagnostics([string]$ProofDirectory, [string]$Manifest
         $projected = [ordered]@{}
         $position = 0
         foreach ($name in Get-NetworkSourceTests) {
-            $markers = @{ stages=@(); failures=@(); api_errors=@(); schemas=@(); ownership=@(); configuration=@() }
+            $markers = @{ stages=@(); failures=@(); api_errors=@(); schemas=@(); ownership=@(); configuration=@(); schema_attempts=@() }
             if ($report.progress.$name -cne 'not_attempted') {
                 $markers = Get-NetworkSourceLogMarkers (Join-Path $ProofDirectory ('check-' + $position + '.log'))
             }
             $projected[$name] = @{ progress=$report.progress.$name; stages=$markers.stages; failures=$markers.failures;
-                api_errors=$markers.api_errors; schemas=$markers.schemas; ownership=$markers.ownership; configuration=$markers.configuration }
+                api_errors=$markers.api_errors; schemas=$markers.schemas; ownership=$markers.ownership;
+                configuration=$markers.configuration; schema_attempts=$markers.schema_attempts }
             $position += 1
         }
         # Recheck after reading diagnostic files as well as before projecting them.
@@ -392,7 +415,7 @@ function Invoke-NetworkSourceEvidence([string]$ProofDirectory, [string]$ProofTas
         $public.diagnostics = @{ status='available'; checks=[ordered]@{} }
         $public.diagnostics.checks[@(Get-NetworkSourceTests)[0]] = @{ progress='completed';
             stages=$markers.stages; failures=$markers.failures; api_errors=$markers.api_errors; schemas=$markers.schemas;
-            ownership=$markers.ownership; configuration=$markers.configuration }
+            ownership=$markers.ownership; configuration=$markers.configuration; schema_attempts=$markers.schema_attempts }
         $public.stages += 'report_verified'
         foreach ($name in Get-NetworkSourceTests) { $public.checks[$name] = 'passed' }
         $public.native_network_source_validation_passed = $true

@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::System::{
-    Diagnostics::Etw::{TcpIpGuid, UdpIpGuid},
+    Diagnostics::Etw::{TcpIpGuid, UdpIpGuid, EVENT_HEADER},
     Performance::QueryPerformanceCounter,
     RemoteDesktop::ProcessIdToSessionId,
 };
@@ -118,11 +118,14 @@ struct Kind {
     operation: Operation,
 }
 fn kind(original: &native::Original) -> Option<Kind> {
-    let tcp = native::same_guid(original.header.ProviderId, TcpIpGuid);
-    if !tcp && !native::same_guid(original.header.ProviderId, UdpIpGuid) {
+    kind_header(&original.header)
+}
+fn kind_header(header: &EVENT_HEADER) -> Option<Kind> {
+    let tcp = native::same_guid(header.ProviderId, TcpIpGuid);
+    if !tcp && !native::same_guid(header.ProviderId, UdpIpGuid) {
         return None;
     }
-    let (label, ipv6, operation) = match (tcp, original.header.EventDescriptor.Opcode) {
+    let (label, ipv6, operation) = match (tcp, header.EventDescriptor.Opcode) {
         (true, 10) => ("tcp4_send", false, Operation::Send),
         (true, 11) => ("tcp4_receive", false, Operation::Receive),
         (true, 12) => ("tcp4_connect", false, Operation::Connect),
@@ -398,6 +401,7 @@ fn owned_network_source_reports_controlled_tcp_udp() {
     println!("\nATHERNEX_NETWORK_SOURCE_STAGE=guard_verified");
     native::callback_copies_relocatable_owned_payload_and_rejects_invalid_bounds();
     schema::property_names_and_scalar_metadata_are_bounded_and_typed();
+    schema::failed_property_context_never_contains_private_values();
     fixed_failure_categories_do_not_expose_values();
     diagnostics::exact_configuration_rejects_extra_modes_flags_files_and_clock_changes();
     let outcome = std::panic::catch_unwind(|| -> Result<()> {

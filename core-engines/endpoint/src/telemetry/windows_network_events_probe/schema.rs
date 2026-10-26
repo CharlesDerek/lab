@@ -52,7 +52,7 @@ fn name(bytes: &[u8], offset: u32) -> Result<String> {
     }
     Err("Schema property name unterminated")
 }
-fn property(
+fn property_raw(
     record: &EVENT_RECORD,
     context: &TDH_CONTEXT,
     field: &str,
@@ -86,6 +86,69 @@ fn property(
     })?;
     Ok(value)
 }
+// Formatting has no side effects; only the failed native property path below
+// publishes it. This is an attempted schema, never accepted controlled evidence.
+fn attempt_line(
+    record: &EVENT_RECORD,
+    metadata: &Metadata,
+    field: &str,
+    expected: usize,
+) -> Option<String> {
+    let kind = super::kind_header(&record.EventHeader)?;
+    let count = metadata.properties.len();
+    let index = metadata.order.iter().position(|name| name == field)?;
+    let info = metadata.properties.get(field)?;
+    let flags = record.EventHeader.Flags as u32;
+    let width = match flags & (EVENT_HEADER_FLAG_32_BIT_HEADER | EVENT_HEADER_FLAG_64_BIT_HEADER) {
+        EVENT_HEADER_FLAG_32_BIT_HEADER => 32,
+        EVENT_HEADER_FLAG_64_BIT_HEADER => 64,
+        _ => return None,
+    };
+    if flags & EVENT_HEADER_FLAG_CLASSIC_HEADER == 0
+        || record.EventHeader.TimeStamp <= 0
+        || metadata.pointer_bits != width
+        || !(1..=64).contains(&count)
+        || metadata.order.len() != count
+        || index >= count
+        || !matches!(expected, 1 | 2 | 4 | 8 | 16)
+        || !(1..=49_152).contains(&record.UserDataLength)
+        || metadata.schema_hash.len() != 64
+        || !metadata
+            .schema_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let types = unsafe { info.Anonymous1.nonStructType };
+    Some(format!(
+        "ATHERNEX_NETWORK_SOURCE_SCHEMA_ATTEMPT={}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        kind.label,
+        record.EventHeader.EventDescriptor.Version,
+        metadata.pointer_bits,
+        count,
+        metadata.schema_hash,
+        index,
+        types.InType,
+        types.OutType,
+        expected,
+        record.UserDataLength
+    ))
+}
+fn property(
+    record: &EVENT_RECORD,
+    metadata: &Metadata,
+    field: &str,
+    expected: usize,
+) -> Result<Vec<u8>> {
+    let result = property_raw(record, &metadata.context, field, expected);
+    if result.is_err() {
+        if let Some(line) = attempt_line(record, metadata, field, expected) {
+            println!("\n{line}");
+        }
+    }
+    result
+}
 fn scalar_type(
     properties: &BTreeMap<String, EVENT_PROPERTY_INFO>,
     field: &str,
@@ -107,13 +170,12 @@ fn scalar_type(
 }
 fn scalar32(
     record: &EVENT_RECORD,
-    context: &TDH_CONTEXT,
-    properties: &BTreeMap<String, EVENT_PROPERTY_INFO>,
+    metadata: &Metadata,
     field: &str,
     expected: &[i32],
 ) -> Result<u32> {
-    scalar_type(properties, field, expected)?;
-    let value = property(record, context, field, 4)?;
+    scalar_type(&metadata.properties, field, expected)?;
+    let value = property(record, metadata, field, 4)?;
     Ok(u32::from_le_bytes(
         value.try_into().map_err(|_| "Invalid scalar bytes")?,
     ))
@@ -280,12 +342,7 @@ fn socket(
         TDH_INTYPE_UINT16,
         TDH_OUTTYPE_PORT,
     )?;
-    let bytes = property(
-        record,
-        &metadata.context,
-        address,
-        if ipv6 { 16 } else { 4 },
-    )?;
+    let bytes = property(record, metadata, address, if ipv6 { 16 } else { 4 })?;
     let ip = if ipv6 {
         IpAddr::V6(Ipv6Addr::from(
             <[u8; 16]>::try_from(bytes).map_err(|_| "tdh_property")?,
@@ -295,7 +352,7 @@ fn socket(
             <[u8; 4]>::try_from(bytes).map_err(|_| "tdh_property")?,
         ))
     };
-    let bytes = property(record, &metadata.context, port, 2)?;
+    let bytes = property(record, metadata, port, 2)?;
     let port = u16::from_be_bytes(bytes.try_into().map_err(|_| "tdh_property")?);
     Ok(SocketAddr::new(ip, port))
 }
@@ -322,7 +379,7 @@ fn layout(record: &EVENT_RECORD, original: &Original, metadata: &Metadata) -> Re
             }
             _ => return Err("tdh_schema"),
         };
-        let value = property(record, &metadata.context, field, size)?;
+        let value = property(record, metadata, field, size)?;
         let end = offset.checked_add(size).ok_or("tdh_schema")?;
         require(
             original.data().get(offset..end) == Some(value.as_slice()),
@@ -337,20 +394,8 @@ pub(super) fn decode(original: &Original, ipv6: bool) -> Result<Report> {
     original.with_record(|record| {
         let metadata = metadata(record)?;
         layout(record, original, &metadata)?;
-        let pid = scalar32(
-            record,
-            &metadata.context,
-            &metadata.properties,
-            "PID",
-            &[TDH_INTYPE_UINT32],
-        )?;
-        let size = scalar32(
-            record,
-            &metadata.context,
-            &metadata.properties,
-            "size",
-            &[TDH_INTYPE_UINT32],
-        )?;
+        let pid = scalar32(record, &metadata, "PID", &[TDH_INTYPE_UINT32])?;
+        let size = scalar32(record, &metadata, "size", &[TDH_INTYPE_UINT32])?;
         let source = socket(record, &metadata, ipv6, "saddr", "sport")?;
         let destination = socket(record, &metadata, ipv6, "daddr", "dport")?;
         // Pointer-qualified connid is retained as an original field only. It
@@ -395,4 +440,55 @@ pub(super) fn property_names_and_scalar_metadata_are_bounded_and_typed() {
     fields.get_mut("NetworkId").unwrap().Flags = 0;
     fields.get_mut("NetworkId").unwrap().Anonymous2.count = 2;
     assert!(scalar_type(&fields, "NetworkId", &[TDH_INTYPE_UINT32]).is_err());
+}
+
+#[test]
+pub(super) fn failed_property_context_never_contains_private_values() {
+    let mut record = EVENT_RECORD::default();
+    record.EventHeader.ProviderId = TcpIpGuid;
+    record.EventHeader.EventDescriptor.Opcode = 12;
+    record.EventHeader.EventDescriptor.Version = 2;
+    record.EventHeader.Flags =
+        (EVENT_HEADER_FLAG_CLASSIC_HEADER | EVENT_HEADER_FLAG_64_BIT_HEADER) as u16;
+    record.EventHeader.TimeStamp = 1;
+    record.UserDataLength = 48;
+    let mut info = EVENT_PROPERTY_INFO::default();
+    info.Anonymous1.nonStructType.InType = TDH_INTYPE_UINT32 as u16;
+    info.Anonymous2.count = 1;
+    // Deliberately private-looking metadata names are never projected.
+    let field = "private_field_name";
+    let mut metadata = Metadata {
+        context: TDH_CONTEXT::default(),
+        properties: BTreeMap::from([(field.into(), info)]),
+        order: vec![field.into()],
+        pointer_bits: 64,
+        schema_hash: "0".repeat(64),
+    };
+    let line = attempt_line(&record, &metadata, field, 4).expect("Synthetic diagnostic absent");
+    assert!(
+        line == format!(
+            "ATHERNEX_NETWORK_SOURCE_SCHEMA_ATTEMPT=tcp4_connect:2:64:1:{}:0:8:0:4:48",
+            "0".repeat(64)
+        )
+    );
+    assert!(!line.contains(field));
+    assert!(attempt_line(&record, &metadata, "missing", 4).is_none());
+    assert!(attempt_line(&record, &metadata, field, 3).is_none());
+    metadata.schema_hash = "private_value".into();
+    assert!(attempt_line(&record, &metadata, field, 4).is_none());
+    metadata.schema_hash = "0".repeat(64);
+    metadata.order.push(field.into());
+    assert!(attempt_line(&record, &metadata, field, 4).is_none());
+    metadata.order.pop();
+    for length in [0, 49_153, u16::MAX] {
+        record.UserDataLength = length;
+        assert!(attempt_line(&record, &metadata, field, 4).is_none());
+    }
+    record.UserDataLength = 48;
+    record.EventHeader.Flags |= EVENT_HEADER_FLAG_32_BIT_HEADER as u16;
+    assert!(attempt_line(&record, &metadata, field, 4).is_none());
+    record.EventHeader.Flags =
+        (EVENT_HEADER_FLAG_CLASSIC_HEADER | EVENT_HEADER_FLAG_64_BIT_HEADER) as u16;
+    record.EventHeader.EventDescriptor.Opcode = 255;
+    assert!(attempt_line(&record, &metadata, field, 4).is_none());
 }

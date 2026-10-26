@@ -824,6 +824,10 @@ Failure diagnostics identify fixed ownership-check branches. Only after the
 private session name and GUID match may they expose numeric mode/enable/clock
 configuration and boolean logfile-presence/offset checks. Names, GUIDs, handles
 and logfile text remain private. These diagnostics cannot authorize success.
+Failed TDH decoding may also report a bounded structural schema fingerprint,
+property index, type codes and byte lengths. These attempts stay separate from
+accepted controlled-observation schemas; property names and values remain private.
+Any such attempt prevents the source proof from passing.
 The hybrid-mode handling follows Microsoft's
 [ETW logging-mode contract](https://learn.microsoft.com/en-us/windows/win32/etw/logging-mode-constants).
 
