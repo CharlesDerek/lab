@@ -82,8 +82,13 @@ Linux requires permitted `pidfd_open` and `close_range` syscalls (mainline Linux
 an existing service, and commands refuse unsupported monitoring. See the
 [process descriptor contract](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)
 and [descriptor-range contract](https://man7.org/linux/man-pages/man2/close_range.2.html).
-Mac watchers use process-exit notifications and still require native runtime
-validation. Process-group cleanup does not contain programs that deliberately
+Mac watchers use process-exit notifications. Native macOS ARM64 and x86_64 CI at
+commit `064a559f` passed ordinary child-runner tests and actual-agent response
+tests with controlled broker/scanner fixtures. These exercise bounded I/O,
+guarded worker startup, ordinary cleanup and agent-death handling. Entry into
+the macOS asynchronous cleanup branch remains unproved; entitled Endpoint
+Security operation, production installation, signing and notarization remain
+release gates. Process-group cleanup does not contain programs that deliberately
 move descendants into other sessions/groups, change privileges, or hand work to
 an external service. It does not undo completed writes or make arbitrary scripts
 a sandbox.

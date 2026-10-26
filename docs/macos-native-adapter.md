@@ -185,9 +185,16 @@ A kernel-uninterruptible operation may outlive a kill request, so pending cleanu
 is reported rather than claimed complete. The leader remains waitable until the
 group is signalled, preventing signals to a recycled leader PID. Internal workers
 bind to their parent using Linux parent-death signalling or a macOS process-exit
-watch. macOS runtime validation of that watch remains required. Agent state and
-the installed helper must be on trusted local storage; this does not preempt
-blocked agent database I/O or executable loading.
+watch. At commit `064a559f`, the native
+[ARM64 job](https://github.com/CharlesDerek/lab/actions/runs/40284101846/job/121443635087)
+and [x86_64 job](https://github.com/CharlesDerek/lab/actions/runs/40284101846/job/121443635068)
+passed ordinary child-runner tests and actual-agent response tests with controlled
+broker/scanner fixtures, exercising guarded worker startup, ordinary cleanup and
+agent-death handling. These checks do not prove entry into the macOS asynchronous
+cleanup branch. Entitled Endpoint Security operation, production installation,
+signing and notarization remain release gates. Agent state and the installed
+helper must be on trusted local storage; this does not preempt blocked agent
+database I/O or executable loading.
 
 Native-broker quarantine and restore now run in separate supervised mutation
 workers. The agent commits intent to SQLite before starting the worker. An
