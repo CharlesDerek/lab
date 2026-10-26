@@ -614,12 +614,13 @@ or production detection quality.
 
 Set `"windows_network_events": true` in the enabled private telemetry
 configuration and upgrade the server before enabling the Windows agent source.
+The option defaults to off and requires continuous `run`; `run --once` is refused.
 This separate collector preserves bounded original ETW headers, extended bytes
 and payloads for supported TCP/UDP IPv4/IPv6 connect, accept, send, receive and
 disconnect reports. The owned-session source fixture has exercised all fourteen
-supported version-2 layouts on a 64-bit Windows host. Full production-collector
-acceptance remains pending; source-only proof does not establish agent lifecycle,
-continuous coverage or production readiness.
+supported version-2 layouts on a 64-bit Windows host. The separate component and agent
+proof below has also passed. These controlled fixtures do not establish lossless
+coverage, arbitrary-load capacity or production readiness.
 
 The server reparses each original before admitting its normalized socket fields,
 reported PID, operation size and time. Time is a collector QPC estimate with a
@@ -646,7 +647,10 @@ The separate `windows-network-events` job stages a release agent and one exact
 ignored fixture in a protected LocalSystem/session-zero directory. It requires
 controlled traffic and TDH comparison, independent process collection, visible
 source and queue loss, stalled delivery, forced agent termination and owned-session
-recovery. Exact queued originals must survive restart and acknowledged HTTP;
+recovery. The queue-loss check deliberately exceeds durable admission capacity;
+a separate source-stop check requires a visible coverage gap. Restart replay
+preserves already admitted originals, without recovering missed live ETW records.
+Exact queued originals must survive restart and acknowledged HTTP;
 authenticated exports, conflicting replay refusal, device separation, portal
 evidence, rollout health and server restart are required. Separate portable SIEM
 tests verify escaping of hostile original text. The rollout milestone uses the
@@ -655,9 +659,13 @@ enrollment and update-preflight context, evaluated as of the captured samples.
 It performs no deployment and establishes no SCM or signing acceptance. Raw
 records, addresses, ports, PIDs and kernel tokens remain private. Uploaded evidence is
 limited to `inputs.json` and `network-events-validation.json`, with
-`proof_scope: "component_and_agent"` and `production_readiness: false`. The new
-collector/agent gate must pass on its source revision before native acceptance
-is claimed; passing the earlier source fixture is insufficient.
+`proof_scope: "component_and_agent"` and `production_readiness: false`.
+The `windows-network-events` job passed all 25 required stages in
+[hosted run 40271867997](https://github.com/CharlesDerek/lab/actions/runs/40271867997),
+bound to source
+[dfe2feaed95039261a12a51e11227c4ccdc094b9](https://github.com/CharlesDerek/lab/commit/dfe2feaed95039261a12a51e11227c4ccdc094b9).
+This establishes the controlled component and actual-agent proof above, while
+retaining the stated platform, coverage and production limitations.
 
 ### Optional Windows Security logons
 

@@ -847,7 +847,18 @@ private. The report retains `proof_scope: "source_only"` and
 controlled hosted Windows fixture. This result does not validate production
 collector persistence, durable agent delivery, authenticated original export or
 rollout coverage gates. Those behaviors have a separate `windows-network-events`
-component/agent job whose native acceptance remains pending.
+component and agent job, which passed all 25 required stages in
+[hosted run 40271867997](https://github.com/CharlesDerek/lab/actions/runs/40271867997),
+bound to source
+[dfe2feaed95039261a12a51e11227c4ccdc094b9](https://github.com/CharlesDerek/lab/commit/dfe2feaed95039261a12a51e11227c4ccdc094b9).
+That proof distinguishes deliberate durable queue loss from a separately forced
+source interruption and preserves already admitted originals across restart;
+it cannot replay records missed by live ETW. Its rollout preflight evaluates
+unchanged captured native health as of the samples within synthetic otherwise-ready
+signing, enrollment and update context, without deployment, SCM or signing
+acceptance. Collection remains off by default. The report retains
+`proof_scope: "component_and_agent"` and `production_readiness: false`; the result
+does not establish lossless arbitrary-load coverage or production readiness.
 
 Failure diagnostics identify fixed ownership-check branches. Only after the
 private session name and GUID match may they expose numeric mode/enable/clock
