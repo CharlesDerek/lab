@@ -25,10 +25,12 @@ final class NetworkProvider: NEFilterDataProvider {
             let ipc = try ProviderListener(identity: identity, state: state) { [weak self] in self?.validConfiguration(identity) == true }
             _ = holder.replace(state); self.ipc = ipc
             ipc.start()
-            let rules: [NEFilterRule] = [NENetworkRule.Protocol.TCP, .UDP].map { proto in
+            let rules: [NEFilterRule] = [
                 NEFilterRule(networkRule: NENetworkRule(remoteNetwork: nil, remotePrefix: 0,
-                    localNetwork: nil, localPrefix: 0, protocol: proto, direction: .any), action: .filterData)
-            }
+                    localNetwork: nil, localPrefix: 0, protocol: .TCP, direction: .any), action: .filterData),
+                NEFilterRule(networkRule: NENetworkRule(remoteNetwork: nil, remotePrefix: 0,
+                    localNetwork: nil, localPrefix: 0, protocol: .UDP, direction: .any), action: .filterData)
+            ]
             lifecycle.unlock(); locked = false
             apply(NEFilterSettings(rules: rules, defaultAction: .allow)) { [weak self] error in
                 let good = error == nil && holder.contains(state) && self?.validConfiguration(identity) == true
