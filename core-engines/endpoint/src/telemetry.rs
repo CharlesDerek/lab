@@ -1,5 +1,10 @@
 //! Bounded native OS snapshots, committed atomically with their durable outbox deltas.
 mod authentication;
+mod macos_process_events;
+#[cfg(target_os = "macos")]
+mod macos_process_setup;
+#[cfg(target_os = "macos")]
+pub use macos_process_setup::configure as configure_macos_process_adapter;
 mod network_events;
 mod process_events;
 mod windows_authentication;
@@ -15,6 +20,7 @@ use athernex_endpoint_protocol::{self as protocol, telemetry::*, EndpointEvent};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::{marker::PhantomData, sync::mpsc, thread, time::Duration};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -23,6 +29,41 @@ const MAX_ROWS: usize = 4096;
 const MAX_CHANGES: usize = 128;
 const TELEMETRY_SPOOL_LIMIT: usize = 3072; // Leave room for malware and action results.
 const CAPTURE_HEALTH_MS: u64 = 30_000; // 15-second worker plus bounded database admission.
+
+/// A locally approved helper pin. Installing this pin does not enable collection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MacosProcessAdapter {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+impl MacosProcessAdapter {
+    fn validate(&self) -> Result<()> {
+        let raw = self
+            .path
+            .to_str()
+            .ok_or("Mac process adapter path must be UTF-8")?;
+        if !self.path.is_absolute()
+            || self.path == Path::new("/")
+            || raw.len() > 1024
+            || raw.chars().any(char::is_control)
+            || self.path.components().any(|part| {
+                matches!(
+                    part,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+            || self.sha256.len() != 64
+            || !self
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("Invalid approved Mac process adapter".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +79,10 @@ pub struct TelemetryConfig {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub windows_process_events: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub macos_process_events: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macos_process_adapter: Option<MacosProcessAdapter>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub windows_network_events: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linux_network_events: bool,
@@ -51,6 +96,8 @@ impl Default for TelemetryConfig {
             linux_authentication: false,
             windows_authentication: false,
             windows_process_events: false,
+            macos_process_events: false,
+            macos_process_adapter: None,
             windows_network_events: false,
             linux_network_events: false,
         }
@@ -58,6 +105,14 @@ impl Default for TelemetryConfig {
 }
 impl TelemetryConfig {
     pub fn validate(&self) -> Result<()> {
+        if let Some(adapter) = &self.macos_process_adapter {
+            adapter.validate()?;
+        }
+        if self.macos_process_events
+            && (!self.enabled || !cfg!(target_os = "macos") || self.macos_process_adapter.is_none())
+        {
+            return Err("Mac process collection requires enabled telemetry on macOS and an approved adapter".into());
+        }
         if self.windows_network_events && (!self.enabled || !cfg!(windows)) {
             return Err("Windows network collection requires enabled telemetry on Windows".into());
         }
@@ -368,6 +423,27 @@ pub fn health(store: &Store, config: &TelemetryConfig) -> Result<CollectorHealth
                 "Windows process collection is unavailable, stale or has a coverage gap".into()
             });
     }
+    status.macos_process_events = if config.macos_process_events {
+        macos_process_events::health(store)?
+    } else {
+        None
+    };
+    if config.macos_process_events
+        && !status
+            .macos_process_events
+            .as_ref()
+            .is_some_and(|h| h.healthy(now_ms()))
+    {
+        status.incomplete = true;
+        status.error = status
+            .macos_process_events
+            .as_ref()
+            .map(|h| h.error.clone())
+            .filter(|e| !e.is_empty())
+            .unwrap_or_else(|| {
+                "Mac process collection is unavailable, stale or has a coverage gap".into()
+            });
+    }
     status.windows_network_events = if config.windows_network_events {
         windows_network_events::health(store)?
     } else {
@@ -419,6 +495,7 @@ fn item_key(item: &Telemetry) -> Result<String> {
         | Telemetry::ProcessEvent { .. }
         | Telemetry::WindowsAuthentication { .. }
         | Telemetry::WindowsProcessEvent { .. }
+        | Telemetry::MacosProcessEvent { .. }
         | Telemetry::WindowsNetworkEvent { .. }
         | Telemetry::Authentication { .. } => {
             return Err("Kernel events must not enter the snapshot comparison cache".into())
@@ -553,6 +630,7 @@ pub fn commit_snapshot(store: &Store, snapshot: &Snapshot) -> Result<CollectorHe
         authentication: None,
         windows_authentication: None,
         windows_process_events: None,
+        macos_process_events: None,
         windows_network_events: None,
         mode: "snapshot".into(),
         last_attempt_ms: now,
@@ -710,6 +788,7 @@ pub struct ContinuousCollector<'a> {
     authentication: Option<authentication::Collector<'a>>,
     windows_authentication: Option<windows_authentication::Collector<'a>>,
     windows_process_events: Option<windows_process_events::Collector<'a>>,
+    macos_process_events: Option<macos_process_events::Collector<'a>>,
     windows_network_events: Option<windows_network_events::Collector<'a>>,
     network: Option<network_events::Collector<'a>>,
     owner: PhantomData<&'a Store>,
@@ -745,6 +824,17 @@ impl<'a> ContinuousCollector<'a> {
         } else {
             None
         };
+        let macos_process_events = if policy.macos_process_events {
+            Some(macos_process_events::Collector::start(
+                store,
+                policy
+                    .macos_process_adapter
+                    .as_ref()
+                    .ok_or("Missing approved Mac process adapter")?,
+            )?)
+        } else {
+            None
+        };
         let windows_network_events = if policy.windows_network_events {
             Some(windows_network_events::Collector::start(store)?)
         } else {
@@ -776,6 +866,7 @@ impl<'a> ContinuousCollector<'a> {
             authentication,
             windows_authentication,
             windows_process_events,
+            macos_process_events,
             windows_network_events,
             network,
             owner: PhantomData,
@@ -796,6 +887,9 @@ impl<'a> ContinuousCollector<'a> {
             events.check()?;
         }
         if let Some(events) = &self.windows_process_events {
+            events.check()?;
+        }
+        if let Some(events) = &self.macos_process_events {
             events.check()?;
         }
         if let Some(events) = &self.windows_network_events {

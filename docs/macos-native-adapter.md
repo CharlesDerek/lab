@@ -274,13 +274,99 @@ bundle. Development catalogs without a native component continue to work.
 The Mac installer checks the declared hash, signatures, Gatekeeper acceptance and
 entitlement before stopping an existing service. It stages verified adapter bytes
 privately and replaces `/Library/AthernexEndpoint/athernex-endpoint-native` only
-when the copy is complete. After enrollment and signature provisioning, it invokes
+when the copy is complete. After enrollment it records the verified component hash
+with `configure-macos-process-adapter STATE_DIR APPROVED_SIGNED_ADAPTER SHA256`.
+That setup preserves telemetry enablement and does not require a scanner. After
+signature provisioning, it invokes
 `configure-native-protection STATE_DIR SIGNED_ADAPTER` to prepare the scanner and
 local policy. The restarted controller starts enabled native services. Live
 allow/deny probes, native installation/recovery testing and privacy authorization
 remain release gates; installation does not establish verified prevention.
 
-Setup creates a hidden, disabled `_athernexav` account and dedicated group using
+## Opt-in continuous process observations
+
+The management agent can own a separate, NOTIFY-only Endpoint Security helper for
+EXEC, FORK and EXIT. It uses the installed signed `athernex-endpoint-native`
+executable and an independent ES client. Existing AUTH subscriptions and callback
+logic are unchanged. ES client creation itself can clear the framework's shared
+authorization caches; this separation is not a promise of zero framework effects.
+Process notifications do not establish malware detection, prevented execution or
+authorization success.
+
+Collection is disabled by default. With management stopped, a custom deployment
+can record a previously approved signed helper and its exact release SHA-256:
+
+```sh
+sudo /Library/AthernexEndpoint/athernex-endpoint configure-macos-process-adapter \
+  /Library/AthernexEndpoint/state \
+  /Library/AthernexEndpoint/athernex-endpoint-native APPROVED_RELEASE_SHA256
+```
+
+Setup verifies the hash, private state and canonical root-owned paths while
+holding the maintenance leases. It does not perform signature approval for a
+custom deployment, start the helper, enable telemetry or enable protection. The
+packaged installer supplies the hash after its signature and entitlement checks.
+To request collection, set `telemetry.enabled` and
+`telemetry.macos_process_events` to `true` in the private local configuration,
+preserve the `macos_process_adapter` pin, then restart management. ClamAV and the
+AUTH protection policy are independent of this collector. `run --once` refuses a
+continuous source. A helper upgrade needs a newly approved hash.
+
+The source requires macOS 12 or newer and checks `es_message_t.version >= 5`
+before reading the versioned process and sequence fields. That runtime floor is
+an implementation profile, not evidence that every macOS 12 release has been
+accepted. The helper has its own bounded mute inventory. Before subscribing it
+removes only intersections with these three NOTIFY kinds, preserves other mute
+entries, and verifies the resulting scope. It periodically checks subscriptions
+and scope; a later change creates a persistent coverage gap. The stable policy
+hash is separate from the observed session's mute snapshot hash.
+
+Each event retains a semantic projection, not the complete native message:
+actor and target/child roles, audit tokens, reported numeric parent/group/session
+fields, exact executable path bytes and truncation flag, source event time, raw
+Mach time with its timebase, native sequences, NOTIFY result, and EXIT wait status.
+The projection excludes arguments, environment, working directory, signing
+strings and native memory. Audit-token PID version is an execution discriminator,
+not a whole-process lifetime or proof of ancestry. The SIEM keeps these observations
+separate from current-process and verified-executable joins. Raw paths remain in
+authorized originals; presentation escapes their contents. Public build artifacts
+and routine CI reports do not include live process records.
+
+The helper uses a private inherited socketpair with stream and nonce binding.
+It owns at most 2,048 queued and in-flight records and 8 MiB of their encoded data.
+A frame carries at most 64 records within 1 MiB. Each raw path is bounded to
+16 KiB, the serialized original to 48 KiB and the endpoint envelope to 128 KiB;
+oversized records are rejected with a visible loss counter. Health traffic waits
+for a frame boundary; a stalled partial frame hits a deadline. The existing HTTP
+delivery layer splits batches to its smaller request limits.
+
+SQLite commits the exact batch, source counters and acknowledgement identity in
+one transaction before the helper releases records. Repeated delivery of that
+batch cannot duplicate an already delivered event. A full database queue retains
+the helper's batch without counting it as dropped; continued native callbacks can
+still exhaust the bounded source queue. Shutdown stops the source, drains and
+commits retained records, then confirms child exit, with bounded waits. A timeout
+or failed cleanup remains a gap rather than a successful shutdown.
+
+Source receipt sequences are positive; native ES sequences may start at zero.
+The first observed sequence establishes the baseline. Global and per-kind gap
+counts can overlap and are never added as a total of unique missing events.
+Restarts, decoding failures, scope changes and source losses remain visible in
+durable health. Known abandoned queued records are a lower bound; an unavailable
+native tail cannot be counted exactly. Only committed originals can replay.
+Rollout policy can independently require fresh Mac process health with the exact
+configured source-policy hash and all three subscriptions; aggregate snapshot or
+protection health cannot substitute for it.
+
+Portable queue, protocol, transactional replay, server and installer-order tests
+exercise components. Hosted Mac builds do not supply the ES entitlement or privacy
+authorization. Actual signed-helper collection, coexistence with AUTH, runtime
+loss/stop behavior, installation and recovery on authorized Intel and Apple
+silicon Macs remain native acceptance work.
+
+## Antivirus account and signature setup
+
+Native protection setup creates a hidden, disabled `_athernexav` account and dedicated group using
 the [ClamAV service-account procedure](https://docs.clamav.net/manual/Installing/Add-clamav-user.html).
 It selects unused numeric IDs in 200–499 from the configured directory search
 policy and journals generated record IDs before mutation. The authentication

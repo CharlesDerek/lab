@@ -76,6 +76,15 @@ impl Engine {
                     .collector
                     .as_ref()
                     .is_some_and(|c| c.process_events.is_some()),
+                macos_process_events: endpoint_health
+                    .collector
+                    .as_ref()
+                    .is_some_and(|c| c.macos_process_events.is_some()),
+                macos_process_policy_sha256: endpoint_health
+                    .collector
+                    .as_ref()
+                    .and_then(|c| c.macos_process_events.as_ref())
+                    .map(|h| h.source_policy_sha256.clone()),
                 windows_process_events: endpoint_health
                     .collector
                     .as_ref()

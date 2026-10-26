@@ -258,6 +258,48 @@ async fn observations_page(
                     ),
                 ]);
             }
+            if let protocol::telemetry::Telemetry::MacosProcessEvent { event } = telemetry {
+                let subject = event.subject();
+                let hex = &subject.executable.path_bytes_hex;
+                let bytes: Vec<u8> = hex
+                    .as_bytes()
+                    .chunks_exact(2)
+                    .map(|pair| {
+                        let digit = |v: u8| {
+                            if v.is_ascii_digit() {
+                                v - b'0'
+                            } else {
+                                v - b'a' + 10
+                            }
+                        };
+                        digit(pair[0]) * 16 + digit(pair[1])
+                    })
+                    .collect();
+                let path = std::str::from_utf8(&bytes)
+                    .map(|v| v.to_owned())
+                    .unwrap_or_else(|_| format!("Non-UTF-8 bytes: {hex}"));
+                facts.extend([
+                    ("macOS ES notification", crate::fleet::macos_process_change(&event.change).into()),
+                    ("Reported actor PID / version", format!("{} / {}", event.actor_pid, event.actor_pid_version)),
+                    ("Reported subject PID / version", format!("{} / {}", event.pid, event.pid_version)),
+                    ("Reported parent PID", subject.ppid.to_string()),
+                    ("Reported executable path", path),
+                    ("Source path truncated", subject.executable.path_truncated.to_string()),
+                    ("Subscription", event.original.stream_id.clone()),
+                    ("Collector receipt sequence", event.original.receipt_sequence.to_string()),
+                    ("ES per-type / global sequence", format!("{} / {}", event.original.seq_num, event.original.global_seq_num)),
+                    ("Source Mach ticks", event.original.mach_time.to_string()),
+                    ("Time qualification", "Endpoint Security event timespec; not process start time or a cross-host precision guarantee. Mach timebase is separate collector metadata".into()),
+                    ("Attribution", "Actor and exec target or fork child remain distinct. Reported audit tokens, parent IDs and paths do not establish a current process, complete lifetime, verified executable or ancestry".into()),
+                    ("Retained ES projection", "Selected native fields and collector metadata are preserved in the original observation JSON. This is not the full native message; argv, environment and signing details are excluded. NOTIFY results are not this product's prevention verdict".into()),
+                ]);
+                if let protocol::macos_process_events::MacosProcessPayload::Exit {
+                    raw_wait_status,
+                } = &event.original.event
+                {
+                    facts.push(("Reported raw wait status", raw_wait_status.to_string()));
+                }
+            }
             if let protocol::telemetry::Telemetry::WindowsProcessEvent { event } = telemetry {
                 facts.extend([
                     ("Windows ETW change", crate::fleet::windows_process_change(&event.change).into()),
@@ -519,6 +561,9 @@ async fn portal(State(app): State<App>) -> Result<Html<String>, WebError> {
             }
             if let Some(events) = &c.process_events {
                 write!(content,"<p>Kernel process events: {} · {} received · {} dropped · {} loss notifications · {} subscriptions</p><p>Current subscription began {} UTC. Activity outside subscription windows is not observed.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_events,events.dropped_events,events.loss_signals,events.subscriptions,crate::render::time(events.started_ms),escape(&events.error)).unwrap();
+            }
+            if let Some(events) = &c.macos_process_events {
+                write!(content,"<p>macOS Endpoint Security process events: {} · {} received · {} admitted · {} rejected · {} loss notifications</p><p>Live exec/fork/exit notifications only; subscription gaps have no source replay. Exact retained projections can replay after durable admission. Source policy: <code>{}</code>. Observed mute scope: <code>{}</code>; {} path entries, {} process entries, {} subscribed-event intersections.</p><p>Global and per-type gap counters describe overlapping evidence and are not summed. Audit tokens and paths are historical reports, not current process or ancestry assertions. Arguments and environment are excluded.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_records,events.admitted_records,events.rejected_records,events.loss_signals,escape(&events.source_policy_sha256),escape(&events.mute_snapshot_sha256),events.muted_path_count,events.muted_process_count,events.subscribed_mute_count,escape(&events.error)).unwrap();
             }
             if let Some(events) = &c.windows_process_events {
                 write!(content,"<p>Windows ETW process events: {} · {} received · {} admitted · {} rejected · {} loss notifications</p><p>Collection began {} UTC. Live source only; collector restarts and gaps have no ETW source replay. Reported identifiers do not establish verified process lifetimes.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_records,events.admitted_records,events.rejected_records,events.loss_signals,crate::render::time(events.started_ms),escape(&events.error)).unwrap();

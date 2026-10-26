@@ -45,6 +45,8 @@ fn main() -> Result<()> {
         println!("athernex-endpoint configure-protection STATE_DIR\nathernex-endpoint protect STATE_DIR\nLinux native prevention requires root, clamd/clamonacc, signatures and configured scan roots. The installer creates its separate protection service.");
         #[cfg(target_os = "macos")]
         println!("athernex-endpoint configure-native-protection STATE_DIR SIGNED_ADAPTER\nathernex-endpoint protect STATE_DIR\nmacOS setup requires a signed Endpoint Security adapter and provisioned ClamAV signatures. It prepares a dedicated scanner account and runtime. The controller starts enabled protection separately; native authorization and live blocking remain unverified.");
+        #[cfg(target_os = "macos")]
+        println!("athernex-endpoint configure-macos-process-adapter STATE_DIR APPROVED_SIGNED_ADAPTER SHA256\nRecords the approved process helper pin with services stopped. This does not enable telemetry or protection and does not require ClamAV. Enable macos_process_events separately in local telemetry policy.");
         return Ok(());
     }
     match args[0].as_str() {
@@ -341,6 +343,14 @@ fn main() -> Result<()> {
                 std::path::Path::new(&args[2]),
             )?;
         }
+        #[cfg(target_os = "macos")]
+        "configure-macos-process-adapter" if args.len() == 4 => {
+            athernex_endpoint::telemetry::configure_macos_process_adapter(
+                std::path::Path::new(&args[1]),
+                std::path::Path::new(&args[2]),
+                &args[3],
+            )?;
+        }
         #[cfg(target_os = "linux")]
         "configure-native-fixture" if args.len() == 6 => {
             athernex_endpoint::protection::native_setup::configure_fixture(
@@ -455,6 +465,7 @@ fn main() -> Result<()> {
                         || config.telemetry.linux_authentication
                         || config.telemetry.windows_authentication
                         || config.telemetry.windows_process_events
+                        || config.telemetry.macos_process_events
                         || config.telemetry.windows_network_events
                         || config.telemetry.linux_network_events
                     {
@@ -478,6 +489,7 @@ fn main() -> Result<()> {
                     || telemetry_policy.linux_authentication
                     || telemetry_policy.windows_authentication
                     || telemetry_policy.windows_process_events
+                    || telemetry_policy.macos_process_events
                     || telemetry_policy.windows_network_events
                     || telemetry_policy.linux_network_events)
             {

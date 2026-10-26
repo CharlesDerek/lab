@@ -10,6 +10,17 @@ use protocol::{Action, Command, EndpointEvent, Enrollment, Heartbeat, Platform, 
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
+pub(crate) fn macos_process_change(
+    change: &protocol::macos_process_events::MacosProcessChange,
+) -> &'static str {
+    use protocol::macos_process_events::MacosProcessChange;
+    match change {
+        MacosProcessChange::Exec => "exec",
+        MacosProcessChange::Fork => "fork",
+        MacosProcessChange::Exit => "exit",
+    }
+}
+
 pub(crate) fn windows_process_change(
     change: &protocol::windows_process_events::WindowsProcessChange,
 ) -> &'static str {
@@ -354,6 +365,10 @@ impl Engine {
                 Some(Telemetry::WindowsAuthentication { event }) => Some(event),
                 _ => None,
             };
+            let macos_process = match &event.telemetry {
+                Some(Telemetry::MacosProcessEvent { event }) => Some(event),
+                _ => None,
+            };
             let windows_process = match &event.telemetry {
                 Some(Telemetry::WindowsProcessEvent { event }) => Some(event),
                 _ => None,
@@ -429,6 +444,14 @@ impl Engine {
                     windows_process_change(&process.change)
                 );
             }
+            if let Some(process) = macos_process {
+                context.program = "macOS Endpoint Security".into();
+                context.pid = Some(process.pid);
+                context.summary = format!(
+                    "macOS Endpoint Security {} notification; source event time. Retained projection only; reported audit tokens and paths do not establish current process identity, complete lifetime or ancestry.",
+                    macos_process_change(&process.change)
+                );
+            }
             if let Some(network) = windows_network {
                 context.program = "Windows kernel network ETW".into();
                 context.pid = Some(network.reported_pid);
@@ -449,6 +472,9 @@ impl Engine {
                     .source_ip
                     .map(|ip| ip.to_string())
                     .unwrap_or_else(|| "local-authentication".into()),
+                Some(Telemetry::MacosProcessEvent { event }) => protocol::hash(
+                    format!("{id}:macos-process-observation:{}", event.event_id()).as_bytes(),
+                ),
                 Some(Telemetry::WindowsProcessEvent { event }) => protocol::hash(
                     format!("{id}:windows-process-observation:{}", event.event_id()).as_bytes(),
                 ),
@@ -522,7 +548,10 @@ impl Engine {
                 object,
                 kind: match event.kind.as_str() {
                     "malware" => Kind::Malware,
-                    "process" | "process_event" | "windows_process_event" => Kind::Process,
+                    "process"
+                    | "process_event"
+                    | "windows_process_event"
+                    | "macos_process_event" => Kind::Process,
                     "connection" | "network_event" | "windows_network_event" => Kind::Network,
                     "authentication" => Kind::Authentication,
                     _ => Kind::System,

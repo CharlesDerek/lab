@@ -13,6 +13,13 @@ fn run() -> Result<()> {
         // Copied and re-signed health images exercise real native exec without
         // opening service state, starting a scanner, or acquiring entitlements.
         Some("--athernex-health-image") if args.len() == 1 => Ok(()),
+        #[cfg(target_os = "macos")]
+        Some("process-events-owned") if args.len() == 3 => {
+            athernex_endpoint_native::macos_process_events::run_owned(
+                args[1].parse()?,
+                args[2].parse()?,
+            )
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Some("health-status") if args.len() == 2 => {
             let plan=athernex_endpoint_native::service::read_plan(std::path::Path::new(&args[1]))?;

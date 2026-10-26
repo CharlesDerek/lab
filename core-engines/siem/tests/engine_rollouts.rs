@@ -262,6 +262,7 @@ fn engine_rollouts_keep_the_reviewed_authentication_requirement() {
                 network_events: None,
                 process_events: None,
                 windows_process_events: None,
+                macos_process_events: None,
                 windows_network_events: None,
                 windows_authentication: windows.then_some(healthy.clone()),
                 mode: "snapshot".into(),
@@ -637,4 +638,109 @@ fn recovered_rollback_can_stage_newer_release_but_current_degradation_still_bloc
         .engine
         .propose_engine_update(&f.ids[1], &f.release, &f.key, false, NOW + 1)
         .is_err());
+}
+
+#[test]
+fn engine_rollouts_pin_macos_process_coverage_and_stop_after_a_gap() {
+    for failure in 0..8 {
+        let mut f = Fixture::new();
+        f.health.collector = Some(p::telemetry::CollectorHealth {
+            mode: "snapshot".into(),
+            last_attempt_ms: NOW,
+            last_success_ms: NOW,
+            macos_process_events: Some(p::macos_process_events::MacosProcessEventHealth {
+                stream_id: "c".repeat(64),
+                state: "active".into(),
+                source_policy_sha256: p::macos_process_events::source_policy_sha256(),
+                scope_checked_ms: NOW,
+                mute_snapshot_sha256: "e".repeat(64),
+                started_ms: NOW - 60_000,
+                checked_ms: NOW,
+                subscriptions: 3,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        for index in 0..3 {
+            f.beat(index, false, NOW);
+        }
+        let id = f.propose();
+        assert!(f
+            .engine
+            .engine_rollout(&id)
+            .unwrap()
+            .plan
+            .gates
+            .iter()
+            .all(|gate| gate.macos_process_events
+                && !gate.process_events
+                && gate.macos_process_policy_sha256.as_deref()
+                    == Some(p::macos_process_events::source_policy_sha256().as_str())));
+        let pinned_hash = f.engine.engine_rollout(&id).unwrap().plan_hash;
+        f.review(&id, "approve", NOW);
+        f.engine.tick_engine_rollouts(NOW).unwrap();
+        f.install(0, "installed", NOW + 1);
+        f.beat(0, true, NOW + 2);
+        let mut bad = f.health.clone();
+        let collector = bad.collector.as_mut().unwrap();
+        collector.process_events = Some(p::process_events::ProcessEventHealth {
+            boot_id: "a".repeat(64),
+            stream_id: "b".repeat(64),
+            state: "active".into(),
+            started_ms: NOW,
+            checked_ms: NOW,
+            subscriptions: 1,
+            received_events: 0,
+            dropped_events: 0,
+            loss_signals: 0,
+            error: String::new(),
+        });
+        if failure == 0 {
+            collector.macos_process_events = None;
+        } else {
+            let source = collector.macos_process_events.as_mut().unwrap();
+            match failure {
+                1 => source.global_sequence_gaps = 1,
+                2 => source.checked_ms = NOW - 30_001,
+                3 => source.source_policy_sha256 = "f".repeat(64),
+                4 => source.subscribed_mute_count = 1,
+                5 => source.scope_checked_ms = NOW - 30_001,
+                6 => source.transport_errors = 1,
+                _ => {
+                    source.subscriptions = 3;
+                    source.loss_signals = 1;
+                    source.state = "active".into();
+                    source.error.clear();
+                }
+            }
+        }
+        f.engine
+            .endpoint_heartbeat(&f.ids[0], &bad, NOW + 3)
+            .unwrap();
+        let record = f.engine.engine_rollout(&id).unwrap();
+        assert_eq!(record.state, "failed");
+        assert_eq!(record.plan_hash, pinned_hash);
+        assert!(record.members[1..]
+            .iter()
+            .all(|member| member.deployment_id.is_none()));
+        let collector = f.health.collector.as_mut().unwrap();
+        collector.last_attempt_ms = NOW + 60_010;
+        collector.last_success_ms = NOW + 60_010;
+        collector.macos_process_events.as_mut().unwrap().checked_ms = NOW + 60_010;
+        collector
+            .macos_process_events
+            .as_mut()
+            .unwrap()
+            .scope_checked_ms = NOW + 60_010;
+        for index in 0..3 {
+            f.beat(index, index == 0, NOW + 60_010);
+        }
+        f.engine.tick_engine_rollouts(NOW + 60_010).unwrap();
+        let record = f.engine.engine_rollout(&id).unwrap();
+        assert_eq!(record.state, "failed");
+        assert_eq!(record.plan_hash, pinned_hash);
+        assert!(record.members[1..]
+            .iter()
+            .all(|member| member.deployment_id.is_none()));
+    }
 }

@@ -566,6 +566,8 @@ jobs:
         run: cargo test --locked --no-fail-fast -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native
       - name: Test native evidence sealing and verified backup recovery
         run: cargo test --locked -p athernex-siem --test storage_segments complete_backup_verifies_and_restores_history
+      - name: Test retained Mac process observations and independent rollout gates
+        run: cargo test --locked -p athernex-siem --test macos_process_events --test endpoint_rollouts --test engine_rollouts
       - name: Refuse disabled assertions in validation tools and isolated helpers
         run: python tools/test_verification_guards.py -v
       - name: Test artifact packaging with controlled signature results

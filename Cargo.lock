@@ -57,9 +57,12 @@ dependencies = [
 name = "athernex-endpoint-native"
 version = "0.1.0"
 dependencies = [
+ "athernex-endpoint-protocol",
+ "block2",
  "endpoint-sec",
  "getrandom 0.4.3",
  "libc",
+ "mach2",
  "serde",
  "serde_json",
  "sha2",

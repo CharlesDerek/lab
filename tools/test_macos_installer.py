@@ -42,6 +42,7 @@ elif role in ('athernex-endpoint','athernex-controller'):
         value=json.loads(Path(args[1]).read_text())['native_adapter']['sha256']
         print(value)
     elif args[0]=='enroll': Path(args[2]).mkdir(parents=True,exist_ok=True)
+    elif args[0]=='configure-macos-process-adapter' and case=='process-pin-failure': sys.exit(1)
     elif args[0]=='configure-native-protection' and case=='native-setup-failure': sys.exit(1)
 else: sys.exit('Unexpected fixture invocation: '+role)
 '''
@@ -98,6 +99,11 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('"bootstrap"',calls)
         self.assertLess(calls.index('"provision-antivirus"'),calls.index('"configure-native-protection"'))
         self.assertLess(calls.index('"configure-native-protection"'),calls.index('"bootstrap"'))
+        self.assertLess(calls.index('"enroll"'),calls.index('"configure-macos-process-adapter"'))
+        self.assertLess(calls.index('"configure-macos-process-adapter"'),calls.index('"provision-antivirus"'))
+        pin = [json.loads(line.split(' ',1)[1]) for line in calls.splitlines() if '"configure-macos-process-adapter"' in line]
+        self.assertEqual(len(pin),1)
+        self.assertEqual(pin[0],['configure-macos-process-adapter',str(installed/'state'),str(retained),hashlib.sha256(native).hexdigest()])
         self.assertIn('real-time protection remains unverified',result.stdout)
         self.assertFalse((bundle / 'bootstrap.json').exists())
         self.assertEqual(list(installed.glob('.native.*')),[])
@@ -125,12 +131,21 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertNotIn('installer-native-hash',calls)
         self.assertNotIn('configure-native-protection',calls)
+        self.assertNotIn('configure-macos-process-adapter',calls)
         self.assertEqual(retained.read_bytes(),b'previous adapter')
 
     def test_native_setup_failure_retains_bootstrap_and_does_not_start_service(self):
         result,calls,_,_,_,bundle,_ = self.run_installer('native-setup-failure')
         self.assertNotEqual(result.returncode,0)
         self.assertIn('"configure-native-protection"',calls)
+        self.assertNotIn('"bootstrap"',calls)
+        self.assertTrue((bundle/'bootstrap.json').exists())
+
+    def test_process_pin_failure_stops_before_scanner_setup_and_service_start(self):
+        result,calls,_,_,_,bundle,_ = self.run_installer('process-pin-failure')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('"configure-macos-process-adapter"',calls)
+        self.assertNotIn('"provision-antivirus"',calls)
         self.assertNotIn('"bootstrap"',calls)
         self.assertTrue((bundle/'bootstrap.json').exists())
 

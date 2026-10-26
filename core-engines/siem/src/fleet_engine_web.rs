@@ -488,6 +488,16 @@ async fn portal(
                 .iter()
                 .position(|id| id == &member.endpoint_id)
                 .and_then(|index| plan.gates.get(index))
+                .is_some_and(|gate| gate.macos_process_events)
+            {
+                html.push_str("<p>Required: healthy macOS Endpoint Security process coverage with the reviewed source policy; Linux and Windows sources cannot replace it.</p>");
+            }
+            if plan
+                .request
+                .endpoint_ids
+                .iter()
+                .position(|id| id == &member.endpoint_id)
+                .and_then(|index| plan.gates.get(index))
                 .is_some_and(|gate| gate.windows_process_events)
             {
                 html.push_str("<p>Required: healthy Windows ETW process coverage; Linux process coverage cannot replace this source.</p>");

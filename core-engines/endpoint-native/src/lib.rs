@@ -16,6 +16,8 @@ pub mod child;
 pub mod coverage;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod health;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod macos_process_events;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub mod mutation;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

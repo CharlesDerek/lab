@@ -51,6 +51,11 @@ if [ -n "$native_hash" ]; then
   mv -f "$native_pending" /Library/AthernexEndpoint/athernex-endpoint-native
 fi
 /Library/AthernexEndpoint/athernex-endpoint enroll ./bootstrap.json /Library/AthernexEndpoint/state
+if [ -n "$native_hash" ]; then
+  # Pin the already verified helper independently of scanner/protection setup.
+  # This preserves the existing telemetry enablement policy.
+  /Library/AthernexEndpoint/athernex-endpoint configure-macos-process-adapter /Library/AthernexEndpoint/state /Library/AthernexEndpoint/athernex-endpoint-native "$native_hash"
+fi
 /Library/AthernexEndpoint/athernex-endpoint provision-antivirus ./bootstrap.json /Library/AthernexEndpoint/state
 if [ -n "$native_hash" ]; then
   /Library/AthernexEndpoint/athernex-endpoint configure-native-protection /Library/AthernexEndpoint/state /Library/AthernexEndpoint/athernex-endpoint-native

@@ -77,6 +77,7 @@ impl Fixture {
                 network_events: None,
                 process_events: None,
                 windows_process_events: None,
+                macos_process_events: None,
                 windows_network_events: None,
                 authentication: None,
                 windows_authentication: None,
@@ -969,4 +970,114 @@ async fn rollout_routes_require_operator_authorization_and_csrf() {
             .state,
         "scheduled"
     );
+}
+
+#[test]
+fn agent_and_controller_rollouts_pin_macos_process_coverage_and_stop_after_a_gap() {
+    for component in [wire::Component::Agent, wire::Component::Controller] {
+        for failure in 0..8 {
+            let mut f = Fixture::new_component(2, component);
+            let t = f.now;
+            let macos = p::macos_process_events::MacosProcessEventHealth {
+                stream_id: "c".repeat(64),
+                state: "active".into(),
+                source_policy_sha256: p::macos_process_events::source_policy_sha256(),
+                scope_checked_ms: t,
+                mute_snapshot_sha256: "e".repeat(64),
+                started_ms: t - 60_000,
+                checked_ms: t,
+                subscriptions: 3,
+                ..Default::default()
+            };
+            f.health.collector.as_mut().unwrap().macos_process_events = Some(macos);
+            for index in 0..2 {
+                f.beat(index, "ready", t);
+            }
+            let id = f.propose();
+            assert!(f
+                .engine
+                .endpoint_rollout(&id)
+                .unwrap()
+                .plan
+                .gates
+                .iter()
+                .all(|gate| gate.macos_process_events
+                    && !gate.process_events
+                    && gate.macos_process_policy_sha256.as_deref()
+                        == Some(p::macos_process_events::source_policy_sha256().as_str())));
+            let pinned_hash = f.engine.endpoint_rollout(&id).unwrap().plan_hash;
+            f.review(&id, "approve", t);
+            f.engine.tick_endpoint_rollouts(t + 1000).unwrap();
+            f.complete(0, t + 2000);
+            f.beat(0, "installed", t + 3000);
+            let mut bad = f.health_at("installed", t + 4000);
+            let collector = bad.collector.as_mut().unwrap();
+            collector.process_events = Some(p::process_events::ProcessEventHealth {
+                boot_id: "a".repeat(64),
+                stream_id: "b".repeat(64),
+                state: "active".into(),
+                started_ms: t,
+                checked_ms: t + 4000,
+                subscriptions: 1,
+                received_events: 0,
+                dropped_events: 0,
+                loss_signals: 0,
+                error: String::new(),
+            });
+            if failure == 0 {
+                collector.macos_process_events = None;
+            } else {
+                let source = collector.macos_process_events.as_mut().unwrap();
+                match failure {
+                    1 => source.global_sequence_gaps = 1,
+                    2 => source.checked_ms = t - 30_001,
+                    3 => source.source_policy_sha256 = "f".repeat(64),
+                    4 => source.subscribed_mute_count = 1,
+                    5 => source.scope_checked_ms = t - 30_001,
+                    6 => source.transport_errors = 1,
+                    _ => {
+                        source.subscriptions = 3;
+                        source.loss_signals = 1;
+                        source.state = "active".into();
+                        source.error.clear();
+                    }
+                }
+            }
+            f.engine
+                .endpoint_heartbeat(&f.ids[0], &bad, t + 4000)
+                .unwrap();
+            let record = f.engine.endpoint_rollout(&id).unwrap();
+            assert_eq!(record.state, "failed");
+            assert_eq!(record.plan_hash, pinned_hash);
+            assert!(record.members[1].deployment_id.is_none());
+            f.health
+                .collector
+                .as_mut()
+                .unwrap()
+                .macos_process_events
+                .as_mut()
+                .unwrap()
+                .checked_ms = t + 65_000;
+            f.health
+                .collector
+                .as_mut()
+                .unwrap()
+                .macos_process_events
+                .as_mut()
+                .unwrap()
+                .scope_checked_ms = t + 65_000;
+            for index in 0..2 {
+                f.beat(
+                    index,
+                    if index == 0 { "installed" } else { "ready" },
+                    t + 65_000,
+                );
+            }
+            f.engine.tick_endpoint_rollouts(t + 65_000).unwrap();
+            let record = f.engine.endpoint_rollout(&id).unwrap();
+            assert_eq!(record.state, "failed");
+            assert_eq!(record.plan_hash, pinned_hash);
+            assert!(record.members[1].deployment_id.is_none());
+        }
+    }
 }
