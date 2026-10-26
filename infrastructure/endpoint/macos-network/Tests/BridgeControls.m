@@ -1,4 +1,4 @@
-#import "bridge.h"
+#import "../../../../core-engines/macos-network/src/macos/bridge.h"
 #include <stdio.h>
 #include <string.h>
 
