@@ -6,6 +6,8 @@ use athernex_endpoint_protocol::macos_network_events::{
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[cfg(any(target_os = "macos", all(test, unix)))]
+mod assessment;
 mod client;
 #[cfg(target_os = "macos")]
 mod macos;

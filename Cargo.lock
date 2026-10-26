@@ -90,6 +90,7 @@ dependencies = [
 name = "athernex-macos-network"
 version = "0.1.0"
 dependencies = [
+ "athernex-endpoint-native",
  "athernex-endpoint-protocol",
  "cc",
  "getrandom 0.4.3",

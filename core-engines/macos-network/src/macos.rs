@@ -144,5 +144,6 @@ pub(crate) fn inspect_bundle(path: &Path, expected: &BundleIdentity) -> Result<B
             athernex_endpoint_protocol::macos_network_events::source_policy_sha256(),
     };
     c.validate()?;
+    crate::assessment::verify(Path::new(path))?;
     Ok(inspected)
 }

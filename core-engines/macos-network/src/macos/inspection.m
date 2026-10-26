@@ -1,6 +1,5 @@
 #import "bridge.h"
 #import "NetworkIPC.h"
-#import <Security/SecAssessment.h>
 #import <Security/SecTask.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -44,14 +43,6 @@ static NSDictionary *AXVerifyBundle(NSURL *url,NSString *team,NSString *identifi
         ||![info[(__bridge NSString *)kSecCodeInfoTeamIdentifier] isEqual:team])return nil;
     return info;
 }
-static BOOL AXAssessment(NSURL *url){
-    NSDictionary *context=@{(__bridge NSString *)kSecAssessmentContextKeyOperation:(__bridge NSString *)kSecAssessmentOperationTypeExecute};
-    SecAssessmentRef assessment=SecAssessmentCreate((__bridge CFURLRef)url,kSecAssessmentDefaultFlags,(__bridge CFDictionaryRef)context,NULL);
-    if(!assessment)return NO;CFDictionaryRef result=SecAssessmentCopyResult(assessment,kSecAssessmentDefaultFlags,NULL);
-    CFRelease(assessment);if(!result)return NO;
-    CFTypeRef value=CFDictionaryGetValue(result,kSecAssessmentAssessmentVerdict);
-    BOOL good=value==kCFBooleanTrue;CFRelease(result);return good;
-}
 static BOOL AXBundleInfo(NSDictionary *info,NSDictionary *identity,BOOL provider){
     NSDictionary *plist=info[(__bridge NSString *)kSecCodeInfoPList];
     NSDictionary *entitlements=info[(__bridge NSString *)kSecCodeInfoEntitlementsDict];
@@ -88,7 +79,7 @@ static NSData *AXInspect(NSData *input){
     NSURL *container=[NSURL fileURLWithPath:path isDirectory:YES],*provider=[NSURL fileURLWithPath:nested isDirectory:YES];
     NSDictionary *c=AXVerifyBundle(container,identity[@"team_id"],identity[@"container_identifier"]);
     NSDictionary *p=AXVerifyBundle(provider,identity[@"team_id"],providerID);
-    if(!c||!p||!AXBundleInfo(c,identity,NO)||!AXBundleInfo(p,identity,YES)||!AXAssessment(container))return nil;
+    if(!c||!p||!AXBundleInfo(c,identity,NO)||!AXBundleInfo(p,identity,YES))return nil;
     // The API enumerates digest algorithms for the host-selected architecture.
     // Validation above checked all slices; this is not an all-architecture list.
     NSArray *hashes=p[(__bridge NSString *)kSecCodeInfoCdHashes];
@@ -107,7 +98,8 @@ int ax_network_inspect(const uint8_t *bytes,size_t length,AXNetworkReply *out){
         if(!out||!bytes||length>8192||geteuid()!=0)return 1;memset(out,0,sizeof(*out));
         if(@available(macOS 13.0,*)){}else{return 1;}
         // Inspection is a maintenance operation, not the callback or bounded
-        // XPC exchange. Security/Gatekeeper may wait on native services.
+        // XPC exchange. Security may wait on native services. The Rust caller
+        // separately requires the bounded system Gatekeeper assessment command.
         NSData *reply=AXInspect([NSData dataWithBytes:bytes length:length]);if(!reply)return 1;
         out->control=malloc(reply.length);if(!out->control)return 1;
         memcpy(out->control,reply.bytes,reply.length);out->control_len=reply.length;return 0;

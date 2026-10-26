@@ -44,12 +44,16 @@ fn fixture() -> (Tree, MacosNetworkArtifact) {
     (tree, a)
 }
 fn archive(tree: &Tree, a: &mut MacosNetworkArtifact) -> Vec<u8> {
+    archive_for_system(tree, a, zip::System::Unix)
+}
+fn archive_for_system(tree: &Tree, a: &mut MacosNetworkArtifact, system: zip::System) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (path, (mode, bytes)) in tree {
         writer
             .start_file(
                 path,
                 zip::write::SimpleFileOptions::default()
+                    .system(system)
                     .compression_method(zip::CompressionMethod::Stored)
                     .unix_permissions(*mode),
             )
@@ -72,6 +76,15 @@ fn exact_archive_modes_architecture_and_tree_are_bound() {
     assert!(unpack(&changed, &a, "macos-aarch64").is_err());
     a.tree_sha256 = "f".repeat(64);
     assert!(unpack(&bytes, &a, "macos-aarch64").is_err());
+}
+#[test]
+fn dos_creator_cannot_substitute_for_unix_permission_semantics() {
+    let (tree, mut artifact) = fixture();
+    let bytes = archive_for_system(&tree, &mut artifact, zip::System::Dos);
+    assert!(unpack(&bytes, &artifact, "macos-aarch64")
+        .unwrap_err()
+        .to_string()
+        .contains("central entry"));
 }
 #[test]
 fn traversal_unexpected_profiles_and_writeable_modes_are_refused_before_extraction() {

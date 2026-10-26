@@ -807,6 +807,13 @@ and output arguments. The private identity JSON contains `team_id`,
 `agent_identifier`, `container_identifier`, `provider_identifier`, `app_group`
 and `mach_service_name`. The inspector verifies signatures, Gatekeeper acceptance,
 entitlements and the running management binary's app-group compatibility.
+System-policy assessment uses Apple's installed `/usr/sbin/spctl --assess --type
+execute` with the same immutable app path, a cleared environment and the existing
+owned-child runner. It requires exit zero, bounds the command to 30 seconds and
+4096 combined output bytes, and discards output. Native Security inspection and
+OS cleanup can still wait; this is not a hard deadline for the whole inspection.
+The running-process entitlement check continues to use the public `SecTask`
+current-task APIs. The unavailable `SecAssessment.h` interface is not used.
 Direct Developer-ID distribution requires the network extension's
 `content-filter-provider-systemextension` entitlement value. Production signing,
 notarization and actual OS approval must be supplied and validated separately.
