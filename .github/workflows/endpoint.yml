@@ -15,6 +15,7 @@ on:
       - 'tools/engine_rollout.py'
       - 'tools/verify_process_events.py'
       - 'tools/verify_auth_events.py'
+      - 'tools/test_auth_event_fixture.py'
       - 'tools/verify_network_events.py'
       - 'tools/verify_network_fleet.py'
       - 'tools/network_fleet_tls.py'
@@ -446,6 +447,8 @@ jobs:
           python-version: '3.12'
       - name: Verify native network evidence privacy with mocked execution
         run: python tools/test_network_events.py -v
+      - name: Verify native authentication evidence privacy and failure handling
+        run: python tools/test_auth_event_fixture.py -v
       - name: Build agent and control plane
         run: cargo build --locked --release -p athernex-endpoint -p athernex-siem -p athernex-endpoint-native
       - name: Prepare verified native AV engine

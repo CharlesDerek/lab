@@ -1,4 +1,6 @@
 //! Opt-in system journal authentication collection with transactional cursor admission.
+#[cfg(all(test, target_os = "linux"))]
+mod certificate_test;
 #[cfg(target_os = "linux")]
 mod journal_service;
 #[cfg(target_os = "linux")]

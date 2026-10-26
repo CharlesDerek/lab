@@ -508,9 +508,23 @@ from the known SSH, sudo, login and su executables. It uses journal-supplied exe
 the caller-supplied syslog identifier. A key lookup, opened session or authorized
 sudo command is not treated as a completed authentication. Parsing is deliberately
 limited to the supported message forms; ambiguous addresses, duplicate PAM fields
-and unsupported authentication suffixes are rejected and counted. Certificate
-details, translated/custom PAM messages and other identity providers require
-additional parsers and native validation.
+and unsupported authentication suffixes are rejected and counted. Supported
+ED25519 user-certificate results with an ED25519 CA and SHA256 fingerprints use
+the same prefix-bound claimed account and source as ordinary public-key reports.
+The bounded certificate key ID remains opaque original text: account-like or
+address-like text inside it cannot replace those fields. Ambiguous serial/CA
+boundaries, other certificate profiles, translated/custom PAM messages and other
+identity providers are refused pending additional parsers and native validation.
+
+An OpenSSH `Failed publickey` report can describe a rejected offer before another
+credential succeeds on the same connection. It is not a final session-failure
+claim. `Accepted` reports the authentication-method result; it does not prove
+that later PAM account checks, authorization or session opening succeeded.
+Certificate eligibility/lookup, `Partial` multifactor results and `Postponed`
+reports supply no allow/deny outcome. Certificate metadata that appears in the
+original message is not promoted to OS UIDs, cross-device account identity or
+verified certificate ownership; the collector does not reconstruct the complete
+certificate or its principals from these reports.
 
 For sudo, the invoking account before the report separator is the claimed
 account; `USER=` names the requested target and is not substituted for it.
@@ -601,7 +615,7 @@ python3 tools/verify_auth_events.py --manifest /tmp/authentication-tests.jsonl -
 Debian 13 acceptance exercised OpenSSH 10.0p1, PAM 1.7, sudo 1.9.16 and
 systemd 257. All five native checks passed with the existing producer rules;
 the observed terminal SSH reports came from `/usr/lib/openssh/sshd-session`.
-The fixture explicitly disables supported OpenSSH source penalties in its two
+The fixture explicitly disables supported OpenSSH source penalties in its
 private SSH configurations and verifies the effective setting, so its deliberate
 denial burst produces authentication reports instead of pre-authentication
 connection drops. Older servers retain their existing configuration. Exact-original,
@@ -609,6 +623,26 @@ queue, restart, retention, detection and missing-provenance assertions remain
 required. These isolated containers share the host kernel; this evidence does
 not establish separate-host reliability, every PAM provider, localized messages
 or production detection quality.
+
+A separate certificate acceptance check uses generated ED25519 keys and CAs in
+the same private tmpfs. It requires actual valid, wrong-principal, untrusted and
+expired certificate offers; a rejected offer followed by success on one
+connection; opaque key-ID delimiter controls; and native eligibility and partial
+multifactor reports. The controlled socket supplies the source port independently
+of journal text. Exact originals, visible ambiguous-message rejection, journal
+restart, SIEM replay/conflict refusal and operator-authenticated export remain
+required. This check exercises the native collector and durable store, direct
+committed SIEM ingestion, and real authenticated HTTP export. The existing
+ordinary-SSH actual-agent delivery fixture remains a separate gate; this new
+check does not establish actual-agent certificate delivery. The additional check
+passed in both the private Ubuntu 24.04 and Debian 13 images alongside all four
+existing main authentication gates. The separate missing-executable-provenance
+check also passed on both images. This is local container acceptance using a
+shared kernel, not separate-host or production-capacity evidence. The verifier
+keeps container stdout/stderr and failure journal details in an owner-private
+local log, accepts an explicit `--private-evidence` directory with mode 0700, and
+publishes only input hashes and fixed check outcomes. Never upload that private
+directory, generated keys, or raw journal output.
 
 ### Optional Windows kernel network observations
 

@@ -2,7 +2,9 @@
 //! A reported account name is not an OS UID or a verified cross-device identity.
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
+mod ssh;
 mod sudo;
+pub use ssh::{ssh_report, SshReport};
 pub use sudo::{sudo_report, SudoOutcome, SudoReport};
 
 fn id128(value: &str) -> bool {
@@ -80,8 +82,9 @@ pub struct Authentication {
 }
 impl Authentication {
     /// The stored outcome belongs to the reported operation. A PAM module can
-    /// fail while a later module accepts the login; only a completed service
-    /// report establishes an overall authentication outcome. This is derived
+    /// fail while a later module accepts the login. SSH results describe the
+    /// reported authentication attempt: failure can precede another successful
+    /// method, and acceptance does not establish session creation. This is derived
     /// from the validated original, preserving existing wire bytes and IDs.
     pub fn service_outcome(&self) -> Option<AuthenticationOutcome> {
         (self.journal.message.starts_with("Accepted ")
@@ -145,72 +148,16 @@ pub fn from_journal(record: &JournalRecord) -> Result<Option<Authentication>, St
             return Ok(Some(result));
         }
     }
-    if ssh && (message.starts_with("Accepted ") || message.starts_with("Failed ")) {
-        let words = message.split(' ').collect::<Vec<_>>();
-        // "Accepted key ... found at authorized_keys" is key lookup, not a
-        // completed authentication. Other operational failures also use Failed.
-        if words.get(2) != Some(&"for") {
-            return Ok(None);
+    if ssh {
+        if let Some(report) = ssh_report(message)? {
+            result.outcome = report.outcome;
+            result.claimed_user = Some(report.claimed_user.into());
+            result.invalid_user = report.invalid_user;
+            result.mechanism = report.mechanism.into();
+            result.source_ip = Some(report.source_ip);
+            result.source_port = Some(report.source_port);
+            return Ok(Some(result));
         }
-        if words.len() < 9 || words[1].is_empty() || !bounded(words[1], 64) {
-            return Err("Unsupported OpenSSH authentication report".into());
-        }
-        result.outcome = if words[0] == "Accepted" {
-            AuthenticationOutcome::Allowed
-        } else {
-            AuthenticationOutcome::Denied
-        };
-        result.mechanism = words[1].into();
-        let offset = if words.get(3..5) == Some(&["invalid", "user"]) {
-            result.invalid_user = true;
-            5
-        } else {
-            3
-        };
-        if words.len() < offset + 6
-            || words[offset].is_empty()
-            || !bounded(words[offset], 256)
-            || words[offset + 1] != "from"
-            || words[offset + 3] != "port"
-            || !["ssh2", "ssh2:"].contains(&words[offset + 5])
-            || (result.invalid_user && result.outcome == AuthenticationOutcome::Allowed)
-        {
-            return Err("Malformed OpenSSH authentication report".into());
-        }
-        let mut suffix = &words[offset + 6..];
-        if suffix.last() == Some(&"[preauth]") {
-            suffix = &suffix[..suffix.len() - 1];
-        }
-        let supported_suffix = if words[offset + 5] == "ssh2" {
-            suffix.is_empty()
-        } else {
-            suffix.len() == 2
-                && !suffix[0].is_empty()
-                && suffix[0]
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                && (suffix[1].starts_with("SHA256:") || suffix[1].starts_with("MD5:"))
-                && suffix[1]
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"+/=:".contains(&b))
-        };
-        if !supported_suffix {
-            return Err("Ambiguous or unsupported OpenSSH authentication suffix".into());
-        }
-        result.claimed_user = Some(words[offset].into());
-        result.source_ip = Some(
-            words[offset + 2]
-                .parse()
-                .map_err(|_| "Invalid authentication source IP")?,
-        );
-        result.source_port = Some(
-            words[offset + 4]
-                .parse::<u16>()
-                .ok()
-                .filter(|p| *p != 0)
-                .ok_or("Invalid authentication source port")?,
-        );
-        return Ok(Some(result));
     }
     if let Some((prefix, fields)) = message.split_once("): authentication failure;") {
         if !prefix.starts_with("pam_unix(") || !prefix.ends_with(":auth") {

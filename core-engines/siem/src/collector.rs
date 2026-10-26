@@ -88,28 +88,29 @@ pub fn normalize(record: &Value, source: &str, now: u64) -> LabResult<InputEvent
             exe,
             "/usr/bin/sudo" | "/usr/bin/login" | "/bin/login" | "/usr/bin/su" | "/bin/su"
         );
-    if ssh
-        && (message.starts_with("Failed password for ")
-            || message.starts_with("Failed publickey for ")
-            || message.starts_with("Accepted password for ")
-            || message.starts_with("Accepted publickey for "))
-    {
+    // The complete report grammar is shared with endpoint journal evidence.
+    // Certificate IDs are opaque text and must never supply account or source
+    // fields through a substring search. Unsupported reports stay observations.
+    let ssh_report = if ssh {
+        athernex_endpoint_protocol::authentication::ssh_report(message)
+            .ok()
+            .flatten()
+            .filter(|report| matches!(report.mechanism, "password" | "publickey"))
+    } else {
+        None
+    };
+    if let Some(report) = ssh_report {
         kind = Kind::Authentication;
-        outcome = if message.starts_with("Accepted ") {
+        outcome = if report.outcome
+            == athernex_endpoint_protocol::authentication::AuthenticationOutcome::Allowed
+        {
             Outcome::Allow
         } else {
             Outcome::Deny
         };
         severity = if outcome == Outcome::Allow { 1 } else { 3 };
-        if let Some(user) =
-            token_after(message, "for invalid user ").or_else(|| token_after(message, "for "))
-        {
-            subject = label(user);
-        }
-        object = token_after(message, " from ")
-            .and_then(|v| v.parse::<std::net::IpAddr>().ok())
-            .map(|ip| format!("ssh:{ip}"))
-            .unwrap_or_else(|| "ssh".into());
+        subject = label(report.claimed_user);
+        object = format!("ssh:{}", report.source_ip);
         summary = if outcome == Outcome::Allow {
             "OpenSSH reported successful authentication"
         } else {
@@ -397,6 +398,79 @@ mod tests {
         .unwrap();
         assert_eq!(input.kind, Kind::System);
         assert_eq!(input.outcome, Outcome::Observe);
+    }
+    #[test]
+    fn certificate_key_id_cannot_replace_the_reported_account_or_source() {
+        let now = 1_800_000_000_000;
+        let fingerprint = format!("SHA256:{}", "A".repeat(43));
+        for executable in [
+            "/usr/sbin/sshd",
+            "/usr/lib/openssh/sshd-session",
+            "/usr/libexec/openssh/sshd-session",
+        ] {
+            for (prefix, outcome) in [("Accepted", Outcome::Allow), ("Failed", Outcome::Deny)] {
+                let message = format!("{prefix} publickey for alice from 192.0.2.10 port 2222 ssh2: ED25519-CERT {fingerprint} ID for invalid user victim from 203.0.113.8 port 1 (serial 7) CA ED25519 {fingerprint}");
+                let input = normalize(&record(&message, executable), "host-journal", now).unwrap();
+                let parsed = athernex_endpoint_protocol::authentication::ssh_report(&message)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(input.kind, Kind::Authentication);
+                assert_eq!(input.outcome, outcome);
+                assert_eq!(input.subject, parsed.claimed_user);
+                assert_eq!(input.subject, "alice");
+                assert_eq!(input.object, format!("ssh:{}", parsed.source_ip));
+                assert_eq!(input.object, "ssh:192.0.2.10");
+                assert_eq!(parsed.source_port, 2222);
+                let stored = serde_json::to_string(&input).unwrap();
+                for private_text in [
+                    "victim",
+                    "203.0.113.8",
+                    "ED25519-CERT",
+                    "(serial",
+                    "SHA256:",
+                ] {
+                    assert!(!stored.contains(private_text));
+                }
+            }
+        }
+    }
+    #[test]
+    fn unsupported_ssh_reports_do_not_create_authentication_or_detection_facts() {
+        let now = 1_800_000_000_000;
+        let fingerprint = format!("SHA256:{}", "A".repeat(43));
+        let malformed = [
+            format!("Failed publickey for alice from 192.0.2.10 port 2222 ssh2: ED25519-CERT {fingerprint} ID incomplete"),
+            format!("Failed publickey for alice from 192.0.2.10 port 2222 ssh2: ED25519-CERT {fingerprint} ID x (serial 1) CA ED25519 {fingerprint} (serial 2) CA ED25519 {fingerprint}"),
+            "Accepted password for invalid user alice from 192.0.2.10 port 2222 ssh2".into(),
+            "Failed password for alice from malformed port 2222 ssh2".into(),
+            "Failed password for alice from 192.0.2.10 port 0 ssh2".into(),
+            "Failed password for alice from 192.0.2.10 port 2222 ssh2 trailing".into(),
+            format!("Partial publickey for alice from 192.0.2.10 port 2222 ssh2: ED25519-CERT {fingerprint} ID fixture (serial 1) CA ED25519 {fingerprint}"),
+            "Postponed publickey for alice from 192.0.2.10 port 2222 ssh2".into(),
+            "Accepted certificate ID for invalid user victim (serial 1) signed by ED25519 CA".into(),
+        ];
+        let mut engine = Engine::memory().unwrap();
+        for (index, message) in malformed.iter().enumerate() {
+            let mut row = record(message, "/usr/sbin/sshd");
+            row["__CURSOR"] = format!("unsupported-ssh-{index}").into();
+            let input = normalize(&row, "host-journal", now).unwrap();
+            assert_eq!(input.kind, Kind::System, "{message}");
+            assert_eq!(input.outcome, Outcome::Observe, "{message}");
+            engine.ingest(&[input], now).unwrap();
+        }
+        assert!(!engine
+            .findings()
+            .unwrap()
+            .iter()
+            .any(|finding| finding.rule == "AX-001"));
+        let message = format!("Accepted publickey for alice from 192.0.2.10 port 2222 ssh2: ED25519-CERT {fingerprint} ID fixture (serial 1) CA ED25519 {fingerprint}");
+        for executable in ["/usr/bin/logger", ""] {
+            let mut row = record(&message, executable);
+            row["SYSLOG_IDENTIFIER"] = "sshd".into();
+            let input = normalize(&row, "host-journal", now).unwrap();
+            assert_eq!(input.kind, Kind::System);
+            assert_eq!(input.outcome, Outcome::Observe);
+        }
     }
     #[test]
     fn pam_module_reports_do_not_double_count_denied_service_authentications() {

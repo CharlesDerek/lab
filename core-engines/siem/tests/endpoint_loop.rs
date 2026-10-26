@@ -1,6 +1,8 @@
 //! Actual TCP agent/server loop; uses a benign custom ClamAV signature when installed.
 use athernex_endpoint::{Client, Config, Store};
-use athernex_endpoint_protocol::{hash, Action, Enrollment, Platform, PROTOCOL};
+use athernex_endpoint_protocol::{hash, Action, Platform};
+#[cfg(unix)]
+use athernex_endpoint_protocol::{Enrollment, PROTOCOL};
 use athernex_siem::{
     engine::Engine,
     model::now_ms,
