@@ -14,6 +14,7 @@ mod macos;
 #[cfg(test)]
 mod tests;
 mod transport;
+pub mod upgrade;
 pub use client::Client;
 pub type Result<T> = std::result::Result<T, String>;
 

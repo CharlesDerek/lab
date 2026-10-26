@@ -799,6 +799,32 @@ container has no telemetry-consumer role. Deployment Team IDs, app groups, signi
 identities, provisioning profiles and signed bundles belong in private release
 inputs and catalogs, never this public repository.
 
+Build the unsigned release inputs on a matching Mac with explicit versions:
+
+```sh
+python3 tools/build_macos_network.py \
+  --identity-file /PRIVATE/RELEASE/network-identity.json \
+  --output /PRIVATE/RELEASE/unsigned-network \
+  --bundle-version 2.0.0 --short-version 0.2.0
+```
+
+Production identity builds require both version arguments before any output is
+created. The app and provider receive the same `CFBundleVersion` and
+`CFBundleShortVersionString`. The builder accepts a bounded numeric subset of
+[Apple's version formats](https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html):
+three ASCII decimal components without leading zeros or suffixes; the first
+component is at most four digits and the others at most two. The build version's
+first component must be positive; the short version may start at zero.
+`--development` uses fixed synthetic versions and refuses explicit overrides.
+Neither mode signs or activates the generated bundle.
+
+The controlled-upgrade model requires a candidate build version strictly greater
+than the approved original after numeric normalization: `1`, `1.0` and `1.0.0`
+are equal, so a spelling change cannot authorize replacement. It also requires
+distinct approved provider code pins. Changing only the short display version is
+insufficient. The builder does not inspect installed release history; declaring
+a version is not evidence that an upgrade is allowed.
+
 Package a separately approved signed app on a matching Mac using
 `tools/package_endpoint.py --require-native-signature --macos-network-app
 /PRIVATE/RELEASE/AthernexNetwork.app --macos-network-identity
@@ -827,6 +853,62 @@ It does not replace another application's filter configuration. Required-compone
 markers and a management readiness command prevent old installers silently skipping
 the new component. Source templates are public; generated `.app`/`.systemextension`
 bundles and provisioning profiles are blocked by the publication checker.
+
+The controlled replacement commands below are under development. Signed
+replacement, approval/reboot behavior and recovery on installed Macs remain
+unvalidated. Portable controls cover a single durable request, report replay,
+failures before and after writes, and preservation of the existing filter state.
+File placement, an OS completion callback, registered candidate code and any
+required live-source check remain separate facts.
+
+Use the standard installed state, `/Library/AthernexEndpoint/state`, and a
+separate trusted management executable bound by the candidate release. Unload
+the standard management launchd job using the existing stopped-services workflow
+before preparation; preparation independently checks that the fixed job is absent.
+An exited process or matching plist is insufficient. Run these management
+commands as root:
+
+```text
+athernex-endpoint prepare-macos-network-upgrade STATE_DIR APPROVED_ARCHIVE RELEASE_JSON OPERATOR_UID
+athernex-endpoint recover-macos-network-upgrade STATE_DIR
+athernex-endpoint abort-macos-network-upgrade STATE_DIR
+athernex-endpoint finish-macos-network-upgrade STATE_DIR
+athernex-endpoint macos-network-upgrade-status STATE_DIR
+```
+
+`prepare` binds the approved non-root operator UID and retains immutable copies
+of the management executable, original/candidate configuration and app backup in
+private storage. It parks the ordinary management registration and registers the
+transaction helper. As that operator, open the approved container and choose
+**Continue approved upgrade**. The authenticated plan selects either the single
+replacement request or read-only reconciliation; the same button cannot obtain
+another permit for an already issued attempt. Existing filter enablement is
+preserved, including an inactive filter, and event history is not reset.
+
+`recover` resumes owned preparation or a helper registration that has not been
+submitted. Following an SDK terminal failure, it can also complete a filesystem
+rollback that was already authorized by exact original-registration and filter
+proof and recorded durably before interruption. That replay retains the original
+proof and observation time; it makes no fresh health claim. Recovery does not
+repeat an uncertain OS request. Reboot-required, abandoned or unexpected outcomes
+retain their evidence and require a later boot and independent inspection before
+reconciliation. An unclaimed preparation can be cancelled with `abort`; an issued
+request cannot use that command. Restoring files does not roll back an OS-managed
+extension, and no automatic OS rollback is promised.
+
+After the container records candidate inspection, run `finish` within 30 seconds;
+otherwise perform read-only reconciliation in the container again. `finish` also
+cleans up an aborted preclaim transaction or an authorized restoration following
+an SDK terminal failure. It stops only the owned transaction helper. An uncertain
+helper shutdown requires a durable parking receipt from a prior boot and an
+actual absence check; a bootstrap receipt from an earlier boot does not authorize
+unloading the current job label. Finalization restores the standard management
+registration and retires the bound private snapshot while retaining transaction
+history. Normal management
+bootstrap remains an explicit step in the stopped-services workflow. Restored
+registration does not establish running health, lossless collection or successful
+native upgrade acceptance. The status command reports only a fixed summary;
+complete configuration, paths, code pins and native observations stay private.
 
 Activate the approved container explicitly, complete user/MDM approval and any
 requested restart, then enable `macos_network_events` in local telemetry policy.

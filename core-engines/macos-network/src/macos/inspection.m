@@ -32,7 +32,7 @@ BOOL AXNetworkCurrentAgent(NSDictionary *identity){
     CFRelease(task);id groups=raw?CFBridgingRelease(raw):nil;
     return AXHasGroup(groups?@{@"com.apple.security.application-groups":groups}:@{},identity[@"app_group"]);
 }
-static NSDictionary *AXVerifyBundle(NSURL *url,NSString *team,NSString *identifier){
+NSDictionary *AXVerifyBundle(NSURL *url,NSString *team,NSString *identifier){
     NSString *text=AXNetworkRequirement(team,identifier,nil);SecRequirementRef requirement=NULL;
     if(!AXNetworkCompileRequirement(text,&requirement))return nil;
     SecStaticCodeRef code=NULL;OSStatus s=SecStaticCodeCreateWithPath((__bridge CFURLRef)url,kSecCSDefaultFlags,&code);
@@ -43,7 +43,7 @@ static NSDictionary *AXVerifyBundle(NSURL *url,NSString *team,NSString *identifi
         ||![info[(__bridge NSString *)kSecCodeInfoTeamIdentifier] isEqual:team])return nil;
     return info;
 }
-static BOOL AXBundleInfo(NSDictionary *info,NSDictionary *identity,BOOL provider){
+BOOL AXBundleInfo(NSDictionary *info,NSDictionary *identity,BOOL provider){
     NSDictionary *plist=info[(__bridge NSString *)kSecCodeInfoPList];
     NSDictionary *entitlements=info[(__bridge NSString *)kSecCodeInfoEntitlementsDict];
     if(![plist isKindOfClass:[NSDictionary class]]||!AXHasGroup(entitlements,identity[@"app_group"])

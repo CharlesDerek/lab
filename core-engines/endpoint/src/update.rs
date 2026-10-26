@@ -267,6 +267,8 @@ fn lock(state: &Path) -> Result<StateLock> {
     try_maintenance_lock(state)?.ok_or_else(|| "Another update transaction is running".into())
 }
 pub(crate) fn try_maintenance_lock(state: &Path) -> Result<Option<StateLock>> {
+    #[cfg(target_os = "macos")]
+    crate::macos_network_bundle::upgrade::require_settled()?;
     #[cfg(windows)]
     crate::installer::require_complete(state)?;
     let lease = try_maintenance_lock_raw(state)?;
@@ -275,6 +277,10 @@ pub(crate) fn try_maintenance_lock(state: &Path) -> Result<Option<StateLock>> {
     #[cfg(windows)]
     if lease.is_some() {
         crate::installer::require_complete(state)?;
+    }
+    #[cfg(target_os = "macos")]
+    if lease.is_some() {
+        crate::macos_network_bundle::upgrade::require_settled()?;
     }
     Ok(lease)
 }
@@ -332,6 +338,8 @@ pub fn status_component(state: &Path, component: Component) -> Result<UpdateStat
     }
 }
 pub fn require_recovered(state: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    crate::macos_network_bundle::upgrade::require_settled()?;
     #[cfg(windows)]
     crate::installer::require_complete(state)?;
     crate::engine_update::require_start_allowed(state)?;
@@ -414,6 +422,8 @@ fn controller_quiescent(state: &Path, component: Component) -> Result<Option<Con
 }
 /// Called with the controller lock held, before launching any managed child.
 pub(crate) fn controller_startup(state: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    crate::macos_network_bundle::upgrade::require_settled()?;
     #[cfg(windows)]
     crate::installer::require_complete(state)?;
     let record = status_component(state, Component::Controller)?;
@@ -674,10 +684,36 @@ impl OfflineMaintenance {
     }
 }
 pub(crate) fn offline_maintenance(state: &Path, config: &Config) -> Result<OfflineMaintenance> {
+    #[cfg(target_os = "macos")]
+    crate::macos_network_bundle::upgrade::require_settled()?;
     let controller = controller_quiescent(state, Component::Controller)?;
     let quiet = quiescent(state, config)?;
     let update = lock(state)?;
     require_component_transactions_settled(state)?;
+    Ok(OfflineMaintenance {
+        _controller: controller,
+        quiet: Some(quiet),
+        _update: update,
+    })
+}
+/// Only the holder of the verified global network-upgrade lease may bypass its
+/// pending journal gate. The caller retains that lease until this maintenance
+/// guard is released and independently binds state/config to its transaction.
+/// Keep the ordinary service/update lock order; do not gate quiescent() itself.
+#[cfg(target_os = "macos")]
+pub(crate) fn network_upgrade_maintenance(
+    state: &Path,
+    config: &Config,
+    lease: &crate::macos_network_bundle::upgrade::Lease,
+) -> Result<OfflineMaintenance> {
+    lease.directory()?;
+    let controller = controller_quiescent(state, Component::Controller)?;
+    let quiet = quiescent(state, config)?;
+    let update = try_maintenance_lock_raw(state)?.ok_or("Another update transaction is running")?;
+    lease.directory()?;
+    require_component_transactions_settled(state)?;
+    crate::engine_update::require_settled(state)?;
+    crate::guardian::require_idle(state)?;
     Ok(OfflineMaintenance {
         _controller: controller,
         quiet: Some(quiet),
@@ -691,6 +727,8 @@ pub(crate) fn controller_maintenance(
     config: &Config,
     token: &str,
 ) -> Result<OfflineMaintenance> {
+    #[cfg(target_os = "macos")]
+    crate::macos_network_bundle::upgrade::require_settled()?;
     if !crate::supervisor::controller_owned(state, token) {
         return Err("Engine maintenance requires its owning live controller".into());
     }
@@ -775,6 +813,8 @@ pub fn installer_native_hash(manifest: &Path) -> Result<Option<String>> {
 }
 
 pub fn installer_check(state: &Path, binary: &Path, stopped: bool) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    crate::macos_network_bundle::upgrade::require_settled()?;
     crate::macos_network_bundle::installer_components(binary)?;
     crate::engine_update::require_settled(state)?;
     #[cfg(target_os = "linux")]
@@ -789,6 +829,8 @@ pub fn installer_check(state: &Path, binary: &Path, stopped: bool) -> Result<()>
         if state.try_exists()? && fs::read_dir(state)?.next().transpose()?.is_some() {
             return Err("Existing endpoint state has no configuration; recover it or choose a new state directory".into());
         }
+        #[cfg(target_os = "macos")]
+        crate::macos_network_bundle::upgrade::require_settled()?;
         return Ok(());
     }
     let configuration: Config =
@@ -840,7 +882,11 @@ pub fn installer_check(state: &Path, binary: &Path, stopped: bool) -> Result<()>
     if stopped {
         let _controller = controller_quiescent(state, Component::Controller)?;
         let _quiet = quiescent(state, &configuration)?;
+        #[cfg(target_os = "macos")]
+        crate::macos_network_bundle::upgrade::require_settled()?;
     }
+    #[cfg(target_os = "macos")]
+    crate::macos_network_bundle::upgrade::require_settled()?;
     Ok(())
 }
 pub(crate) fn native_signature(path: &Path, policy: &UpdatePolicy) -> Result<()> {

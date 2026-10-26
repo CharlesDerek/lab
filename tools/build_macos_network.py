@@ -24,10 +24,25 @@ POLICY = "faf8a5d37afe9cdc39b09b3562832b0db72b9c0b03281dd1ce701fc889f1dc64"
 DEV = dict(team_id="TESTTEAM00", agent_identifier="com.example.athernex.agent",
            container_identifier="com.example.athernex.network", provider_identifier="com.example.athernex.network.provider",
            app_group="TESTTEAM00.com.example.athernex.network", mach_service_name="TESTTEAM00.com.example.athernex.network.ipc")
+DEV_BUNDLE_VERSION = "1.0.0"
+DEV_SHORT_VERSION = "0.1.0"
 
 
 class BuildFailure(Exception):
     pass
+
+
+def bundle_versions(bundle_version, short_version):
+    # Canonical numeric subset of Apple's CFBundleVersion/CFBundleShortVersionString:
+    # exactly three ASCII components, no leading-zero aliases or development suffix.
+    # Retain the archived build key's 4/2/2 digit bounds for both version strings.
+    # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
+    minor = r"(?:0|[1-9][0-9]?)"
+    for value, major, failure in ((bundle_version, r"[1-9][0-9]{0,3}", "bundle_version"),
+                                  (short_version, r"(?:0|[1-9][0-9]{0,3})", "short_version")):
+        if not isinstance(value, str) or len(value) > 10 or not re.fullmatch(major + r"\." + minor + r"\." + minor, value):
+            raise BuildFailure(failure)
+    return bundle_version, short_version
 
 
 def identity(value):
@@ -101,13 +116,14 @@ def write_plist(path, data):
     path.chmod(0o644)
 
 
-def bundle(output, ident):
+def bundle(output, ident, *, bundle_version, short_version):
+    bundle_version, short_version = bundle_versions(bundle_version, short_version)
     app = output / "AthernexNetwork.app"
     provider = app / "Contents/Library/SystemExtensions" / (ident["provider_identifier"] + ".systemextension")
     for directory, kind, executable in ((app, "container", "AthernexNetwork"), (provider, "provider", "AthernexNetworkProvider")):
         info = dict(CFBundleIdentifier=ident[kind + "_identifier"], CFBundleExecutable=executable,
                     CFBundlePackageType="APPL" if kind == "container" else "SYSX", CFBundleInfoDictionaryVersion="6.0",
-                    CFBundleVersion="1", CFBundleShortVersionString="0.1", LSMinimumSystemVersion="13.0",
+                    CFBundleVersion=bundle_version, CFBundleShortVersionString=short_version, LSMinimumSystemVersion="13.0",
                     AXNetworkIdentity=ident, AXNetworkPolicy=POLICY,
                     NSSystemExtensionUsageDescription="Observe new socket-flow metadata while allowing traffic.")
         if kind == "provider":
@@ -120,16 +136,21 @@ def bundle(output, ident):
             "com.apple.developer.networking.networkextension": ["content-filter-provider-systemextension"]}
         if kind == "container":
             entitlements["com.apple.developer.system-extension.install"] = True
+            entitlements["com.apple.security.temporary-exception.files.absolute-path.read-only"] = [
+                "/Library/SystemExtensions/", "/Library/Application Support/AthernexNetwork/"]
         # Release signing inputs are outside the installed app tree and are not
         # an authorization to sign or activate this unsigned build.
         write_plist(output / (kind + ".entitlements.plist"), entitlements)
     return app, provider
 
 
-COMPILE_PHASES = {"counters_compile", "provider_compile", "container_compile", "source_controls_compile", "bridge_controls_compile"}
+COMPILE_PHASES = {"counters_compile", "provider_compile", "container_compile", "source_controls_compile", "bridge_controls_compile",
+                  "upgrade_native_compile", "upgrade_controls_compile", "upgrade_bridge_controls_compile"}
 CONTROL_LINES = {
     "source_controls": b"Network metadata controls passed; mocked callbacks and XPC sessions only\n",
     "bridge_controls": b"Network bridge controls passed; no live peer authentication proof\n",
+    "upgrade_controls": b"Network upgrade controls passed; no OS activation or signature proof\n",
+    "upgrade_bridge_controls": b"Network upgrade bridge controls passed; mocked ownership only\n",
 }
 
 
@@ -180,13 +201,16 @@ def run(output, phase, command, timeout=180, development=False):
     return dict(phase=phase, exit_code=code, log_sha256=hashlib.sha256(log.read_bytes()).hexdigest())
 
 
-def build(output, ident, development=False):
+def build(output, ident, development=False, *, bundle_version, short_version):
+    bundle_version, short_version = bundle_versions(bundle_version, short_version)
+    if development and (bundle_version, short_version) != (DEV_BUNDLE_VERSION, DEV_SHORT_VERSION):
+        raise BuildFailure("development_version")
     if platform.system() != "Darwin":
         raise BuildFailure("macos_required")
     machine = platform.machine()
     if machine not in ("arm64", "x86_64"):
         raise BuildFailure("architecture")
-    app, provider = bundle(output, ident)
+    app, provider = bundle(output, ident, bundle_version=bundle_version, short_version=short_version)
     sdk = subprocess.run(["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"],
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15, check=False)
     try:
@@ -210,8 +234,11 @@ def build(output, ident, development=False):
     import_header = ["-import-objc-header", str(SOURCE / "Shared/Bridge.h")]
     checks.append(step("provider_compile", swift + ["-module-name", "AthernexNetworkProvider"] + import_header + shared + provider_sources +
                       [str(output / "counters.o")] + frameworks + ["-o", str(provider / "Contents/MacOS/AthernexNetworkProvider")]))
-    checks.append(step("container_compile", swift + ["-module-name", "AthernexNetwork"] + shared +
-                      [str(SOURCE / "Container/Main.swift")] + frameworks + ["-framework", "SystemExtensions", "-framework", "AppKit",
+    checks.append(step("upgrade_native_compile", cc + ["-fobjc-arc", "-fblocks", "-c", str(SOURCE / "Container/Native.m"),
+                      "-o", str(output / "upgrade-native.o")]))
+    container_sources = [str(SOURCE / "Container" / f) for f in ("UpgradeModel.swift", "UpgradeJSON.swift", "UpgradeConnection.swift", "UpgradeController.swift", "Main.swift")]
+    checks.append(step("container_compile", swift + ["-module-name", "AthernexNetwork", "-import-objc-header", str(SOURCE / "Container/Bridge.h")] + shared +
+                      container_sources + [str(output / "upgrade-native.o")] + frameworks + ["-framework", "SystemExtensions", "-framework", "AppKit",
                        "-o", str(app / "Contents/MacOS/AthernexNetwork")]))
     controls = [str(SOURCE / "Provider" / f) for f in ("SourceState.swift", "Projection.swift", "ProviderIPC.swift")]
     checks.append(step("source_controls_compile", swift + ["-D", "AX_TESTS", "-module-name", "NetworkSourceControls"] + import_header + shared + controls +
@@ -220,6 +247,14 @@ def build(output, ident, development=False):
     checks.append(step("bridge_controls_compile", cc + ["-fobjc-arc", "-fblocks", str(BRIDGE / "client.m"),
                       str(BRIDGE / "inspection.m"), str(SOURCE / "Tests/BridgeControls.m")] + frameworks[:4] + ["-o", str(output / "bridge-controls")]))
     checks.append(step("bridge_controls", [str(output / "bridge-controls")], timeout=30))
+    checks.append(step("upgrade_controls_compile", swift + ["-module-name", "NetworkUpgradeControls"] + shared +
+                      [str(SOURCE / "Container/UpgradeModel.swift"), str(SOURCE / "Container/UpgradeJSON.swift"), str(SOURCE / "Tests/UpgradeControls.swift")] +
+                      frameworks[:4] + ["-o", str(output / "upgrade-controls")]))
+    checks.append(step("upgrade_controls", [str(output / "upgrade-controls")], timeout=30))
+    checks.append(step("upgrade_bridge_controls_compile", cc + ["-fobjc-arc", "-fblocks", str(BRIDGE / "client.m"),
+                      str(BRIDGE / "inspection.m"), str(BRIDGE / "upgrade_inspection.m"), str(SOURCE / "Tests/UpgradeBridgeControls.m")] +
+                      frameworks[:4] + ["-o", str(output / "upgrade-bridge-controls")]))
+    checks.append(step("upgrade_bridge_controls", [str(output / "upgrade-bridge-controls")], timeout=30))
     return checks
 
 
@@ -229,16 +264,22 @@ def main(argv=None):
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--development", action="store_true")
     selection.add_argument("--identity-file", type=Path)
+    parser.add_argument("--bundle-version", help="Production CFBundleVersion: canonical major.minor.patch (1..9999, 0..99, 0..99)")
+    parser.add_argument("--short-version", help="Production CFBundleShortVersionString: canonical major.minor.patch (0..9999, 0..99, 0..99)")
     args = parser.parse_args(argv)
     try:
         if args.development:
+            if args.bundle_version is not None or args.short_version is not None:
+                raise BuildFailure("development_version")
+            versions = (DEV_BUNDLE_VERSION, DEV_SHORT_VERSION)
             ident = identity(dict(DEV))
         else:
+            versions = bundle_versions(args.bundle_version, args.short_version)
             ident = read_identity(args.identity_file)
         output = prepare_output(args.output)
-        checks = build(output, ident, development=args.development)
+        checks = build(output, ident, development=args.development, bundle_version=versions[0], short_version=versions[1])
         report = dict(schema=1, unsigned=True, native_network_executed=False, activation_performed=False,
-                      production_readiness=False, checks=checks)
+                      production_readiness=False, bundle_version=versions[0], short_version=versions[1], checks=checks)
         result = output / "build.json"
         result.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8"); result.chmod(0o600)
         print("Unsigned network components and actual-source controls passed; no activation or native flow proof")

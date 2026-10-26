@@ -16,6 +16,8 @@ const LIMIT: usize = 64 * 1024 * 1024;
 #[cfg(any(target_os = "macos", test))]
 const APP: &str = "AthernexNetwork.app";
 pub const INSTALL_PATH: &str = "/Applications/AthernexNetwork.app";
+#[cfg(any(target_os = "macos", test))]
+pub mod upgrade;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Deployment {
@@ -518,15 +520,8 @@ fn stage(archive: &Path, manifest: &Path) -> Result<(tempfile::TempDir, Deployme
 /// Preflight before the shell installer stops services or copies binaries.
 #[cfg(target_os = "macos")]
 pub fn preflight(archive: &Path, manifest: &Path) -> Result<()> {
-    use std::{fs, os::unix::fs::MetadataExt};
-    let parent = fs::symlink_metadata("/Applications")?;
-    if !parent.is_dir()
-        || parent.file_type().is_symlink()
-        || parent.uid() != 0
-        || parent.mode() & 0o002 != 0
-    {
-        return Err("Applications directory must be root-owned and not world-writable".into());
-    }
+    upgrade::require_settled()?;
+    upgrade::inspection::require_applications_parent()?;
     let (_snapshot, deployment) = stage(archive, manifest)?;
     if deployment.path.try_exists()? {
         deployment.verify_installed()?;
@@ -564,6 +559,7 @@ pub fn install(state: &Path, archive: &Path, manifest: &Path) -> Result<()> {
     let mut config: crate::Config = serde_json::from_slice(&bytes)?;
     config.validate()?;
     let _maintenance = update::offline_maintenance(state, &config)?;
+    upgrade::prepare_guard_directory()?;
     if update::read_bounded(&config_path, 65536)? != bytes {
         return Err("Network policy changed during setup".into());
     }

@@ -1,6 +1,12 @@
 fn main() {
     println!("cargo:rerun-if-changed=src/macos/client.m");
     println!("cargo:rerun-if-changed=src/macos/inspection.m");
+    println!("cargo:rerun-if-changed=src/macos/upgrade_listener.m");
+    println!("cargo:rerun-if-changed=src/macos/upgrade_inspection.m");
+    println!("cargo:rerun-if-changed=src/macos/upgrade.h");
+    println!(
+        "cargo:rerun-if-changed=../../infrastructure/endpoint/macos-network/Shared/UpgradeIPC.h"
+    );
     println!("cargo:rerun-if-changed=src/macos/bridge.h");
     println!(
         "cargo:rerun-if-changed=../../infrastructure/endpoint/macos-network/Shared/NetworkIPC.h"
@@ -20,7 +26,12 @@ fn main() {
         .expect("Invalid Apple SDK path")
         .trim();
     cc::Build::new()
-        .files(["src/macos/client.m", "src/macos/inspection.m"])
+        .files([
+            "src/macos/client.m",
+            "src/macos/inspection.m",
+            "src/macos/upgrade_listener.m",
+            "src/macos/upgrade_inspection.m",
+        ])
         .include("../../infrastructure/endpoint/macos-network/Shared")
         .flag("-fobjc-arc")
         .flag("-fblocks")

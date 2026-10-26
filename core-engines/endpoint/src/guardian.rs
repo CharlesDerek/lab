@@ -583,6 +583,8 @@ struct Controller {
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 impl Controller {
     fn start(state: &Path, l: &mut Lease) -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        crate::macos_network_bundle::upgrade::require_settled()?;
         let mut command = Process::new(&l.controller);
         command
             .args([
@@ -597,6 +599,8 @@ impl Controller {
         l.controller_pid = None;
         l.controller_sha256 = verified_controller(state, &l.controller, &l.token)?;
         save_lease(state, l)?;
+        #[cfg(target_os = "macos")]
+        crate::macos_network_bundle::upgrade::require_settled()?;
         #[cfg(unix)]
         let child = athernex_endpoint_native::child::Service::start(&mut command, 8192)?;
         #[cfg(windows)]
@@ -833,6 +837,8 @@ fn maintain(state: &Path, controller: &Path, agent: &Path) -> Result<Option<Cont
 }
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub fn launch(state: &Path, controller: &Path, agent: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    crate::macos_network_bundle::upgrade::require_settled()?;
     #[cfg(windows)]
     crate::installer::require_complete(state)?;
     let state = state.canonicalize()?;
@@ -841,6 +847,8 @@ pub fn launch(state: &Path, controller: &Path, agent: &Path) -> Result<()> {
     // Do not require the controller file before recovery: interrupted Windows
     // replacement may legitimately have left only its recorded backup.
     let _owner = acquire(&state)?;
+    #[cfg(target_os = "macos")]
+    crate::macos_network_bundle::upgrade::require_settled()?;
     #[cfg(windows)]
     crate::installer::require_complete(&state)?;
     let (config, config_sha256) = configuration(&state)?;

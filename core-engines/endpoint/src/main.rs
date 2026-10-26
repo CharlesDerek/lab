@@ -51,6 +51,8 @@ fn main() -> Result<()> {
         println!("athernex-endpoint configure-macos-authentication-adapter STATE_DIR APPROVED_SIGNED_ADAPTER SHA256\nRecords the approved authentication helper pin with services stopped. Collection remains disabled. Enable macos_authentication separately on macOS13 or newer; no ClamAV setup is required.");
         #[cfg(target_os = "macos")]
         println!("athernex-endpoint install-macos-network-bundle STATE_DIR APPROVED_ARCHIVE RELEASE_JSON\nInstalls the approved network app and records its private pin with services stopped. Existing enablement is preserved; this does not activate the OS extension. Activate the container and enable macos_network_events separately on macOS13 or newer. Stopping the consumer does not stop the provider.");
+        #[cfg(target_os = "macos")]
+        println!("athernex-endpoint prepare-macos-network-upgrade STATE_DIR APPROVED_ARCHIVE RELEASE_JSON OPERATOR_UID\nathernex-endpoint recover-macos-network-upgrade STATE_DIR\nathernex-endpoint abort-macos-network-upgrade STATE_DIR\nathernex-endpoint finish-macos-network-upgrade STATE_DIR\nathernex-endpoint macos-network-upgrade-status STATE_DIR\nRoot-controlled network replacement requires the standard management job unloaded first and an approved non-root operator for the container. Abort is available only before an issued request; uncertain outcomes require reconciliation and may require reboot. Finish restores registration but does not bootstrap normal management. Existing filter policy and event history are preserved. Signed-host upgrade acceptance remains unverified.");
         return Ok(());
     }
     match args[0].as_str() {
@@ -152,6 +154,50 @@ fn main() -> Result<()> {
                 std::path::Path::new(&args[1]),
                 std::path::Path::new(&args[2]),
                 std::path::Path::new(&args[3]),
+            )?;
+        }
+        #[cfg(target_os = "macos")]
+        "prepare-macos-network-upgrade" if args.len() == 5 => {
+            athernex_endpoint::macos_network_bundle::upgrade::prepare(
+                std::path::Path::new(&args[1]),
+                std::path::Path::new(&args[2]),
+                std::path::Path::new(&args[3]),
+                args[4].parse()?,
+            )?;
+        }
+        #[cfg(target_os = "macos")]
+        "recover-macos-network-upgrade" if args.len() == 2 => {
+            athernex_endpoint::macos_network_bundle::upgrade::recover(std::path::Path::new(
+                &args[1],
+            ))?;
+        }
+        #[cfg(target_os = "macos")]
+        "abort-macos-network-upgrade" if args.len() == 2 => {
+            athernex_endpoint::macos_network_bundle::upgrade::abort(std::path::Path::new(
+                &args[1],
+            ))?;
+        }
+        #[cfg(target_os = "macos")]
+        "finish-macos-network-upgrade" if args.len() == 2 => {
+            athernex_endpoint::macos_network_bundle::upgrade::finish(std::path::Path::new(
+                &args[1],
+            ))?;
+        }
+        #[cfg(target_os = "macos")]
+        "macos-network-upgrade-status" if args.len() == 2 => {
+            println!(
+                "{}",
+                serde_json::to_string(&athernex_endpoint::macos_network_bundle::upgrade::status(
+                    std::path::Path::new(&args[1])
+                )?)?
+            );
+        }
+        // Private launchd entry point; never a general operator workflow.
+        #[cfg(target_os = "macos")]
+        "serve-macos-network-upgrade" if args.len() == 3 => {
+            athernex_endpoint::macos_network_bundle::upgrade::serve(
+                std::path::Path::new(&args[1]),
+                &args[2],
             )?;
         }
         "installer-native-hash" if args.len() == 2 => {

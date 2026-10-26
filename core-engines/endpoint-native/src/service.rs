@@ -216,6 +216,11 @@ fn write_bounded(path: &Path, bytes: &[u8], mode: u32, limit: usize) -> Result<(
     }
     result
 }
+/// The kernel's current boot-session identity, shared by owned service recovery.
+/// This is neither a process start time nor a collector wall-clock estimate.
+pub fn boot_identity() -> Result<String> {
+    boot()
+}
 pub(crate) fn boot() -> Result<String> {
     #[cfg(target_os = "linux")]
     let raw = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
