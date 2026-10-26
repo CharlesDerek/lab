@@ -825,9 +825,16 @@ The complete payload must be consumed, without missing or trailing data. The rep
 includes the separate property context width. An unflagged `connid` metadata
 length may match the original metadata-query context; the subsequent TDH formatting
 and complete payload comparison must establish the candidate wire width.
-Explicit fixed-length mismatches remain refusals. This experiment requires native
-verification of each controlled event kind and does not establish a general
-network layout or production decoder.
+Normal TDH guidance recommends supplying the metadata's `Length`. This fixture
+instead tests a four-byte `PropertyLength` argument only for the sole `connid`
+pointer field in the fully validated version-two template, selected before either
+formatter call. The captured metadata remains unchanged. This is an experimental
+per-template candidate, not a general documented correction; the observed
+eight-byte metadata length does not prove that the header caused that value.
+The structural hash covers captured metadata and property context, while the
+source revision binds the formatter argument selection. Explicit fixed-length
+mismatches remain refusals. Native verification must establish every controlled
+event kind before this experiment can support a network layout or production decoder.
 
 The test executable and three scripts are staged in a protected directory and
 bound to the exact source revision. Only `inputs.json` and the fixed
