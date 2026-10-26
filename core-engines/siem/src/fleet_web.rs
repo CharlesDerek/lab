@@ -981,6 +981,22 @@ pub fn installer_bundle(
     } else {
         None
     };
+    let filter = if let Some(component) = artifact.filter()? {
+        if (binary.len() as u64)
+            .checked_add(component.bytes)
+            .is_none_or(|n| n > 64 * 1024 * 1024)
+        {
+            return Err("Combined endpoint and driver package exceed budget".into());
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(root.join(format!("athernex-windows-filter-{target}.axpkg")))?
+            .take(component.bytes + 1)
+            .read_to_end(&mut bytes)?;
+        component.unpack(&bytes)?;
+        Some(bytes)
+    } else {
+        None
+    };
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
@@ -1009,6 +1025,11 @@ pub fn installer_bundle(
         entry("macos-network.zip", bytes)?;
         entry("macos-network.required", b"1\n")?;
         entry("macos-network.txt", b"Keep this deployment bundle private. Setup verifies the approved macOS network extension archive, signed identities and installed snapshot before changing the owned application. Installation does not activate the extension or enable collection. Activation requires separate user or MDM approval; native acceptance remains unverified. Stopping the agent detaches its consumer and does not stop or uninstall the OS-managed provider.\n")?;
+    }
+    if let Some(bytes) = &filter {
+        entry("windows-filter.axpkg", bytes)?;
+        entry("windows-filter.required", b"1\n")?;
+        entry("windows-filter.txt",b"Private approved driver package. The Windows installer verifies and durably prepares exact SYS/INF/CAT snapshots using cache-only WHQL catalog policy. Prepared is not Driver Store installation, loading, altitude assignment, live ABI proof, or active protection. Existing production activation refusal and native acceptance requirements remain.\n")?;
     }
     entry("README.txt",b"Athernex endpoint installer\nEnrollment expires in 15 minutes and registers one device. Keep this bundle private.\nWindows: run install.ps1 as Administrator. Linux/macOS: sudo sh install.sh.\nLinux command cleanup requires permitted pidfd_open and close_range syscalls (mainline Linux 5.9 or later); installation checks these before stopping an existing service.\nIf selected in the portal, setup downloads and verifies ClamAV, installs it, and initializes signatures. Linux also configures a separate on-access prevention service for the local scan roots. Check protection health in the portal. Windows/macOS currently provide scheduled and on-demand scans. Existing AV is preserved.\nRead release.json for signing status; do not treat a development build as a signed production release.\n")?;
     if target.starts_with("windows") {

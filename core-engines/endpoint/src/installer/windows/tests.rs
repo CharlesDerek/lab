@@ -11,6 +11,7 @@ fn journal(directory: &Directory, binary: &Path) -> Record {
         state_volume: identity.volume,
         state_file_id: identity.file_id,
         phase: Phase::Preparing,
+        windows_filter_sha256: None,
     }
 }
 fn fixture() -> (tempfile::TempDir, Directory, std::path::PathBuf) {

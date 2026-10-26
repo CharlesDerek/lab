@@ -43,7 +43,23 @@ fn actual_probes_distinguish_open_mapping_and_exec_outcomes() {
         assert_eq!(values[1]["outcome"], "allowed");
     }
     let executable = root.join("true");
-    fs::copy(env!("CARGO_BIN_EXE_athernex-endpoint-native"), &executable).unwrap();
+    // A full debug management image can exceed the production probe's 16 MiB
+    // bound. Compile a dedicated benign native image without changing that cap
+    // or modifying a production executable. rustc/linker run in the same bounded
+    // owned process group as other fixture commands; this is not a shell script.
+    let source = root.join("probe_fixture.rs");
+    fs::write(&source, b"fn main() {}\n").unwrap();
+    let (compiled, _) = child::run(
+        Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable),
+        Duration::from_secs(30),
+        65536,
+    )
+    .expect("Native probe fixture compiler failed within owned execution limits");
+    assert_eq!(compiled, 0, "Native probe fixture compilation failed");
+    assert!((1..=16 * 1024 * 1024).contains(&fs::metadata(&executable).unwrap().len()));
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let (code, values) = run("exec", &executable, None);
     assert_eq!(code, 0);

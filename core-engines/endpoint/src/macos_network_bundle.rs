@@ -328,8 +328,10 @@ pub fn installer_components(binary: &Path) -> Result<()> {
     if !release.try_exists()? {
         return Ok(());
     }
-    let artifact: Artifact = serde_json::from_slice(&update::read_bounded(&release, 16384)?)?;
+    let artifact: Artifact = serde_json::from_slice(&update::read_bounded(&release, 16384)?)
+        .map_err(|_| "Installer component metadata refused")?;
     check_declared_components(&artifact, directory)?;
+    crate::windows_filter_package::components(directory, &artifact)?;
     if artifact.macos_network.is_some() {
         release_component(&artifact)?;
     }

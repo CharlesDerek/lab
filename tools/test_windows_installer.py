@@ -2,6 +2,7 @@
 """Run production Windows installer PowerShell with mocked OS commands.
 
 Checks guarded SCM registration and scheduled-task migration control flow.
+Required-package tests check script ordering; package trust stays mocked.
 No actual Windows service, scheduled task or endpoint installation is changed.
 """
 import argparse
@@ -45,6 +46,10 @@ function Invoke-Fixture {
     $global:LASTEXITCODE = 0
     if (($args[0] -eq 'installer-check' -and $env:ATHERNEX_CASE -eq 'preflight-fails') -or
         ($args[0] -eq 'windows-install' -and $env:ATHERNEX_CASE -eq 'install-fails')) { $global:LASTEXITCODE = 1 }
+    if ($args[0] -eq 'installer-filter-hash') {
+        $global:LASTEXITCODE = [int]$env:ATHERNEX_FILTER_EXIT
+        if ($env:ATHERNEX_FILTER_REPLY) { $env:ATHERNEX_FILTER_REPLY }
+    }
 }
 function Get-CimInstance {
     param($ClassName, $Filter)
@@ -152,13 +157,25 @@ if ($failed) { exit 1 }
 class InstallerTests(unittest.TestCase):
     powershell = None
 
-    def run_case(self, case, mode='installer'):
+    def run_case(self, case, mode='installer', *, release=None, marker=False,
+                 package=False, filter_reply='a' * 64, filter_exit=0):
         with tempfile.TemporaryDirectory(prefix='athernex-installer-script-') as folder:
             # Resolve Windows TEMP's possible DOS short names before creating
             # executable aliases: PowerShell expands them in $PSScriptRoot.
             folder = Path(folder).resolve(strict=True)
             script = folder / 'install.ps1'
             shutil.copyfile(INSTALLER if mode == 'installer' else REGISTER, script)
+            if mode == 'installer':
+                # The production script reads actual release/marker files;
+                # only its endpoint command and OS mutations are mocked.
+                ordinary = {'target': 'windows-x86_64', 'version': '0.1.0',
+                            'sha256': 'b' * 64, 'signing': 'native-signature-verified'}
+                (folder / 'release.json').write_text(
+                    json.dumps(ordinary if release is None else release), encoding='utf-8')
+                if marker:
+                    (folder / 'windows-filter.required').write_bytes(b'1\n')
+                if package:
+                    (folder / 'windows-filter.axpkg').write_bytes(b'fixture-only-not-a-driver-package')
             wrapper = folder / 'fixture.ps1'
             wrapper.write_text(WRAPPER, encoding='utf-8')
             trace = folder / 'trace.json'
@@ -166,6 +183,7 @@ class InstallerTests(unittest.TestCase):
                        ATHERNEX_FIXTURE_PROGRAM_FILES=str(folder / 'Program Files'),
                        ATHERNEX_FIXTURE_PROGRAM_DATA=str(folder / 'ProgramData'),
                        ATHERNEX_FIXTURE_SYSTEM_ROOT=str(folder / 'Windows'),
+                       ATHERNEX_FILTER_REPLY=filter_reply, ATHERNEX_FILTER_EXIT=str(filter_exit),
                        ATHERNEX_INSTALL_STATE=r'C:\ProgramData\State with spaces',
                        ATHERNEX_INSTALL_AGENT=r'C:\Program Files\Endpoint\agent.exe',
                        ATHERNEX_INSTALL_CONTROLLER=r'C:\Program Files\Endpoint\controller.exe',
@@ -207,6 +225,43 @@ class InstallerTests(unittest.TestCase):
                 result, value = self.run_case(case)
                 self.assertNotEqual(result.returncode, 0, value)
                 self.assertEqual(self.calls(value), expected, value)
+
+    def test_required_filter_capability_runs_before_service_and_task_stop(self):
+        result, value = self.run_case(
+            'both', release={'windows_filter': {'sha256': 'a' * 64}}, marker=True, package=True)
+        self.assertEqual(result.returncode, 0, value)
+        self.assertEqual(self.calls(value), ['endpoint', 'endpoint', 'stop',
+                         'disable-task', 'stop-task', 'endpoint', 'start', 'remove-bootstrap'])
+        endpoint = [item['arguments'] for item in value['trace'] if item['call'] == 'endpoint']
+        self.assertEqual([arguments[0] for arguments in endpoint],
+                         ['installer-check', 'installer-filter-hash', 'windows-install'])
+        self.assertEqual(len(endpoint[1]), 2)
+        self.assertEqual(Path(endpoint[1][1]).name, 'release.json')
+
+    def test_required_filter_declarations_must_all_agree_before_stop(self):
+        for declared, marker, package in [(True, False, False), (True, True, False),
+                                          (True, False, True), (False, True, True),
+                                          (False, True, False), (False, False, True)]:
+            with self.subTest(declared=declared, marker=marker, package=package):
+                release = {'windows_filter': {'sha256': 'a' * 64}} if declared else {}
+                result, value = self.run_case('both', release=release, marker=marker, package=package)
+                self.assertNotEqual(result.returncode, 0, value)
+                self.assertEqual(value['detail'], 'Driver-package declarations differ')
+                self.assertEqual(self.calls(value), ['endpoint'], value)
+                self.assertEqual(value['trace'][0]['arguments'][0], 'installer-check')
+
+    def test_required_filter_capability_failure_or_wrong_hash_refuses_before_stop(self):
+        for reply, exit_code in [('a' * 64, 1), ('b' * 64, 0), ('A' * 64, 0),
+                                 ('a' * 63, 0), ('', 0), ('a' * 64 + '\nextra', 0)]:
+            with self.subTest(reply=reply, exit_code=exit_code):
+                result, value = self.run_case(
+                    'both', release={'windows_filter': {'sha256': 'a' * 64}},
+                    marker=True, package=True, filter_reply=reply, filter_exit=exit_code)
+                self.assertNotEqual(result.returncode, 0, value)
+                self.assertEqual(value['detail'], 'Management binary cannot validate required driver-package metadata')
+                self.assertEqual(self.calls(value), ['endpoint', 'endpoint'], value)
+                self.assertEqual([item['arguments'][0] for item in value['trace']],
+                                 ['installer-check', 'installer-filter-hash'])
 
     def test_foreign_services_and_tasks_are_never_stopped(self):
         for case in ['foreign-service','foreign-account','foreign-type','legacy-foreign']:

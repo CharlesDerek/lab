@@ -69,8 +69,15 @@ fn record(directory: &Directory) -> Result<Option<Record>> {
 }
 pub fn require_complete(state: &Path) -> Result<()> {
     if let Some(directory) = optional(state)? {
-        if record(&directory)?.is_some_and(|r| r.phase != Phase::Complete) {
+        let saved = record(&directory)?;
+        if saved.as_ref().is_some_and(|r| r.phase != Phase::Complete) {
             return Err("Windows installation is incomplete; rerun its original installer bundle before starting services or maintenance".into());
+        }
+        if let Some(hash) = saved
+            .as_ref()
+            .and_then(|r| r.windows_filter_sha256.as_deref())
+        {
+            crate::windows_filter_package::require_prepared(state, hash)?;
         }
     }
     Ok(())
@@ -83,6 +90,15 @@ pub fn preflight(state: &Path, binary: &Path) -> Result<bool> {
     };
     let saved = record(&directory)?;
     if let Some(saved) = &saved {
+        let release = binary
+            .parent()
+            .ok_or("Missing installer directory")?
+            .join("release.json");
+        if release.try_exists()? {
+            let artifact: Artifact =
+                serde_json::from_slice(&update::read_bounded(&release, 16384)?)?;
+            saved.require_filter_selection(artifact.filter()?.map(|d| d.sha256.as_str()))?;
+        }
         if saved.phase != Phase::Complete && crate::file_hash(binary)? != saved.source_sha256 {
             return Err("Resume interrupted installation with its original executable".into());
         }
@@ -250,6 +266,16 @@ pub fn install(bundle: &Path, agent: &Path, state: &Path) -> Result<()> {
             "Installer source does not match this executable and its release metadata".into(),
         );
     }
+    crate::windows_filter_package::components(bundle, &artifact)?;
+    artifact.network()?;
+    let filter_hash = artifact.filter()?.map(|d| d.sha256.clone());
+    if artifact.filter()?.is_some_and(|d| {
+        (bytes.len() as u64)
+            .checked_add(d.bytes)
+            .is_none_or(|n| n > 64 * 1024 * 1024)
+    }) {
+        return Err("Combined installer and driver package exceed budget".into());
+    }
     if artifact.signing == "native-signature-verified" {
         update::native_signature(&binary, &update::UpdatePolicy::default())?;
     }
@@ -259,8 +285,12 @@ pub fn install(bundle: &Path, agent: &Path, state: &Path) -> Result<()> {
     let lease = Lease::acquire(private_directory(state)?)?;
     update::installer_check(state, &binary, false)?;
     let previous = record(&lease.directory)?;
+    if let Some(saved) = &previous {
+        saved.require_filter_selection(filter_hash.as_deref())?;
+    }
     let mut journal = if let Some(saved) = previous.filter(|r| r.phase != Phase::Complete) {
-        if saved.source_sha256 != digest
+        if saved.windows_filter_sha256 != filter_hash
+            || saved.source_sha256 != digest
             || saved.server != server
             || !evidence::prefix_equal(&saved.agent_directory, local(agent)?)
         {
@@ -281,6 +311,7 @@ pub fn install(bundle: &Path, agent: &Path, state: &Path) -> Result<()> {
             state_volume: identity.volume,
             state_file_id: identity.file_id,
             phase: Phase::Preparing,
+            windows_filter_sha256: filter_hash.clone(),
         }
     };
     let configuration = setup::configuration(&bootstrap, state)?;
@@ -303,6 +334,14 @@ pub fn install(bundle: &Path, agent: &Path, state: &Path) -> Result<()> {
         journal.phase = Phase::Installing;
     }
     lease.directory.write_maintenance_json(RECORD, &journal)?;
+    if let Some(component) = artifact.filter()? {
+        crate::windows_filter_package::prepare(
+            &lease.directory,
+            bundle,
+            &journal.source_sha256,
+            component,
+        )?;
+    }
     setup::save(state, &configuration)?;
     journal.phase = Phase::Installing;
     lease.directory.write_maintenance_json(RECORD, &journal)?;
@@ -314,6 +353,9 @@ pub fn install(bundle: &Path, agent: &Path, state: &Path) -> Result<()> {
     crate::windows_job::cleanup_ready()?;
     register(&lease.directory, &agent)?;
     crate::windows_job::cleanup_ready()?;
+    if let Some(hash) = &journal.windows_filter_sha256 {
+        crate::windows_filter_package::require_prepared(state, hash)?;
+    }
     journal.phase = Phase::Complete;
     lease.directory.write_maintenance_json(RECORD, &journal)?;
     Ok(())

@@ -159,6 +159,7 @@ fn declared_component_requires_exact_marker_and_archive_even_when_both_disappear
     let (tree, mut component) = fixture();
     let bytes = archive(&tree, &mut component);
     let mut artifact = Artifact {
+        windows_filter: None,
         target: "macos-aarch64".into(),
         version: "fixture".into(),
         sha256: "e".repeat(64),

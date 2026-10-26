@@ -17,6 +17,7 @@ fn installer_metadata_command_is_platform_and_binary_bound() {
         signing: "native-signature-verified".into(),
     });
     let mut artifact = Artifact {
+        windows_filter: None,
         target: target(),
         version: "fixture".into(),
         sha256: hash(&fs::read(binary).unwrap()),
@@ -122,6 +123,7 @@ fn network_component_readiness_is_binary_and_platform_bound() {
     let manifest = directory.path().join("release.json");
     let binary = env!("CARGO_BIN_EXE_athernex-endpoint");
     let mut artifact = Artifact {
+        windows_filter: None,
         target: target(),
         version: "fixture".into(),
         sha256: hash(&fs::read(binary).unwrap()),

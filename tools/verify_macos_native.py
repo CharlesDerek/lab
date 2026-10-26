@@ -8,6 +8,7 @@ if not __debug__:
     raise SystemExit('Validation requires Python assertions; do not use -O or PYTHONOPTIMIZE')
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -17,14 +18,226 @@ import pwd
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+import traceback
+
+
+MAX_OUTPUT = 1024 * 1024
+MAX_REPORT = 2 * 1024 * 1024
+MAX_DIAGNOSTICS = 8 * 1024 * 1024
+OUTPUT_BASE = Path('/private/var/tmp')
+FAILURE = 'Native macOS validation failed; private diagnostics retained when available.'
+CHECKS = frozenset({
+    'all_clean_and_synthetic_targets_allowed_before_activation',
+    'open_allowed_and_detection_denied_with_native_receipt',
+    'exec_allowed_and_detection_denied_with_native_receipt',
+    'mmap_allowed_and_detection_denied_with_native_receipt',
+    'quarantine_and_committed_recovery_while_authorization_is_active',
+    'restored_file_remains_blocked_with_native_detection_receipt',
+    'supervisor_health_requires_fresh_blocking_proof_for_every_root',
+    'approved_scans_recognize_exact_health_samples_while_authorization_is_active',
+    'native_subscription_publishes_bound_durable_coverage',
+    'supervisor_exit_cleans_owned_groups_and_removes_authorization',
+    'native_restart_preserves_totals_and_marks_unknown_interval',
+})
+
+
+def private_run(command, **kwargs):
+    """Keep command capture off public streams and bound reads into Python.
+
+    The existing command timeout/cleanup behavior is unchanged. Temporary files
+    can grow during execution; this is an acceptance/read bound, not a disk quota.
+    """
+    kwargs.pop('capture_output', None)
+    text = kwargs.pop('text', False)
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        os.fchmod(out.fileno(), 0o600); os.fchmod(err.fileno(), 0o600)
+        try:
+            result = subprocess.run(command, stdout=out, stderr=err, **kwargs)
+        except BaseException:
+            for stream in (out, err):
+                stream.seek(0)
+                print(stream.read(MAX_OUTPUT).decode(errors='replace'), file=sys.stderr)
+            raise
+        out.seek(0); err.seek(0)
+        stdout = out.read(MAX_OUTPUT + 1); stderr = err.read(MAX_OUTPUT + 1)
+        if len(stdout) + len(stderr) > MAX_OUTPUT:
+            raise RuntimeError('Native command capture exceeded its bound')
+        if text:
+            stdout = stdout.decode('utf-8', errors='strict')
+            stderr = stderr.decode('utf-8', errors='strict')
+        return subprocess.CompletedProcess(command, result.returncode, stdout, stderr)
+
+
+def private_file(path):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        return os.fdopen(fd, 'w', encoding='utf-8')
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def owned_directory_mode(path):
+    """Only for a newly created private directory, never an existing input."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        named = path.lstat()
+        if (info.st_uid != os.geteuid() or not stat.S_ISDIR(info.st_mode)
+                or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)):
+            raise ValueError('New private directory identity differs')
+        os.fchmod(fd, 0o700); os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def log_tail(path):
+    with path.open('rb') as stream:
+        stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, stream.tell() - 4096))
+        return stream.read(4096).decode(errors='replace')
+
+
+def protected_parent(path):
+    """Open every directory without following links; never chmod/adopt it."""
+    if not path.is_absolute() or '..' in path.parts:
+        raise ValueError('Private output needs a canonical absolute parent')
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for component in path.parts[1:]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd); fd = child
+            info = os.fstat(fd)
+            sticky_root = info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+            if info.st_uid not in (0, os.geteuid()) or (info.st_mode & 0o022 and not sticky_root):
+                raise ValueError('Private output ancestry is not protected')
+        info = os.fstat(fd)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError('Private output parent must be owned and mode0700')
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+class DiagnosticLog:
+    def __init__(self, stream):
+        self.stream = stream
+        self.bytes = 0
+
+    def write(self, text):
+        size = len(text.encode('utf-8', errors='backslashreplace'))
+        if size > MAX_DIAGNOSTICS - self.bytes:
+            raise ValueError('Private diagnostic output exceeds its bound')
+        self.bytes += size
+        return self.stream.write(text)
+
+    def flush(self):
+        return self.stream.flush()
+
+    def fileno(self):
+        return self.stream.fileno()
+
+    def close(self):
+        return self.stream.close()
+
+
+class PrivateOutput:
+    def __init__(self, requested):
+        if requested is None:
+            parent = Path(tempfile.mkdtemp(prefix='athernex-macos-validation-', dir=OUTPUT_BASE))
+            owned_directory_mode(parent)
+            requested = parent / 'report.json'
+        self.path = Path(requested)
+        if not self.path.is_absolute() or not self.path.name or len(self.path.name) > 128:
+            raise ValueError('Private report path is invalid')
+        self.parent = protected_parent(self.path.parent)
+        self.identity = os.fstat(self.parent)
+        self.log = None
+        try:
+            try:
+                os.stat(self.path.name, dir_fd=self.parent, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError('Private report already exists')
+            self.log_name = self.path.name + '.diagnostics-' + secrets.token_hex(16)
+            fd = os.open(self.log_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=self.parent)
+            try:
+                os.fchmod(fd, 0o600)
+                stream = os.fdopen(fd, 'w', encoding='utf-8', errors='backslashreplace')
+            except BaseException:
+                os.close(fd)
+                raise
+            self.log = DiagnosticLog(stream)
+            os.fsync(self.parent)
+        except BaseException:
+            self.close()
+            raise
+
+    def verify_parent(self):
+        fd = protected_parent(self.path.parent)
+        try:
+            actual = os.fstat(fd)
+            if (actual.st_dev, actual.st_ino) != (self.identity.st_dev, self.identity.st_ino):
+                raise ValueError('Private output parent changed')
+        finally:
+            os.close(fd)
+
+    def publish(self, report):
+        data = (json.dumps(report, indent=2) + '\n').encode()
+        if len(data) > MAX_REPORT:
+            raise ValueError('Private report exceeds its bound')
+        self.verify_parent()
+        name = '.native-report-' + secrets.token_hex(16)
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=self.parent)
+        try:
+            try:
+                os.fchmod(fd, 0o600)
+                stream = os.fdopen(fd, 'wb')
+            except BaseException:
+                os.close(fd)
+                raise
+            with stream:
+                stream.write(data); stream.flush(); os.fsync(stream.fileno())
+            # Link publication refuses every existing destination. It never
+            # truncates a caller-selected existing file or follows a symlink.
+            os.link(name, self.path.name, src_dir_fd=self.parent, dst_dir_fd=self.parent,
+                    follow_symlinks=False)
+        finally:
+            os.unlink(name, dir_fd=self.parent)
+        os.fsync(self.parent)
+        self.verify_parent()
+
+    def close(self):
+        try:
+            if self.log is not None:
+                self.log.close()
+        finally:
+            os.close(self.parent)
+
+
+def public_summary(report):
+    if (type(report) is not dict or type(report.get('schema')) is not int or report['schema'] != 1
+            or report.get('native_authorization_exercised') is not True
+            or report.get('production_readiness') is not False
+            or type(report.get('checks')) is not dict or set(report['checks']) != CHECKS
+            or any(value != 'passed' for value in report['checks'].values())):
+        raise ValueError('Native acceptance report is incomplete')
+    return dict(schema=1, suite='MacNative', status='passed', production_readiness=False,
+                checks={key: 'passed' for key in sorted(CHECKS)})
 
 
 def invoke(command, **kwargs):
-    result = subprocess.run(list(map(str, command)), capture_output=True, timeout=30, **kwargs)
+    result = private_run(list(map(str, command)), capture_output=True, timeout=30, **kwargs)
     if result.returncode:
         raise RuntimeError(f'{Path(str(command[0])).name} failed ({result.returncode}): '
                            + result.stderr.decode(errors='replace')[-2048:])
@@ -32,8 +245,20 @@ def invoke(command, **kwargs):
 
 
 def write_json(path, value):
-    path.write_text(json.dumps(value))
-    path.chmod(0o600)
+    if path.exists() or path.is_symlink():
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600):
+            raise ValueError('Private fixture record changed')
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                     delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(json.dumps(value)); stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def verify(args):
@@ -95,7 +320,7 @@ def verify(args):
 
         def probe(operation,path,fd=None,denied=False):
             nonce = secrets.token_hex(32)
-            result = subprocess.run([str(adapter),'probe-owned',str(os.getpid()),operation,str(path),
+            result = private_run([str(adapter),'probe-owned',str(os.getpid()),operation,str(path),
                                      '-' if fd is None else str(fd),nonce],
                                     pass_fds=() if fd is None else (fd,),start_new_session=True,
                                     capture_output=True,text=True,timeout=6)
@@ -132,7 +357,9 @@ def verify(args):
                 return False
             return True
 
-        log_path = root/'service.log'
+        private = root/'diagnostics';private.mkdir(mode=0o700)
+        owned_directory_mode(private)
+        log_path = private/'service.log'
         service = None
         groups = []
         try:
@@ -143,7 +370,7 @@ def verify(args):
                                       ('mmap',clean,fd_clean),('mmap',blocked,fd_blocked)]:
                 probe(operation,path,fd)
             checks['all_clean_and_synthetic_targets_allowed_before_activation']='passed'
-            with log_path.open('w') as log:
+            with private_file(log_path) as log:
                 # From this point onward, cleanup must positively confirm that
                 # every owned worker has stopped before removing its files.
                 # Keep the fixture if cleanup itself raises or journals cannot
@@ -155,13 +382,13 @@ def verify(args):
                 deadline = time.monotonic()+130
                 while time.monotonic()<deadline:
                     if service.poll() is not None:
-                        raise RuntimeError('Native supervisor failed: '+log_path.read_text()[-4096:])
+                        raise RuntimeError('Native supervisor failed: '+log_tail(log_path))
                     status_path = native/'service-status.json'
                     if status_path.exists():
                         status = json.loads(status_path.read_text())
                         groups = [p for p in [status.get('scanner_group'),status.get('adapter_group')] if p]
                         if status.get('phase') in ('running-unverified','running-verified') and (native/'native-status.json').exists():
-                            result = subprocess.run([str(adapter),'query',str(native),str(clean)],capture_output=True,timeout=6)
+                            result = private_run([str(adapter),'query',str(native),str(clean)],capture_output=True,timeout=6)
                             if result.returncode==0: break
                     time.sleep(.1)
                 else: raise AssertionError('Native authorization startup timed out')
@@ -231,7 +458,7 @@ def verify(args):
                 deadline = time.monotonic()+130
                 while time.monotonic()<deadline:
                     if service.poll() is not None:
-                        raise RuntimeError('Native restart failed: '+log_path.read_text()[-4096:])
+                        raise RuntimeError('Native restart failed: '+log_tail(log_path))
                     status = json.loads((native/'service-status.json').read_text())
                     coverage = json.loads((native/'authorization-coverage.json').read_text())
                     after = coverage['evidence']
@@ -285,20 +512,89 @@ def verify(args):
             print(f'Retained native validation fixture for review: {directory}',file=sys.stderr)
 
 
-def main():
-    parser=argparse.ArgumentParser(description=__doc__)
+def emit_public(text, stream):
+    try:
+        stream.write(text); stream.flush()
+        return True
+    except BaseException:
+        # A buffered broken pipe can otherwise print another traceback during
+        # interpreter shutdown. Silence only this failed output stream.
+        try:
+            null = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(null, stream.fileno())
+            finally:
+                os.close(null)
+        except BaseException:
+            pass
+        try:
+            replacement = open(os.devnull, 'w')
+            if sys.stdout is stream:
+                sys.stdout = replacement
+            elif sys.stderr is stream:
+                sys.stderr = replacement
+            else:
+                replacement.close()
+        except BaseException:
+            pass
+        return False
+
+
+class PrivateArgumentParser(argparse.ArgumentParser):
+    def _print_message(self, message, file=None):
+        if message and not emit_public(message, file or sys.stderr):
+            raise SystemExit(1)
+
+    def exit(self, status=0, message=None):
+        if message and not emit_public(message, sys.stderr):
+            status = 1
+        raise SystemExit(status)
+
+    def error(self, message):
+        self.exit(2, 'Native macOS validation arguments refused.\n')
+
+
+def native_host_allowed():
+    return sys.platform == 'darwin' and os.geteuid() == 0
+
+
+def main(argv=None):
+    parser=PrivateArgumentParser(prog='verify_macos_native.py', description=__doc__)
     parser.add_argument('--adapter',required=True,type=Path)
     parser.add_argument('--agent',required=True,type=Path)
     parser.add_argument('--engine-prefix',type=Path,default=Path('/usr/local/clamav'))
     parser.add_argument('--scanner-user',default='_athernexav')
-    parser.add_argument('--report',type=Path,default=Path('.athernex/verification/native-macos-runtime.json'))
-    args=parser.parse_args()
-    if sys.platform!='darwin' or os.geteuid()!=0:
+    parser.add_argument('--report',type=Path,help='New report in an existing owned0700 private directory')
+    args=parser.parse_args(argv)
+    if not native_host_allowed():
         parser.error('Run as root on an authorized Mac with signed endpoint/adapter binaries and ClamAV')
-    report=verify(args)
-    args.report.parent.mkdir(parents=True,exist_ok=True)
-    args.report.write_text(json.dumps(report,indent=2)+'\n')
-    print(json.dumps(dict(checks=report['checks'],report=str(args.report)),indent=2))
+    output = None
+    summary = None
+    failed = False
+    try:
+        output = PrivateOutput(args.report)
+        with contextlib.redirect_stdout(output.log), contextlib.redirect_stderr(output.log):
+            try:
+                report = verify(args)
+                summary = public_summary(report)
+                output.log.flush(); os.fsync(output.log.fileno())
+                output.publish(report)
+            except BaseException:
+                failed = True
+                traceback.print_exc(file=output.log)
+                output.log.flush(); os.fsync(output.log.fileno())
+    except BaseException:
+        failed = True
+    finally:
+        if output is not None:
+            try:
+                output.close()
+            except BaseException:
+                failed = True
+    if failed or summary is None:
+        emit_public(FAILURE + '\n', sys.stderr)
+        return 1
+    return 0 if emit_public(json.dumps(summary, sort_keys=True) + '\n', sys.stdout) else 1
 
 
-if __name__=='__main__': main()
+if __name__=='__main__': raise SystemExit(main())

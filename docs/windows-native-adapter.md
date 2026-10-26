@@ -1290,3 +1290,86 @@ exercises successful initialization and volume discovery.
 
 This gate does not establish signed minifilter prevention, complete scanner
 confinement or hostile-administrator tamper resistance.
+
+### Private driver-package preparation
+
+The private catalog can carry an explicitly approved Windows driver package through
+`tools/package_endpoint.py --windows-filter-directory DIR
+--windows-filter-approval DESCRIPTOR --require-native-signature` on Windows using CPython 3.12.4 or newer. Older or unverified Python
+implementations refuse before temporary snapshot creation: this Windows path relies
+on the documented `mkdir(0700)` ACL behavior added in CPython 3.12.4. The
+input directory must contain exactly `athernex-filter.sys`,
+`athernex-filter.inf`, and `athernex-filter.cat`. The separate private descriptor
+pins their byte counts and SHA-256 digests, the deterministic `AXFPKG1` container,
+the approved source revision, expected ABI 2, supplied driver date/version and
+altitude, and one exact INF profile. This is an intake of supplied release
+approval; neither a source-revision string nor an expected ABI field proves the
+running driver's origin or live protocol.
+
+The two finite INF profiles are
+`win10-2004-through-win11-23h2-amd64-antivirus-v1` and
+`win11-24h2-amd64-antivirus-v1`. Both use architecture-decorated primitive-driver
+sections, DIRID 13, demand start, FltMgr, the AntiVirus class/group, and one fixed
+service/instance. The former uses `Instances`; the latter uses
+`Parameters\Instances`. Exact canonical CRLF bytes are required; additional
+sections, directives, copied files, or alternate formatting refuse. The supplied
+altitude must be in the Anti-Virus group's 320000–329999 range; a fractional
+suffix is preserved. Syntax and INF agreement do not establish Microsoft altitude
+assignment. These profiles describe accepted package structure and intended OS
+families, not an offline guarantee of installation or loading on any host.
+
+Before executing the selected management candidate, the packager performs an
+independent signature check with absolute system PowerShell located through
+GetWindowsDirectoryW, a clean module environment, no profile/UI, and the
+module-qualified Authenticode cmdlet. Its captured output and owned child lifetime
+are bounded; failures produce fixed refusal text. That initial management check
+uses the OS cmdlet's certificate policy, including any system-managed certificate
+retrieval. It does not substitute for the stricter driver policy below.
+
+The candidate management executable verifies the exact snapshot in an owned
+Windows Job worker. It dynamically resolves documented Wintrust APIs from the
+system directory, uses a SHA-256 catalog-admin context, and verifies both SYS and
+INF membership under `DRIVER_ACTION_VERIFY`. This verifies the WHQL driver policy,
+not merely generic executable Authenticode. Catalog/member handles remain pinned
+against write/delete replacement. Verification is noninteractive, cache-only,
+and includes chain revocation and default catalog OS-version checking. Missing
+cached revocation information, policy errors, timeouts, and uncertain cleanup all
+refuse; the native driver-policy worker never downloads trust data or changes trust policy. Every
+WinVerifyTrust VERIFY is paired with CLOSE. The worker has a 30-second execution
+budget and bounded output; OS teardown failure is still a refusal, not a promise
+that every kernel wait completes within that time.
+
+Windows driver catalog publication runs inside the candidate management
+executable while its source snapshot is still alive. It validates the closed
+release descriptor and exact current executable, then creates or opens an actual
+private Windows DACL directory, retains its ancestry and publication lease, and
+writes only the three fixed catalog names with random exclusive temporary files.
+Existing broad-ACL, linked or reparse destinations refuse; unrelated entries are
+preserved and release metadata is written last. The catalog parent must already
+exist. This path does not rely on Python `chmod` for Windows privacy and does not
+require elevation solely for a user-owned private catalog. The caller still owns
+the catalog's surrounding deployment/access policy; pinned handles and private
+DACLs are not resistance to a hostile privileged administrator.
+
+The portal supplies `windows-filter.axpkg` and `windows-filter.required` with the
+release descriptor. The installer checks capability and marker consistency before
+stopping management. Under the existing installer, service and protection
+maintenance leases, it creates private snapshots and a durable preparation
+receipt. The receipt binds the state directory, transaction directory, exact
+member identities, source release, and approved bytes. Known, fully recorded
+members can be replayed after interruption. A directory or member created before
+its identity was durably recorded remains an explicit recovery refusal; it is
+not adopted or deleted. Changed/missing owned members also refuse. Reinstall may
+retain the same required package, but cannot drop or replace an existing selection
+without a separate controlled transition. No-component installations remain
+supported. The private snapshots and receipts are retained, not public artifacts.
+
+`Prepared` is an immutable, policy-verified package snapshot only. This path does
+not invoke Driver Store installation, SetupAPI installation, SCM driver creation,
+driver service/instance registry writes, filter loading/unloading, or boot-policy changes. Management
+installation cannot complete if its required package fails preparation. This does
+not enable production prevention, satisfy the thirteen native gates, establish
+loaded-image ABI/identity, or prove reboot/install rollback, full private scratch,
+retained-view enforcement, or resistance to a hostile administrator. Actual signed
+package acceptance and loaded-driver enforcement still require the appropriate
+signed release and native host validation.

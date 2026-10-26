@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import package_macos_network
+import package_windows_filter
 
 TARGETS = ("linux-x86_64", "linux-aarch64", "windows-x86_64", "macos-x86_64", "macos-aarch64")
 MAX_BYTES = 64 * 1024 * 1024
@@ -104,7 +105,32 @@ def main() -> None:
                         help="Include a signed and entitled macOS authorization adapter")
     parser.add_argument("--macos-network-app", type=Path, help="Approved signed network app bundle; never activates it")
     parser.add_argument("--macos-network-identity", type=Path, help="Private approved structured signing-role identities")
+    parser.add_argument("--windows-filter-directory", type=Path, help="Exactly approved SYS INF CAT; no installation or loading")
+    parser.add_argument("--windows-filter-approval", type=Path, help="Private exact driver-package descriptor")
     args = parser.parse_args()
+    run_package(args)
+
+
+def run_package(args):
+    if args.windows_filter_directory is not None or args.windows_filter_approval is not None:
+        try:
+            _run_package(args)
+        except Exception:
+            # The complete selected operation, including snapshot creation and
+            # context-manager cleanup, must not expose private input/temporary paths.
+            raise SystemExit("Private Windows driver package operation refused") from None
+    else:
+        _run_package(args)
+
+
+def _run_package(args):
+    if (args.windows_filter_directory is None) != (args.windows_filter_approval is None):
+        raise ValueError("Windows driver package and approval must be supplied together")
+    if args.windows_filter_directory is not None and not (args.target == 'windows-x86_64' and os.name == 'nt' and args.require_native_signature):
+        raise ValueError("Windows driver package requires signed Windows packaging")
+    if args.windows_filter_directory is not None:
+        package_windows_filter.require_windows_runtime()
+    filter_data = filter_artifact = None
     if (args.macos_network_app is None) != (args.macos_network_identity is None):
         raise ValueError("Network app and private identity must be supplied together")
     if args.macos_network_app is not None and not (args.target.startswith('macos-')
@@ -146,12 +172,31 @@ def main() -> None:
                     if readiness.stdout.strip() != digest.encode('ascii'):
                         raise ValueError("Management binary does not support this native adapter catalog")
             elif args.target.startswith("windows") and os.name == "nt":
-                env = dict(os.environ, ATHERNEX_VERIFY_BINARY=str(snapshot.resolve()))
-                subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                                "if ((Get-AuthenticodeSignature -LiteralPath $env:ATHERNEX_VERIFY_BINARY).Status -ne 'Valid') { exit 1 }"], env=env, check=True, timeout=60)
+                if args.windows_filter_directory is not None:
+                    package_windows_filter.windows_signature_preflight(snapshot)
+                else:
+                    env = dict(os.environ, ATHERNEX_VERIFY_BINARY=str(snapshot.resolve()))
+                    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                                    "if ((Get-AuthenticodeSignature -LiteralPath $env:ATHERNEX_VERIFY_BINARY).Status -ne 'Valid') { exit 1 }"], env=env, check=True, timeout=60)
             else:
                 raise ValueError("Native signature verification requires a matching macOS or Windows runner")
             signing = "native-signature-verified"
+        if args.windows_filter_directory is not None:
+            filter_data, filter_artifact = package_windows_filter.package(args.windows_filter_directory,
+                args.windows_filter_approval, Path(directory), snapshot)
+            if len(data) + len(filter_data) > MAX_BYTES:
+                raise ValueError("Combined endpoint and driver package exceed budget")
+            release = Path(directory) / 'filter-release.json'
+            try:
+                release.write_text(json.dumps(dict(target=args.target, version=args.version,
+                    sha256=hashlib.sha256(data).hexdigest(), signing=signing, windows_filter=filter_artifact)))
+            except OSError:
+                raise ValueError("Private Windows driver release snapshot refused") from None
+            package_windows_filter.verify_command(snapshot, 'installer-filter-hash', release, filter_artifact['sha256'])
+            # The candidate owns Windows DACL creation and handle-relative writes.
+            # Keep its verified source snapshot alive until manifest-last publication.
+            package_windows_filter.publish_catalog(snapshot, Path(directory), args.output,
+                                                   filter_data, filter_artifact['sha256'])
         if args.macos_network_app is not None:
             network_data, network_artifact = package_macos_network.package(
                 args.macos_network_app, args.macos_network_identity, Path(directory),
@@ -165,6 +210,10 @@ def main() -> None:
                                     check=True, capture_output=True, timeout=30)
             if result.stdout.strip() != network_artifact['sha256'].encode('ascii'):
                 raise ValueError("Management binary does not support the required network component")
+    if args.windows_filter_directory is not None:
+        # Success follows successful private-snapshot cleanup, never precedes it.
+        print(f"Provisioned {args.target}: {signing}, {len(data)} bytes")
+        return
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output = private_catalog(args.output)
     filename = f"athernex-endpoint-{args.target}" + (".exe" if args.target.startswith("windows") else "")

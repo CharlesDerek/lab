@@ -300,6 +300,7 @@ mod tests {
 
     #[test]
     fn semantic_frame_refusals_close_transport_and_make_the_client_terminal() {
+        let _serial = child::TEST_SERIAL.lock().unwrap();
         for case in 0..4 {
             let (stream, mut peer) = UnixStream::pair().unwrap();
             let mut delivery = Delivery {

@@ -33,6 +33,8 @@ pub mod service;
 mod windows_directory;
 pub mod windows_filter;
 #[cfg(windows)]
+pub mod windows_filter_package;
+#[cfg(windows)]
 pub mod windows_network;
 #[cfg(windows)]
 pub mod windows_scanner;

@@ -702,6 +702,7 @@ fn installer_checks_artifact_integrity_and_contains_platform_bootstrap() {
     let binary = b"public nonexecutable fixture";
     std::fs::write(dir.path().join("athernex-endpoint-linux-x86_64"), binary).unwrap();
     let artifact = athernex_siem::fleet_web::Artifact {
+        windows_filter: None,
         native_adapter: None,
         macos_network: None,
         target: "linux-x86_64".into(),
@@ -755,6 +756,7 @@ fn macos_installer_binds_the_optional_native_adapter_to_architecture_and_catalog
             .join(format!("athernex-endpoint-native-{target}"));
         std::fs::write(&native_path, &adapter).unwrap();
         let mut artifact = Artifact {
+            windows_filter: None,
             target: target.into(),
             version: "fixture".into(),
             sha256: p::hash(main),
@@ -845,6 +847,7 @@ fn native_adapter_metadata_cannot_claim_unsigned_or_wrong_platform_components() 
         ),
     ] {
         let artifact = Artifact {
+            windows_filter: None,
             target: target.into(),
             version: "fixture".into(),
             sha256: "a".repeat(64),
@@ -1120,6 +1123,7 @@ fn macos_network_bundle_binds_marker_hash_size_and_combined_component_budget() {
         provider_cdhashes: vec!["a".repeat(40)],
     };
     let mut artifact = Artifact {
+        windows_filter: None,
         target: target.into(),
         version: "fixture".into(),
         sha256: p::hash(main),
@@ -1202,4 +1206,117 @@ fn macos_network_bundle_binds_marker_hash_size_and_combined_component_budget() {
     let mut bundle = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
     assert!(bundle.by_name("macos-network.required").is_err());
     assert!(bundle.by_name("macos-network.zip").is_err());
+}
+
+#[test]
+fn windows_filter_package_delivery_requires_exact_bytes_and_marker() {
+    use athernex_endpoint_protocol::windows_filter_package::{
+        Descriptor, Member, MAGIC, PROFILE, TRUST,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let binary = b"nonexecutable synthetic management fixture";
+    let mut d = Descriptor {
+        schema: 1,
+        sha256: "a".repeat(64),
+        bytes: 0,
+        profile: PROFILE.into(),
+        trust_policy: TRUST.into(),
+        source_revision: "b".repeat(40),
+        expected_abi: 2,
+        driver_version: "1.2.3.4".into(),
+        driver_date: "01/01/2025".into(),
+        altitude: "325000.01".into(),
+        sys: Member {
+            bytes: 256,
+            sha256: "a".repeat(64),
+        },
+        inf: Member {
+            bytes: 1,
+            sha256: "a".repeat(64),
+        },
+        cat: Member {
+            bytes: 1,
+            sha256: "a".repeat(64),
+        },
+    };
+    let mut sys = vec![0; 256];
+    sys[..2].copy_from_slice(b"MZ");
+    sys[60..64].copy_from_slice(&64u32.to_le_bytes());
+    sys[64..70].copy_from_slice(b"PE\0\0\x64\x86");
+    sys[88..90].copy_from_slice(&[11, 2]);
+    sys[156..158].copy_from_slice(&[1, 0]);
+    let inf = d.inf_bytes();
+    let cat = b"unsigned structural fixture".to_vec();
+    for (member, bytes) in [&mut d.sys, &mut d.inf, &mut d.cat]
+        .into_iter()
+        .zip([&sys, &inf, &cat])
+    {
+        member.bytes = bytes.len() as u64;
+        member.sha256 = p::hash(bytes);
+    }
+    let mut package = MAGIC.to_vec();
+    for member in d.members() {
+        package.extend(member.bytes.to_le_bytes());
+    }
+    for bytes in [&sys, &inf, &cat] {
+        package.extend(bytes);
+    }
+    d.bytes = package.len() as u64;
+    d.sha256 = p::hash(&package);
+    let mut artifact = athernex_siem::fleet_web::Artifact {
+        target: "windows-x86_64".into(),
+        version: "fixture".into(),
+        sha256: p::hash(binary),
+        signing: "native-signature-verified".into(),
+        native_adapter: None,
+        macos_network: None,
+        windows_filter: Some(d),
+    };
+    let manifest = dir.path().join("windows-x86_64.json");
+    let component = dir
+        .path()
+        .join("athernex-windows-filter-windows-x86_64.axpkg");
+    std::fs::write(
+        dir.path().join("athernex-endpoint-windows-x86_64.exe"),
+        binary,
+    )
+    .unwrap();
+    std::fs::write(&component, &package).unwrap();
+    std::fs::write(&manifest, serde_json::to_vec(&artifact).unwrap()).unwrap();
+    let bootstrap = p::Bootstrap {
+        protocol: 1,
+        server: "https://example.test/".into(),
+        enrollment_token: "a".repeat(64),
+        platform: Platform::Windows,
+        antivirus: vec![],
+    };
+    let bytes =
+        athernex_siem::fleet_web::installer_bundle(dir.path(), "windows-x86_64", &bootstrap)
+            .unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    use std::io::Read;
+    let mut original = Vec::new();
+    zip.by_name("windows-filter.axpkg")
+        .unwrap()
+        .read_to_end(&mut original)
+        .unwrap();
+    assert_eq!(original, package);
+    let mut marker = Vec::new();
+    zip.by_name("windows-filter.required")
+        .unwrap()
+        .read_to_end(&mut marker)
+        .unwrap();
+    assert_eq!(marker, b"1\n");
+    package.push(0);
+    std::fs::write(&component, &package).unwrap();
+    assert!(
+        athernex_siem::fleet_web::installer_bundle(dir.path(), "windows-x86_64", &bootstrap)
+            .is_err()
+    );
+    artifact.signing = "development-unsigned".into();
+    std::fs::write(&manifest, serde_json::to_vec(&artifact).unwrap()).unwrap();
+    assert!(
+        athernex_siem::fleet_web::installer_bundle(dir.path(), "windows-x86_64", &bootstrap)
+            .is_err()
+    );
 }

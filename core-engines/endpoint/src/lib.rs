@@ -16,6 +16,7 @@ pub mod supervisor;
 pub mod telemetry;
 mod telemetry_sockets;
 pub mod update;
+pub mod windows_filter_package;
 #[cfg(windows)]
 mod windows_job;
 #[cfg(windows)]

@@ -10,6 +10,8 @@ on:
       - 'infrastructure/endpoint/**'
       - 'tools/package_endpoint.py'
       - 'tools/test_package_endpoint.py'
+      - 'tools/package_windows_filter.py'
+      - 'tools/test_package_windows_filter.py'
       - 'tools/package_macos_network.py'
       - 'tools/test_package_macos_network.py'
       - 'tools/build_macos_network.py'
@@ -40,6 +42,7 @@ on:
       - 'tools/native_read_barrier.py'
       - 'tools/test_native_read_barrier.py'
       - 'tools/verify_macos_native.py'
+      - 'tools/test_macos_native_verifier.py'
       - 'tools/verify_native_service.py'
       - 'tools/prepare_native_protection_fixture.py'
       - 'tools/prepare_windows_filter_kits.py'
@@ -574,11 +577,14 @@ jobs:
         run: cargo test --locked -p athernex-siem --test storage_segments complete_backup_verifies_and_restores_history
       - name: Test retained Mac process, authentication and network observations and independent rollout gates
         run: cargo test --locked -p athernex-siem --test macos_process_events --test macos_authentication --test macos_network_events --test endpoint_rollouts --test engine_rollouts
+      - name: Test required Windows driver package delivery
+        run: cargo test --locked -p athernex-siem --test fleet windows_filter_package_delivery_requires_exact_bytes_and_marker -- --exact
       - name: Refuse disabled assertions in validation tools and isolated helpers
         run: python tools/test_verification_guards.py -v
       - name: Test artifact packaging with controlled signature results
         run: |
           python tools/test_package_endpoint.py
+          python tools/test_package_windows_filter.py
           python tools/test_package_macos_network.py
           python -m unittest tools.test_build_macos_network
       - name: Test bounded engine bundle assembly
@@ -590,6 +596,9 @@ jobs:
       - name: Test macOS installer ordering with controlled system tools
         if: runner.os != 'Windows'
         run: python tools/test_macos_installer.py
+      - name: Test private macOS verifier evidence and failure output
+        if: runner.os != 'Windows'
+        run: python tools/test_macos_native_verifier.py -v
       - name: Lint endpoint
         run: cargo clippy --locked -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native -p athernex-macos-network --all-targets -- -D warnings
       - name: Build native endpoint

@@ -126,6 +126,35 @@ fn main() -> Result<()> {
                 )?)?
             );
         }
+        "installer-filter-hash" if args.len() == 2 => {
+            if let Some(hash) = athernex_endpoint::windows_filter_package::installer_hash(
+                std::path::Path::new(&args[1]),
+            )? {
+                println!("{hash}");
+            }
+        }
+        #[cfg(windows)]
+        "publish-windows-filter-catalog" if args.len() == 3 => {
+            let hash = athernex_endpoint::windows_filter_package::publish_catalog(
+                std::path::Path::new(&args[1]),
+                std::path::Path::new(&args[2]),
+            )?;
+            println!("{hash}");
+        }
+        #[cfg(windows)]
+        "verify-windows-filter-package" if args.len() == 2 => {
+            let hash = athernex_endpoint::windows_filter_package::verify_package(
+                std::path::Path::new(&args[1]),
+            )?;
+            println!("{hash}");
+        }
+        #[cfg(windows)]
+        "windows-filter-verify" if args.len() == 2 => {
+            let hash = athernex_endpoint::windows_filter_package::verify_worker(
+                std::path::Path::new(&args[1]),
+            )?;
+            println!("{hash}");
+        }
         "installer-network-hash" if args.len() == 2 => {
             if let Some(hash) = athernex_endpoint::macos_network_bundle::installer_hash(
                 std::path::Path::new(&args[1]),

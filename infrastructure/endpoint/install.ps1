@@ -6,6 +6,20 @@ $StateDir = Join-Path $env:ProgramData 'AthernexEndpoint'
 $SourceBinary = Join-Path $PSScriptRoot 'athernex-endpoint.exe'
 & $SourceBinary installer-check $StateDir $SourceBinary
 if ($LASTEXITCODE -ne 0) { throw 'Existing update state requires recovery or a signed agent update before reinstalling' }
+# An older management binary cannot silently omit a required driver component.
+$ReleasePath = Join-Path $PSScriptRoot 'release.json'
+if ((Get-Item -LiteralPath $ReleasePath).Length -gt 16384) { throw 'Release metadata exceeds budget' }
+$Release = Get-Content -LiteralPath $ReleasePath -Raw | ConvertFrom-Json
+$HasFilter = $null -ne $Release.windows_filter
+$FilterRequired = Test-Path -LiteralPath (Join-Path $PSScriptRoot 'windows-filter.required')
+$FilterPresent = Test-Path -LiteralPath (Join-Path $PSScriptRoot 'windows-filter.axpkg')
+if ($HasFilter -ne $FilterRequired -or $HasFilter -ne $FilterPresent) { throw 'Driver-package declarations differ' }
+if ($HasFilter) {
+    $FilterHash = & $SourceBinary installer-filter-hash $ReleasePath
+    if ($LASTEXITCODE -ne 0 -or $FilterHash -cnotmatch '^[0-9a-f]{64}$' -or $FilterHash -cne $Release.windows_filter.sha256) {
+        throw 'Management binary cannot validate required driver-package metadata'
+    }
+}
 $Launcher = Join-Path $AgentDir 'athernex-launcher.exe'
 $Controller = Join-Path $AgentDir 'athernex-controller.exe'
 $Agent = Join-Path $AgentDir 'athernex-endpoint.exe'

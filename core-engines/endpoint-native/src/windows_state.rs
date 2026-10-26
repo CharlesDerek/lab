@@ -134,6 +134,18 @@ impl Directory {
     pub fn maintenance_directory(&self, leaf: &str) -> Result<Self> {
         Ok(Self(self.0.maintenance_directory(leaf)?))
     }
+    /// Exact create-only maintenance child; a competing existing object is refused.
+    pub fn fresh_maintenance_directory(&self, leaf: &str) -> Result<Self> {
+        Ok(Self(self.0.fresh_maintenance_directory(leaf)?))
+    }
+    /// Atomic no-replace publication, including the initial transaction receipt.
+    pub fn publish_maintenance(&self, leaf: &str, bytes: &[u8]) -> Result<()> {
+        self.0.publish_maintenance(leaf, bytes)
+    }
+    /// User-private catalog publication; no administrator requirement or ACL relaxation.
+    pub fn write_private_bytes(&self, leaf: &str, bytes: &[u8]) -> Result<()> {
+        self.0.write_private_bytes(leaf, bytes)
+    }
     pub fn read_json<T: DeserializeOwned>(&self, leaf: &str) -> Result<T> {
         self.0.snapshot_json(leaf)
     }

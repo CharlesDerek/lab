@@ -718,6 +718,23 @@ sudo python3 tools/verify_macos_native.py \
   --report /PRIVATE/ROOT_OWNED/native-macos-runtime.json
 ```
 
+The report destination must be new, with an existing root-owned mode `0700`
+parent and protected, nonsymlink directory ancestry. Existing files and links
+are refused. Reports and diagnostic logs are created mode `0600`; command output,
+probe records, worker log excerpts and retained fixture locations stay private.
+The public stream contains only the fixed eleven-check success summary or a
+fixed failure message. A failed output stream also returns a nonzero status.
+Without `--report`, evidence goes into a fresh root-owned `0700` directory with
+prefix `/private/var/tmp/athernex-macos-validation-`; its generated name is not
+printed. Use an explicit private report destination when evidence must be easy
+to locate. The fixture root retains the traversal permissions needed by the
+dedicated scanner, while sensitive files remain separately protected.
+
+Diagnostic reads, reports and captured command output have acceptance bounds.
+Temporary command capture and the private worker log are not disk quotas while
+their processes run. The portable verifier tests exercise privacy and refusal
+paths; they do not exercise Apple authorization or establish native acceptance.
+
 The gate creates temporary watched files and a private synthetic signature
 database. It locally ad-hoc signs two copies of the native adapter with distinct
 identifiers before computing their whole-file signatures. Their health entry

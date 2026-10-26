@@ -251,6 +251,9 @@ impl Dir {
     pub(crate) fn maintenance_directory(&self, leaf: &str) -> Result<Self> {
         self.make_directory(leaf, false, true)
     }
+    pub(crate) fn fresh_maintenance_directory(&self, leaf: &str) -> Result<Self> {
+        self.make_directory(leaf, true, true)
+    }
     /// A new scanner workspace must never adopt an existing, possibly shared
     /// directory. ACL-edit rights apply only to the object just created.
     pub(crate) fn fresh_directory(&self, leaf: &str) -> Result<Self> {
@@ -445,6 +448,55 @@ impl Dir {
         }
         self.write_atomic(leaf, bytes, true)
     }
+    /// Publish a newly owned maintenance object without deleting a temporary
+    /// name or replacing an existing destination. Unknown leftovers are retained.
+    pub(crate) fn publish_maintenance(&self, leaf: &str, bytes: &[u8]) -> Result<()> {
+        leaf_name(leaf)?;
+        if bytes.len() > 128 * 1024 * 1024 {
+            return Err("Maintenance file exceeds its byte budget".into());
+        }
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).map_err(|_| "Maintenance publication nonce failed")?;
+        let nonce = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let temporary = format!(".{nonce}.new");
+        let mut file = self.create_with_acl_rights(&temporary, false, true)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        raw::rename(&file, &self.file, leaf, false)?;
+        self.sync()
+    }
+    /// Catalog updates replace only the caller-selected known output. Random
+    /// exclusive temporaries never unlink an unrelated catalog entry. The caller
+    /// retains the private directory/ancestry and its catalog lease throughout.
+    pub(crate) fn write_private_bytes(&self, leaf: &str, bytes: &[u8]) -> Result<()> {
+        leaf_name(leaf)?;
+        if bytes.len() > 128 * 1024 * 1024 {
+            return Err("Private publication exceeds byte budget".into());
+        }
+        self.private()?;
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).map_err(|_| "Private publication nonce failed")?;
+        let nonce = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let temporary = format!(".{nonce}.new");
+        let mut file = self.create_with_acl_rights(&temporary, false, false)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        match self.read_private(leaf) {
+            Ok(prior) => {
+                let info: FILE_STANDARD_INFO = information(&prior, FileStandardInfo)?;
+                if info.NumberOfLinks != 1 {
+                    return Err("Private publication refuses linked destination".into());
+                }
+                unnamed_stream_only(&prior)?;
+            }
+            Err(e)
+                if e.downcast_ref::<io::Error>()
+                    .is_some_and(|e| e.kind() == io::ErrorKind::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+        raw::rename(&file, &self.file, leaf, true)?;
+        self.sync()
+    }
     fn write_atomic(&self, leaf: &str, bytes: &[u8], maintenance: bool) -> Result<()> {
         leaf_name(leaf)?;
         let temp = format!(".{leaf}.new");
@@ -609,7 +661,7 @@ pub(super) fn trusted(intent: &Intent) -> Result<()> {
 pub(super) fn broker_query(_: &Path, _: &Path, _: Duration) -> Result<crate::Verdict> {
     Err("A Unix native broker cannot authorize a Windows mutation".into())
 }
-fn unnamed_stream_only(file: &File) -> Result<()> {
+pub(crate) fn unnamed_stream_only(file: &File) -> Result<()> {
     let mut buffer = vec![0usize; 65536 / size_of::<usize>()];
     if unsafe {
         GetFileInformationByHandleEx(

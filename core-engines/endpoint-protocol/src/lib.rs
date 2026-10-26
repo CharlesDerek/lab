@@ -14,6 +14,7 @@ pub mod protection;
 pub mod telemetry;
 pub mod update;
 pub mod windows_authentication;
+pub mod windows_filter_package;
 pub mod windows_network_events;
 pub mod windows_process_events;
 

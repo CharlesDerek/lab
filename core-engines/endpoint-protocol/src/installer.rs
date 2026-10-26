@@ -11,6 +11,8 @@ pub struct Artifact {
     pub native_adapter: Option<NativeArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macos_network: Option<MacosNetworkArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_filter: Option<crate::windows_filter_package::Descriptor>,
 }
 /// Private release pin for a separately activated macOS network system extension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,7 +103,24 @@ pub struct NativeArtifact {
     pub signing: String,
 }
 impl Artifact {
+    pub fn filter(
+        &self,
+    ) -> Result<Option<&crate::windows_filter_package::Descriptor>, &'static str> {
+        let Some(component) = &self.windows_filter else {
+            return Ok(None);
+        };
+        component.validate()?;
+        if self.target != "windows-x86_64"
+            || self.signing != "native-signature-verified"
+            || self.native_adapter.is_some()
+            || self.macos_network.is_some()
+        {
+            return Err("Windows filter package requires a signed Windows endpoint");
+        }
+        Ok(Some(component))
+    }
     pub fn network(&self) -> Result<Option<&MacosNetworkArtifact>, &'static str> {
+        self.filter()?;
         let Some(component) = &self.macos_network else {
             return Ok(None);
         };
@@ -114,6 +133,7 @@ impl Artifact {
         Ok(Some(component))
     }
     pub fn native(&self) -> Result<Option<&NativeArtifact>, &'static str> {
+        self.filter()?;
         let Some(component) = &self.native_adapter else {
             return Ok(None);
         };
