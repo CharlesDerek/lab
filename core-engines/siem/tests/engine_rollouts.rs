@@ -17,23 +17,33 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::for_platform(Platform::current(), std::env::consts::ARCH)
+    }
+    fn for_platform(platform: Platform, arch: &str) -> Self {
+        let os = match platform {
+            Platform::Linux => "linux",
+            Platform::Macos => "macos",
+            Platform::Windows => "windows",
+        };
+        let target = format!("{os}-{arch}");
+        let monitor = (platform == Platform::Linux).then_some("sbin/clamonacc");
         let dir = tempfile::tempdir().unwrap();
         let engine = Engine::open(&dir.path().join("db")).unwrap();
         let (private, key) = p::update::generate_key().unwrap();
-        let paths = [
+        let mut paths = vec![
             "bin/clamscan",
             "bin/freshclam",
             "sbin/clamd",
-            "sbin/clamonacc",
             "lib/libfixture.so",
             "etc/certs/fixture.crt",
         ];
+        paths.extend(monitor);
         let release = SignedRelease::sign(
             Release {
                 schema: 1,
                 protocol: p::PROTOCOL,
                 engine: "clamav".into(),
-                target: p::update::target(),
+                target: target.clone(),
                 version: "next".into(),
                 channel: "stable".into(),
                 sequence: 1,
@@ -43,7 +53,7 @@ impl Fixture {
                     scanner: paths[0].into(),
                     updater: paths[1].into(),
                     daemon: paths[2].into(),
-                    monitor: Some(paths[3].into()),
+                    monitor: monitor.map(str::to_owned),
                     library_dirs: vec!["lib".into()],
                     certificates: "etc/certs".into(),
                 },
@@ -77,7 +87,7 @@ impl Fixture {
             managed: true,
             automatic: true,
             supervised: true,
-            target: p::update::target(),
+            target,
             key_fingerprint: p::update::fingerprint(&key).unwrap(),
             channel: "stable".into(),
             highwater: 0,
@@ -88,7 +98,7 @@ impl Fixture {
         };
         let ids = (1..=3).map(|i| format!("{i:064x}")).collect::<Vec<_>>();
         for id in &ids {
-            let token = engine.create_enrollment(Platform::current(), NOW).unwrap();
+            let token = engine.create_enrollment(platform, NOW).unwrap();
             engine
                 .enroll_endpoint(
                     &Enrollment {
@@ -97,8 +107,8 @@ impl Fixture {
                         endpoint_id: id.clone(),
                         credential: "a".repeat(64),
                         hostname: "fixture".into(),
-                        platform: Platform::current(),
-                        arch: std::env::consts::ARCH.into(),
+                        platform,
+                        arch: arch.into(),
                         version: "prior".into(),
                     },
                     NOW,
@@ -201,6 +211,75 @@ impl Fixture {
         plan.id
     }
 }
+#[test]
+fn supported_platform_fixtures_preserve_monitor_policy_and_complete_reviewed_rollouts() {
+    for (platform, arch, target) in [
+        (Platform::Linux, "x86_64", "linux-x86_64"),
+        (Platform::Linux, "aarch64", "linux-aarch64"),
+        (Platform::Macos, "x86_64", "macos-x86_64"),
+        (Platform::Macos, "aarch64", "macos-aarch64"),
+        (Platform::Windows, "x86_64", "windows-x86_64"),
+    ] {
+        let f = Fixture::for_platform(platform, arch);
+        assert_eq!(f.release.release.target, target);
+        assert_eq!(f.engine_health.target, target);
+        assert_eq!(
+            f.release.release.roles.monitor.is_some(),
+            platform == Platform::Linux
+        );
+        assert_eq!(
+            f.release
+                .release
+                .files
+                .iter()
+                .any(|file| file.path == "sbin/clamonacc"),
+            platform == Platform::Linux
+        );
+        f.release.release.validate().unwrap();
+        let mut invalid = f.release.release.clone();
+        if platform == Platform::Linux {
+            invalid.roles.monitor = None;
+        } else {
+            invalid.roles.monitor = Some("sbin/clamonacc".into());
+            invalid.files.push(File {
+                path: "sbin/clamonacc".into(),
+                sha256: p::hash(b"fixture-monitor"),
+                bytes: 15,
+                executable: true,
+            });
+        }
+        assert_eq!(
+            invalid.validate().unwrap_err(),
+            "Only Linux engine releases contain the native on-access monitor"
+        );
+
+        let id = f.propose();
+        let hash = f.engine.engine_rollout(&id).unwrap().plan_hash;
+        f.review(&id, "approve", NOW);
+        f.engine.tick_engine_rollouts(NOW).unwrap();
+        f.install(0, "installed", NOW + 1);
+        f.beat(0, true, NOW + 2);
+        for index in 0..3 {
+            f.beat(index, index == 0, NOW + 60_003);
+        }
+        f.engine.tick_engine_rollouts(NOW + 60_003).unwrap();
+        assert!(f.engine.engine_rollout(&id).unwrap().members[1..]
+            .iter()
+            .all(|member| member.deployment_id.is_some()));
+        for index in 1..3 {
+            f.install(index, "installed", NOW + 60_004);
+            f.beat(index, true, NOW + 60_005);
+        }
+        for index in 0..3 {
+            f.beat(index, true, NOW + 120_006);
+        }
+        f.engine.tick_engine_rollouts(NOW + 120_006).unwrap();
+        let completed = f.engine.engine_rollout(&id).unwrap();
+        assert_eq!(completed.state, "completed");
+        assert_eq!(completed.plan_hash, hash);
+    }
+}
+
 #[test]
 fn engine_canary_requires_receipt_and_two_fresh_health_streams_across_restart() {
     let mut f = Fixture::new();
@@ -584,7 +663,7 @@ fn group_reservation_excludes_individual_and_cross_component_maintenance() {
         p::update::Release {
             schema: 1,
             protocol: p::PROTOCOL,
-            target: p::update::target(),
+            target: f.release.release.target.clone(),
             version: "next".into(),
             channel: "stable".into(),
             sequence: 1,
@@ -643,7 +722,7 @@ fn recovered_rollback_can_stage_newer_release_but_current_degradation_still_bloc
 #[test]
 fn engine_rollouts_pin_macos_process_coverage_and_stop_after_a_gap() {
     for failure in 0..8 {
-        let mut f = Fixture::new();
+        let mut f = Fixture::for_platform(Platform::Macos, "aarch64");
         f.health.collector = Some(p::telemetry::CollectorHealth {
             mode: "snapshot".into(),
             last_attempt_ms: NOW,

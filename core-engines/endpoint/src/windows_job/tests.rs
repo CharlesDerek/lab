@@ -859,12 +859,17 @@ fn bounded_pipe_and_deadline_stop_work_and_259_is_a_real_exit_code() {
     let dir = tempfile::tempdir().unwrap();
     let result = dir.path().join("unused");
     let start = Instant::now();
-    assert!(
-        run(&command("flood", &result), Duration::from_secs(10), 1024)
-            .unwrap_err()
-            .to_string()
-            .contains("output budget")
-    );
+    let error = run(&command("flood", &result), Duration::from_secs(10), 1024).unwrap_err();
+    if !error.to_string().contains("output budget") {
+        eprintln!(
+            "ATHERNEX_WINDOWS_JOB_FLOOD_ERROR={}",
+            flood_error_category(&error)
+        );
+        if let Some(code) = error.raw_os_error() {
+            eprintln!("ATHERNEX_WINDOWS_JOB_FLOOD_OS_CODE={code}");
+        }
+    }
+    assert!(error.to_string().contains("output budget"));
     assert!(start.elapsed() < Duration::from_secs(5));
     assert_eq!(
         run(&command("sleep", &result), Duration::from_millis(200), 1024)
@@ -884,6 +889,63 @@ fn bounded_pipe_and_deadline_stop_work_and_259_is_a_real_exit_code() {
             .0,
         259
     );
+}
+
+fn flood_error_category(error: &io::Error) -> &'static str {
+    if error.raw_os_error().is_some() {
+        return "os_error";
+    }
+    // Inspect locally; only these fixed labels may reach the test log. Neither
+    // arbitrary error text nor captured child output is a diagnostic payload.
+    match error.to_string().as_str() {
+        "Action exceeded its output budget" => "output_budget",
+        "Action exceeded its time budget" => "action_timeout",
+        "Output drain exceeded its time budget" => "drain_timeout",
+        "Windows process cleanup is pending or uncertain" => "cleanup_pending",
+        "Windows process tree capacity is full" => "capacity_full",
+        "Windows output pipe made no progress" => "pipe_no_progress",
+        "Invalid Windows process attribute size" => "attribute_size",
+        "Unexpected Windows process wait result" => "wait_result",
+        _ => "other",
+    }
+}
+
+#[test]
+fn flood_error_diagnostics_use_only_exact_static_categories() {
+    for (message, category) in [
+        ("Action exceeded its output budget", "output_budget"),
+        ("Action exceeded its time budget", "action_timeout"),
+        ("Output drain exceeded its time budget", "drain_timeout"),
+        (
+            "Windows process cleanup is pending or uncertain",
+            "cleanup_pending",
+        ),
+        ("Windows process tree capacity is full", "capacity_full"),
+        ("Windows output pipe made no progress", "pipe_no_progress"),
+        ("Invalid Windows process attribute size", "attribute_size"),
+        ("Unexpected Windows process wait result", "wait_result"),
+    ] {
+        assert_eq!(flood_error_category(&io::Error::other(message)), category);
+        for changed in [
+            format!("{message} "),
+            format!("{message}\u{200b}"),
+            message.to_lowercase(),
+        ] {
+            assert_eq!(flood_error_category(&io::Error::other(changed)), "other");
+        }
+    }
+    for message in [
+        "synthetic account/path error",
+        "",
+        "Action exceeded its output budget: extra",
+    ] {
+        assert_eq!(flood_error_category(&io::Error::other(message)), "other");
+    }
+    for code in [i32::MIN, -1, 0, 1, i32::MAX] {
+        let error = io::Error::from_raw_os_error(code);
+        assert_eq!(flood_error_category(&error), "os_error");
+        assert_eq!(error.raw_os_error(), Some(code));
+    }
 }
 
 #[test]

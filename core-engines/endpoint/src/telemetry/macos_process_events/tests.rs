@@ -290,8 +290,9 @@ fn helper_pin_is_default_off_and_source_never_enters_snapshot_cache() {
     let serialized = serde_json::to_value(&config).unwrap();
     assert!(serialized.get("macos_process_events").is_none());
     assert!(serialized.get("macos_process_adapter").is_none());
+    let approved = tempfile::tempdir().unwrap();
     config.macos_process_adapter = Some(MacosProcessAdapter {
-        path: "/Library/AthernexEndpoint/athernex-endpoint-native".into(),
+        path: approved.path().join("athernex-endpoint-native"),
         sha256: "a".repeat(64),
     });
     assert!(config.validate().is_ok());
