@@ -72,7 +72,9 @@ def certificate_setup(root):
         configure_fixture_burst(configuration)
     # Bind the observed source port independently of the journal text. The
     # proxy and its private metadata exist only inside the isolated fixture.
-    (root/'certificate-proxy.py').write_text('''import json, os, selectors, socket, sys
+    (root/'certificate-proxy.py').write_text('''if not __debug__:
+    raise SystemExit('Validation requires Python assertions; do not use -O or PYTHONOPTIMIZE')
+import json, os, selectors, socket, sys
 from pathlib import Path
 port=int(sys.argv[1]); assert port in (2224,2225)
 connection=socket.socket(); connection.bind(('127.0.0.1',0)); connection.connect(('127.0.0.1',port))
@@ -90,7 +92,9 @@ while True:
             if not data: sys.exit(0)
             while data: data=data[os.write(1,data):]
 ''')
-    (root/'certificate-attempt.py').write_text('''import json, os, signal, subprocess, sys
+    (root/'certificate-attempt.py').write_text('''if not __debug__:
+    raise SystemExit('Validation requires Python assertions; do not use -O or PYTHONOPTIMIZE')
+import json, os, signal, subprocess, sys
 from pathlib import Path
 assert os.environ.get('ATHERNEX_AUTH_FIXTURE')=='private-container'
 mode=sys.argv[1]
