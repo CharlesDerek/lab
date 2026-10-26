@@ -52,9 +52,28 @@ checks and a Filter Manager communication port. The matching client is
   reply alone is not treated as evidence. Kernel delivery has a 10 ms budget;
   kernel drops, client queue drops and reply failures are counted separately.
 
-The kernel uses an absolute deadline and requires exact `STATUS_SUCCESS` because
-`STATUS_TIMEOUT` is a success-class NTSTATUS. See Microsoft's
+Each admitted scan receives one monotonic authorization deadline before scan
+setup. The final create decision rechecks that deadline after metadata validation
+and section closure; expired replies cannot authorize an open. The clock is
+[KeQueryInterruptTimePrecise](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-kequeryinterrupttimeprecise),
+which is unaffected by wall-clock resets and includes the sleep-state time bias.
+The message wait still uses one absolute wall-clock deadline derived from the
+remaining budget, covering delivery and reply, and requires exact
+`STATUS_SUCCESS` because `STATUS_TIMEOUT` is a success-class NTSTATUS. See the
 [FltSendMessage contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/fltkernel/nf-fltkernel-fltsendmessage).
+This is an authorization cutoff, not a hard duration bound on filesystem APIs,
+section closure or callback return. Observed request cancellation is checked
+synchronously; no asynchronous cancel-safe read queue is implemented.
+
+The operation-neutral scan core retains its capacity reservation through the
+create adapter's applied decision and notification. Only the create adapter calls
+`FltCancelFileOpen`; all scan sections close before that cancellation. A portable
+ASan/UBSan harness compiles the actual scan core and create adapter with mocked
+kernel effects, including late replies, metadata/close delays, close conflicts,
+observed cancellation and final-reference ownership. It does not execute the
+communication `AxMap` path: the mock supplies mapping state. These controls do
+not prove real lock scheduling, loaded-driver behavior or Driver Verifier
+acceptance, and add no read or mapping enforcement coverage.
 Read-only section ownership and cleanup follow
 [FltCreateSectionForDataScan](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/fltkernel/nf-fltkernel-fltcreatesectionfordatascan)
 and [FltCloseSectionForDataScan](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/fltkernel/nf-fltkernel-fltclosesectionfordatascan).

@@ -517,10 +517,12 @@ jobs:
         run: python3 -m unittest tools/test_native_read_barrier.py
       - name: Verify native adapter scan transport with real ClamAV
         run: python tools/verify_native_adapter.py --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
-      - name: Validate Windows kernel wire layouts and malformed input handling
+      - name: Validate Windows kernel wire layouts and scan decisions
         run: |
           cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer infrastructure/endpoint/windows-filter/test_wire.c -o "$RUNNER_TEMP/windows-filter-wire"
           "$RUNNER_TEMP/windows-filter-wire"
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -I infrastructure/endpoint/windows-filter/tests infrastructure/endpoint/windows-filter/test_scan.c -o "$RUNNER_TEMP/windows-filter-scan"
+          "$RUNNER_TEMP/windows-filter-scan"
       - name: Verify Windows filter stream transport with real ClamAV
         run: python tools/verify_windows_filter_transport.py --engine-prefix "$RUNNER_TEMP/native-av/engine/usr/local"
       - name: Verify owned scanner and adapter lifetimes with real ClamAV

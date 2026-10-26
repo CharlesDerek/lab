@@ -42,25 +42,6 @@ void AxDisconnect(PVOID connection) {
     if (process) ObDereferenceObject(process);
     /* Keep the policy armed: connection loss never turns protected opens clean. */
 }
-/* Called after cancellation excludes new mappings, or by the last reference. */
-void AxCloseScanSection(AX_SCAN_CONTEXT *scan) {
-    if (scan->section_handle) { ZwClose(scan->section_handle); scan->section_handle = NULL; }
-    if (scan->section_object) { ObDereferenceObject(scan->section_object); scan->section_object = NULL; }
-    if (scan->section) {
-        FltCloseSectionForDataScan((PFLT_CONTEXT)scan->section);
-        FltReleaseContext((PFLT_CONTEXT)scan->section);
-        scan->section = NULL;
-    }
-}
-void AxReleaseScan(AX_SCAN_CONTEXT *scan) {
-    if (InterlockedDecrement(&scan->references)) return;
-    AxCloseScanSection(scan);
-    FltReleaseContext((PFLT_CONTEXT)scan->stream);
-    ObDereferenceObject(scan->file);
-    FltObjectDereference(scan->instance);
-    ExFreePoolWithTag(scan, AX_TAG);
-    InterlockedDecrement(&Ax.pending);
-}
 NTSTATUS AxSectionConflict(PFLT_INSTANCE instance, PFLT_CONTEXT context, PFLT_CALLBACK_DATA data) {
     UNREFERENCED_PARAMETER(instance); UNREFERENCED_PARAMETER(data);
     InterlockedExchange(&((AX_SECTION *)context)->conflicted, 1);
@@ -90,7 +71,7 @@ static NTSTATUS AxMap(uint64_t id, AX_MAPPING *mapping) {
     AX_SCAN_CONTEXT *scan = AxFindScan(id);
     if (!scan) return status;
     AxLock(&scan->lock);
-    if (scan->cancelled || scan->mapped || scan->section || scan->stream->writers ||
+    if (!AxRemaining(scan) || scan->cancelled || scan->mapped || scan->section || scan->stream->writers ||
         (scan->file->SectionObjectPointer && MmDoesFileHaveUserWritableReferences(scan->file->SectionObjectPointer))) {
         status = STATUS_FILE_LOCK_CONFLICT;
         goto done;
@@ -123,6 +104,11 @@ verify:
     /* A read-only user handle in the connected process, never a kernel pointer. */
     status = scan->section_object ?
         ObOpenObjectByPointer(scan->section_object, 0, NULL, SECTION_MAP_READ, NULL, KernelMode, &user_handle) : STATUS_SUCCESS;
+    if (NT_SUCCESS(status) && !AxRemaining(scan)) {
+        if (user_handle) ZwClose(user_handle);
+        user_handle = NULL;
+        status = STATUS_IO_TIMEOUT;
+    }
     if (NT_SUCCESS(status)) {
         RtlZeroMemory(mapping, sizeof(*mapping));
         mapping->version = AX_VERSION;

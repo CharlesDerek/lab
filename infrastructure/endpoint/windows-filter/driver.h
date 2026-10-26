@@ -2,7 +2,7 @@
 #define ATHERNEX_FILTER_DRIVER_H
 #include <fltKernel.h>
 #include "wire.h"
-#define AX_TAG 'SxtA'
+#define AX_TAG 0x53787441u /* 'SxtA', unchanged pool tag. */
 
 typedef struct AX_STREAM {
     volatile LONG64 generation;
@@ -20,7 +20,8 @@ typedef struct AX_SCAN_CONTEXT {
     LIST_ENTRY entry;
     volatile LONG references;
     EX_PUSH_LOCK lock;
-    BOOLEAN cancelled, listed, mapped;
+    BOOLEAN cancelled, listed, mapped, conflicted;
+    ULONG64 admitted_at, deadline;
     PFLT_INSTANCE instance;
     PFILE_OBJECT file;
     AX_STREAM *stream;
@@ -31,6 +32,15 @@ typedef struct AX_SCAN_CONTEXT {
     AX_METADATA metadata;
     AX_NOTIFICATION notification;
 } AX_SCAN_CONTEXT;
+typedef struct AX_ADMISSION {
+    ULONG64 admitted_at, deadline;
+    UCHAR policy_sha256[32];
+} AX_ADMISSION;
+typedef struct AX_SCAN_RESULT {
+    AX_SCAN_CONTEXT *scan;
+    AX_REPLY reply;
+    BOOLEAN valid;
+} AX_SCAN_RESULT;
 typedef struct AX_GLOBALS {
     PFLT_FILTER filter;
     PFLT_PORT server, client;
@@ -45,6 +55,16 @@ typedef struct AX_GLOBALS {
     volatile LONG64 next_id, allowed, malware, errors, evidence_dropped;
 } AX_GLOBALS;
 extern AX_GLOBALS Ax;
+BOOLEAN AxIsClient(void);
+FLT_PREOP_CALLBACK_STATUS AxPreCreate(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects, PVOID *completion);
+FLT_POSTOP_CALLBACK_STATUS AxPostCreate(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects, PVOID completion, FLT_POST_OPERATION_FLAGS flags);
+NTSTATUS AxAdmit(PUNICODE_STRING name, AX_ADMISSION *admission, BOOLEAN *admitted);
+ULONG64 AxRemaining(const AX_SCAN_CONTEXT *scan);
+NTSTATUS AxPrepareScan(PFLT_CALLBACK_DATA data, PCFLT_RELATED_OBJECTS objects,
+    PUNICODE_STRING name, const AX_ADMISSION *admission, AX_SCAN_RESULT *result);
+void AxFinalizeScan(PFLT_CALLBACK_DATA data, AX_SCAN_RESULT *result);
+void AxFinishScan(AX_SCAN_RESULT *result);
+void AxApplied(AX_SCAN_CONTEXT *scan, AX_REPLY *reply, NTSTATUS status);
 void AxLock(EX_PUSH_LOCK *lock);
 void AxUnlock(EX_PUSH_LOCK *lock);
 NTSTATUS AxMetadata(PFLT_INSTANCE instance, PFILE_OBJECT file, AX_METADATA *metadata);

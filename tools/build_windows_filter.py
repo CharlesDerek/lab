@@ -59,7 +59,7 @@ def main():
     for directory in includes:
         command.extend(['-isystem', str(directory)])
     objects = []
-    for name in ['driver', 'communication', 'policy']:
+    for name in ['driver', 'scan', 'create', 'communication', 'policy']:
         obj = output / f'{name}.obj'
         subprocess.run([*command, '-c', str(source / f'{name}.c'), '-o', str(obj)], check=True)
         objects.append(str(obj))
