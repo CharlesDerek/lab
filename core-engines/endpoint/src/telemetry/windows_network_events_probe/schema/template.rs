@@ -112,8 +112,17 @@ pub(super) fn property_context_bytes(
     record: &EVENT_RECORD,
     properties: &BTreeMap<String, EVENT_PROPERTY_INFO>,
     order: &[String],
+    metadata_query_bytes: u64,
 ) -> std::result::Result<u64, Refusal> {
     let fields = expected(record)?;
+    let header_bytes = match record.EventHeader.Flags as u32
+        & (EVENT_HEADER_FLAG_32_BIT_HEADER | EVENT_HEADER_FLAG_64_BIT_HEADER)
+    {
+        EVENT_HEADER_FLAG_32_BIT_HEADER => 4,
+        EVENT_HEADER_FLAG_64_BIT_HEADER => 8,
+        _ => return Err("tdh_schema".into()),
+    };
+    require(metadata_query_bytes == header_bytes, "tdh_schema")?;
     require(
         properties.len() == fields.len() && order.len() == fields.len(),
         "tdh_schema",
@@ -133,13 +142,21 @@ pub(super) fn property_context_bytes(
         let info = properties.get(name).ok_or("tdh_schema")?;
         let types = unsafe { info.Anonymous1.nonStructType };
         let length = unsafe { info.Anonymous3.length };
+        // Unflagged POINTER length can reflect the context of the metadata
+        // query. Only connid has that type in this exact template; its separate
+        // four-byte wire hypothesis must still pass the subsequent TDH reads.
+        let query_pointer_length = field.name == "connid"
+            && field.input == TDH_INTYPE_POINTER
+            && info.Flags & PropertyParamFixedLength == 0
+            && u64::from(length) == metadata_query_bytes;
         if !(info.Flags & !(PropertyParamFixedCount | PropertyParamFixedLength | PropertyHasTags)
             == 0
             && unsafe { info.Anonymous2.count } == 1
             && types.InType as i32 == field.input
             && types.OutType as i32 == field.output
             && (length == field.bytes
-                || (length == 0 && info.Flags & PropertyParamFixedLength == 0)))
+                || (length == 0 && info.Flags & PropertyParamFixedLength == 0)
+                || query_pointer_length))
         {
             return Err(Refusal {
                 field: Some((field.name, field.bytes as usize)),
@@ -202,9 +219,15 @@ pub(in super::super) fn context_hypothesis_requires_exact_v2_template() {
         ] {
             let (record, properties, order) = sample(tcp, opcode, bits);
             let original_flags = record.EventHeader.Flags;
+            let query_bytes = if bits == EVENT_HEADER_FLAG_32_BIT_HEADER {
+                4
+            } else {
+                8
+            };
             assert!(properties.len() == count && record.UserDataLength == length);
             assert!(
-                property_context_bytes(&record, &properties, &order).is_ok_and(|size| size == 4)
+                property_context_bytes(&record, &properties, &order, query_bytes)
+                    .is_ok_and(|size| size == 4)
             );
             assert!(record.EventHeader.Flags == original_flags);
         }
@@ -212,19 +235,54 @@ pub(in super::super) fn context_hypothesis_requires_exact_v2_template() {
     let (mut record, properties, order) = sample(true, 12, EVENT_HEADER_FLAG_64_BIT_HEADER);
     // Mutations are independent refusal controls, with no native calls/output.
     assert!(record.UserDataLength == 44 && properties.len() == 15);
+    let mut qualifier = properties.clone();
+    for length in [0, 4, 8] {
+        qualifier.get_mut("connid").unwrap().Anonymous3.length = length;
+        assert!(property_context_bytes(&record, &qualifier, &order, 8)
+            .is_ok_and(|wire_bytes| wire_bytes == 4));
+    }
+    qualifier.get_mut("connid").unwrap().Flags = PropertyParamFixedLength;
+    assert!(property_context_bytes(&record, &qualifier, &order, 8).is_err());
+    qualifier.get_mut("connid").unwrap().Anonymous3.length = 4;
+    assert!(property_context_bytes(&record, &qualifier, &order, 8)
+        .is_ok_and(|wire_bytes| wire_bytes == 4));
+    qualifier.get_mut("connid").unwrap().Flags = 0;
+    for length in [1, 2, 3, 5, 16, u16::MAX] {
+        qualifier.get_mut("connid").unwrap().Anonymous3.length = length;
+        assert!(property_context_bytes(&record, &qualifier, &order, 8).is_err());
+    }
+    qualifier = properties.clone();
+    qualifier.get_mut("PID").unwrap().Anonymous3.length = 8;
+    assert!(property_context_bytes(&record, &qualifier, &order, 8).is_err());
+    for query_bytes in [0, 1, 2, 4, 16, u64::MAX] {
+        assert!(
+            property_context_bytes(&record, &properties, &order, query_bytes)
+                .is_err_and(|refusal| refusal.field.is_none())
+        );
+    }
+    record.EventHeader.Flags =
+        (EVENT_HEADER_FLAG_CLASSIC_HEADER | EVENT_HEADER_FLAG_32_BIT_HEADER) as u16;
+    assert!(property_context_bytes(&record, &properties, &order, 4)
+        .is_ok_and(|wire_bytes| wire_bytes == 4));
+    assert!(property_context_bytes(&record, &properties, &order, 8).is_err());
+    qualifier = properties.clone();
+    qualifier.get_mut("connid").unwrap().Anonymous3.length = 8;
+    assert!(property_context_bytes(&record, &qualifier, &order, 4).is_err());
+    record.EventHeader.Flags =
+        (EVENT_HEADER_FLAG_CLASSIC_HEADER | EVENT_HEADER_FLAG_64_BIT_HEADER) as u16;
     for version in 0..=u8::MAX {
         record.EventHeader.EventDescriptor.Version = version;
-        assert!(property_context_bytes(&record, &properties, &order).is_ok() == (version == 2));
+        assert!(property_context_bytes(&record, &properties, &order, 8).is_ok() == (version == 2));
     }
     record.EventHeader.EventDescriptor.Version = 2;
     for opcode in [0, 10, 11, 13, 14, 16, 18, 26, 28, 255] {
         record.EventHeader.EventDescriptor.Opcode = opcode;
-        assert!(property_context_bytes(&record, &properties, &order).is_err());
+        assert!(property_context_bytes(&record, &properties, &order, 8).is_err());
     }
     record.EventHeader.EventDescriptor.Opcode = 12;
     for provider in [UdpIpGuid, windows_sys::core::GUID::from_u128(0)] {
         record.EventHeader.ProviderId = provider;
-        assert!(property_context_bytes(&record, &properties, &order).is_err());
+        assert!(property_context_bytes(&record, &properties, &order, 8).is_err());
     }
     record.EventHeader.ProviderId = TcpIpGuid;
     for flags in [
@@ -236,30 +294,30 @@ pub(in super::super) fn context_hypothesis_requires_exact_v2_template() {
             | EVENT_HEADER_FLAG_64_BIT_HEADER,
     ] {
         record.EventHeader.Flags = flags as u16;
-        assert!(property_context_bytes(&record, &properties, &order).is_err());
+        assert!(property_context_bytes(&record, &properties, &order, 8).is_err());
     }
     record.EventHeader.Flags =
         (EVENT_HEADER_FLAG_CLASSIC_HEADER | EVENT_HEADER_FLAG_64_BIT_HEADER) as u16;
     for length in [0, 43, 45, 48, u16::MAX] {
         record.UserDataLength = length;
-        assert!(property_context_bytes(&record, &properties, &order).is_err());
+        assert!(property_context_bytes(&record, &properties, &order, 8).is_err());
     }
     record.UserDataLength = 44;
     let mut changed_order = order.clone();
     changed_order.swap(0, 1);
-    assert!(property_context_bytes(&record, &properties, &changed_order).is_err());
+    assert!(property_context_bytes(&record, &properties, &changed_order, 8).is_err());
     changed_order = order.clone();
     changed_order[0] = "pid".into();
-    assert!(property_context_bytes(&record, &properties, &changed_order).is_err());
+    assert!(property_context_bytes(&record, &properties, &changed_order, 8).is_err());
     changed_order = order.clone();
     changed_order.pop();
-    assert!(property_context_bytes(&record, &properties, &changed_order).is_err());
+    assert!(property_context_bytes(&record, &properties, &changed_order, 8).is_err());
     let mut changed = properties.clone();
     changed.remove("PID");
-    assert!(property_context_bytes(&record, &changed, &order).is_err());
+    assert!(property_context_bytes(&record, &changed, &order, 8).is_err());
     changed = properties.clone();
     changed.insert("extra".into(), EVENT_PROPERTY_INFO::default());
-    assert!(property_context_bytes(&record, &changed, &order).is_err());
+    assert!(property_context_bytes(&record, &changed, &order, 8).is_err());
     for field in &order {
         changed = properties.clone();
         changed
@@ -276,7 +334,7 @@ pub(in super::super) fn context_hypothesis_requires_exact_v2_template() {
                 .nonStructType
                 .InType = TDH_INTYPE_UINT32 as u16;
         }
-        assert!(property_context_bytes(&record, &changed, &order).is_err());
+        assert!(property_context_bytes(&record, &changed, &order, 8).is_err());
         changed = properties.clone();
         changed
             .get_mut(field)
@@ -284,11 +342,11 @@ pub(in super::super) fn context_hypothesis_requires_exact_v2_template() {
             .Anonymous1
             .nonStructType
             .OutType = TDH_OUTTYPE_STRING as u16;
-        assert!(property_context_bytes(&record, &changed, &order).is_err());
+        assert!(property_context_bytes(&record, &changed, &order, 8).is_err());
         for count in [0, 2, u16::MAX] {
             changed = properties.clone();
             changed.get_mut(field).unwrap().Anonymous2.count = count;
-            assert!(property_context_bytes(&record, &changed, &order).is_err());
+            assert!(property_context_bytes(&record, &changed, &order, 8).is_err());
         }
         for flags in [
             PropertyStruct,
@@ -298,14 +356,14 @@ pub(in super::super) fn context_hypothesis_requires_exact_v2_template() {
         ] {
             changed = properties.clone();
             changed.get_mut(field).unwrap().Flags = flags;
-            assert!(property_context_bytes(&record, &changed, &order).is_err());
+            assert!(property_context_bytes(&record, &changed, &order, 8).is_err());
         }
         changed = properties.clone();
         changed.get_mut(field).unwrap().Anonymous3.length = 3;
-        assert!(property_context_bytes(&record, &changed, &order).is_err());
+        assert!(property_context_bytes(&record, &changed, &order, 8).is_err());
         changed = properties.clone();
         changed.get_mut(field).unwrap().Flags = PropertyParamFixedLength;
-        assert!(property_context_bytes(&record, &changed, &order).is_err());
+        assert!(property_context_bytes(&record, &changed, &order, 8).is_err());
     }
     changed = properties.clone();
     changed
@@ -314,21 +372,21 @@ pub(in super::super) fn context_hypothesis_requires_exact_v2_template() {
         .Anonymous1
         .nonStructType
         .InType = TDH_INTYPE_POINTER as u16;
-    assert!(property_context_bytes(&record, &changed, &order)
+    assert!(property_context_bytes(&record, &changed, &order, 8)
         .is_err_and(|refusal| refusal.field == Some(("PID", 4))));
     changed_order = order.clone();
     changed_order.last_mut().unwrap().push_str("_unknown");
-    assert!(property_context_bytes(&record, &changed, &changed_order)
+    assert!(property_context_bytes(&record, &changed, &changed_order, 8)
         .is_err_and(|refusal| refusal.field.is_none()));
     changed_order = order.clone();
     changed_order.swap(13, 14);
-    assert!(property_context_bytes(&record, &changed, &changed_order)
+    assert!(property_context_bytes(&record, &changed, &changed_order, 8)
         .is_err_and(|refusal| refusal.field.is_none()));
     record.UserDataLength = 43;
-    assert!(property_context_bytes(&record, &changed, &order)
+    assert!(property_context_bytes(&record, &changed, &order, 8)
         .is_err_and(|refusal| refusal.field.is_none()));
     record.UserDataLength = 44;
     changed.remove("connid");
-    assert!(property_context_bytes(&record, &changed, &order)
+    assert!(property_context_bytes(&record, &changed, &order, 8)
         .is_err_and(|refusal| refusal.field.is_none()));
 }

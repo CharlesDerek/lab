@@ -310,7 +310,12 @@ fn metadata(record: &EVENT_RECORD) -> Result<Metadata> {
     };
     // Select the source-only hypothesis only after exact v2 template metadata
     // and length validation, before any property call. The header is untouched.
-    match template::property_context_bytes(record, &metadata.properties, &metadata.order) {
+    match template::property_context_bytes(
+        record,
+        &metadata.properties,
+        &metadata.order,
+        metadata.context.ParameterValue,
+    ) {
         Ok(bytes) => {
             metadata.context.ParameterValue = bytes;
             metadata.schema_hash = fingerprint(bytes)?;

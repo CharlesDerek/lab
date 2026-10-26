@@ -819,7 +819,10 @@ only for matching provider, operation, version and complete ordered field layout
 It preserves the captured header flags and requires every TDH property to match
 the original bytes, with no missing or trailing payload. The reported
 `pointer_bits` describes the original header; the structural fingerprint also
-includes the separate property context width. This experiment requires native
+includes the separate property context width. An unflagged `connid` metadata
+length may match the original metadata-query context; the subsequent TDH reads
+and complete payload comparison must establish the candidate wire width.
+Explicit fixed-length mismatches remain refusals. This experiment requires native
 verification of each controlled event kind and does not establish a general
 network layout or production decoder.
 
