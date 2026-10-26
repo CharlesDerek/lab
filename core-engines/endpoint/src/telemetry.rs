@@ -3,6 +3,8 @@ mod authentication;
 mod network_events;
 mod process_events;
 mod windows_authentication;
+#[cfg(all(test, windows))]
+mod windows_network_events_probe;
 mod windows_process_events;
 #[cfg(all(test, windows))]
 mod windows_process_events_probe;

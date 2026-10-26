@@ -784,8 +784,37 @@ binding before exposing fixed progress, phase/error categories and bounded
 command exit statuses. Completed diagnostic progress does not establish whole-job
 acceptance, and command status is not a Win32 error. Raw worker output and private
 report fields remain excluded. The report keeps
-`proof_scope: "agent_cleanup_recovery"` and `production_readiness: false`. Native
-acceptance remains pending until that job succeeds on the exact source revision.
+`proof_scope: "agent_cleanup_recovery"` and `production_readiness: false`. All
+three native checks, task removal and final report/input verification passed at
+[`95ace1ac`](https://github.com/CharlesDerek/lab/commit/95ace1acc8d7a40e588545d7c1cee41dc624aca9).
+The source-bound artifact contains only the two approved JSON files. The full
+formatted scratch-capacity gate remains separate and incomplete.
+
+## Native network source proof
+
+The separate `windows-network-source` CI job exercises an explicitly disposable
+LocalSystem/session-zero ETW fixture. It requires controlled TCP connect, accept,
+send, receive and disconnect reports, and UDP send and receive reports, for both
+IPv4 and IPv6. The fixture validates native fields through TDH and binds selected
+observations to its controlled traffic and pre-operation QPC boundaries. It also
+requires an unchanged process-collection session, zero source loss during the
+controlled phase, unchanged token context and bounded removal of its owned logger.
+
+Microsoft documents the [TCP/IP event family](https://learn.microsoft.com/en-us/windows/win32/etw/tcpip)
+and [UDP/IP event family](https://learn.microsoft.com/en-us/windows/win32/etw/udpip)
+separately. Their reported payload PID is context, not a verified process identity;
+the event-header PID can belong to a different reporting thread. Provider reports
+do not establish packet delivery, complete socket lifetimes or firewall decisions.
+Native schema verification is required before accepting a production decoder.
+
+The test executable and three scripts are staged in a protected directory and
+bound to the exact source revision. Only `inputs.json` and the fixed
+`network-source-validation.json` projection are uploaded. Raw network records,
+addresses, ports, process identifiers, kernel tokens and worker reports remain
+private. The report retains `proof_scope: "source_only"` and
+`production_readiness: false`. Native acceptance is pending. This fixture does
+not implement the production Windows network collector, durable delivery,
+authenticated original export or rollout coverage gates.
 
 ## Reproduce the development build
 
