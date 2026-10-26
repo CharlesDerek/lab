@@ -520,6 +520,13 @@ impl Engine {
     }
 
     fn detect_events(&self, events: Vec<DisplayEvent>) -> LabResult<()> {
+        // A digest string is still a possible legacy label. Keep the domains
+        // typed instead of treating a label's spelling as identity provenance.
+        #[derive(Clone, Copy, Hash, PartialEq, Eq)]
+        enum DetectionSubject<'a> {
+            Legacy(u32),
+            ClaimedAccount { source: &'a str, account: &'a str },
+        }
         #[derive(Default)]
         struct History {
             denied: VecDeque<DisplayEvent>,
@@ -534,10 +541,21 @@ impl Engine {
         }
         let mut candidates: HashMap<String, Candidate> = HashMap::new();
         let enabled = self.enabled_rules()?;
-        let mut subjects: HashMap<u32, History> = HashMap::new();
+        let mut subjects: HashMap<DetectionSubject<'_>, History> = HashMap::new();
         for current in &events {
             let event = &current.event;
-            let history = subjects.entry(event.subject).or_default();
+            let subject = match current
+                .context
+                .as_ref()
+                .and_then(|context| context.claimed_account.as_deref())
+            {
+                Some(account) => DetectionSubject::ClaimedAccount {
+                    source: &current.source_label,
+                    account,
+                },
+                None => DetectionSubject::Legacy(event.subject),
+            };
+            let history = subjects.entry(subject).or_default();
             history
                 .denied
                 .retain(|prior| event.time_ms.saturating_sub(prior.event.time_ms) <= 120_000);
@@ -596,13 +614,27 @@ impl Engine {
                 } else {
                     event.time_ms / 180_000
                 };
-                let fingerprint = if index == 4 {
-                    hash(
+                let fingerprint = match subject {
+                    DetectionSubject::ClaimedAccount { source, account } => hash(
+                        &serde_json::to_vec(&(
+                            "claimed-account-detection-v1",
+                            rule.id,
+                            source,
+                            account,
+                            group,
+                            (index == 4).then_some(event.object),
+                        ))
+                        .expect("Detection identity contains only strings and integers"),
+                    ),
+                    // Preserve prior fingerprints exactly so reading legacy
+                    // facts cannot reopen or duplicate their investigations.
+                    DetectionSubject::Legacy(_) if index == 4 => hash(
                         format!("{}:{}:{group}:{}", rule.id, event.subject, event.object)
                             .as_bytes(),
-                    )
-                } else {
-                    hash(format!("{}:{}:{group}", rule.id, event.subject).as_bytes())
+                    ),
+                    DetectionSubject::Legacy(_) => {
+                        hash(format!("{}:{}:{group}", rule.id, event.subject).as_bytes())
+                    }
                 };
                 candidates
                     .entry(fingerprint.clone())
@@ -1103,6 +1135,7 @@ mod tests {
             service.outcome = Outcome::Deny;
             service.severity = 4;
             service.context = Some(EventContext {
+                claimed_account: None,
                 host: "fixture".into(),
                 program: "systemd".into(),
                 pid: Some(1),

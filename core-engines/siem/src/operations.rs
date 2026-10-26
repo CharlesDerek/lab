@@ -606,6 +606,7 @@ mod tests {
         );
         let mut forged = fact("fixture", 3);
         forged.context = Some(EventContext {
+            claimed_account: None,
             parent_pid: None,
             process_start_ms: None,
             parent_start_ms: None,

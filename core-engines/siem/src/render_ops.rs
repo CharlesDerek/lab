@@ -270,6 +270,14 @@ pub fn event_controls(html: &mut String, s: &Snapshot, event: &DisplayEvent, csr
         ] {
             write!(html, "<div><dt>{key}</dt><dd>{}</dd></div>", escape(&value)).unwrap();
         }
+        if let Some(account) = &context.claimed_account {
+            write!(
+                html,
+                "<div><dt>Claimed account (not reporter UID)</dt><dd>{}</dd></div>",
+                escape(account)
+            )
+            .unwrap();
+        }
         html.push_str("</dl>");
         if event.source_label == "endpoint" {
             write!(html,"<a class='button secondary' href='/endpoints/{}'>Open original device evidence ↗</a><p>Retained endpoint observations preserve their typed source reports.</p>",escape(&context.host)).unwrap();

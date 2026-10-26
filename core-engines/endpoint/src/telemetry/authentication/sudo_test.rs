@@ -163,7 +163,15 @@ fn native_sudo_denials_preserve_module_scope_identity_and_replay() {
         assert_eq!(local.kind, Kind::Authentication);
         assert_eq!(local.outcome, expected);
         assert!(
-            Some(local.subject.as_str()) == event.claimed_user.as_deref(),
+            local.subject == collector::journal_account_subject("fixture-journal", "fixture")
+                && local
+                    .context
+                    .as_ref()
+                    .is_some_and(
+                        |context| context.claimed_account.as_deref() == Some("fixture")
+                            && context.uid == Some(event.journal.reporter_uid)
+                            && context.pid == Some(event.journal.reporter_pid)
+                    ),
             "Local sudo/PAM claimed identity differs from the endpoint user field"
         );
         if event.mechanism == "pam_unix" {

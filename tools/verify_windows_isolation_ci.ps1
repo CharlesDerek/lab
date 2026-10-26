@@ -46,6 +46,20 @@ function Assert-IsolationReport($Report, [string]$ManifestSha256,
     foreach ($name in $expected) {
         if ($names -cnotcontains $name -or $Report.checks.$name -cne 'passed') { throw ('Native isolation check did not pass: ' + $name) }
     }
+    if ($Suite -ceq 'Isolation') {
+        $stages = @(Get-ScratchStageNames)
+        if ($Report.scratch_diagnostics -isnot [string] -or
+            -not [string]::Equals($Report.scratch_diagnostics, 'valid', [StringComparison]::Ordinal) -or
+            $Report.scratch_stages -isnot [array] -or $Report.scratch_stages.Count -ne $stages.Count) {
+            throw 'Scratch milestone evidence is incomplete'
+        }
+        for ($i = 0; $i -lt $stages.Count; $i++) {
+            if ($Report.scratch_stages[$i] -isnot [string] -or
+                -not [string]::Equals($Report.scratch_stages[$i], $stages[$i], [StringComparison]::Ordinal)) {
+                throw 'Scratch milestone evidence is invalid'
+            }
+        }
+    }
     if ($Suite -ceq 'ProcessSource') {
         if ($Report.proof_scope -cne 'source_only') { throw 'Process source report claims unsupported scope' }
         Assert-ProcessSourceMarkers $Report
@@ -55,6 +69,43 @@ function Assert-IsolationReport($Report, [string]$ManifestSha256,
 function Get-ProcessSourceStageNames {
     @('guard_verified','token_verified','session_owned','consumer_ready','children_exited',
       'lifecycle_verified','schema_verified','cleanup_verified','passed')
+}
+
+function Get-ScratchStageNames {
+    @('fixture_entered','state_ready','worker_started','worker_ready',
+      'health_rejections_verified','live_recovery_refused','acl_probe_completed',
+      'device_probe_completed','foreign_logon_denied','scanner_bounds_verified',
+      'worker_stopped','retained_network_refused','recovery_completed','passed')
+}
+
+function Get-ScratchStages([string]$Log, [bool]$CheckPassed) {
+    # Only this fixture's fixed milestone vocabulary may leave the private log.
+    # A complete marker sequence cannot turn a failed executable into a pass.
+    $result = @{ status='unavailable'; stages=@() }
+    if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return $result }
+    try {
+        if ((Get-Item -LiteralPath $Log -ErrorAction Stop).Length -gt 1048576) { throw 'Oversized private log' }
+        $lines = @(Get-Content -LiteralPath $Log -ErrorAction Stop)
+    } catch { return $result }
+    $allowed = @(Get-ScratchStageNames)
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $stages = [Collections.Generic.List[string]]::new()
+    $valid = $true
+    foreach ($line in $lines) {
+        if (-not $line.Contains('ATHERNEX_SCRATCH_STAGE')) { continue }
+        $expected = 'ATHERNEX_SCRATCH_STAGE='
+        if (-not $line.StartsWith($expected, [StringComparison]::Ordinal)) { $valid = $false; break }
+        $stage = $line.Substring($expected.Length)
+        if ($allowed -cnotcontains $stage) { $valid = $false; break }
+        if ($seen.Contains($stage)) { continue }
+        if ($stages.Count -ge $allowed.Count -or $stage -cne $allowed[$stages.Count]) { $valid = $false; break }
+        $null = $seen.Add($stage)
+        $stages.Add($stage)
+    }
+    if (($CheckPassed -and $stages.Count -ne $allowed.Count) -or
+        (-not $CheckPassed -and $seen.Contains('passed'))) { $valid = $false }
+    if (-not $valid) { return @{ status='invalid'; stages=@() } }
+    return @{ status='valid'; stages=@($stages.ToArray()) }
 }
 
 function Get-ProcessSourceStages([string]$Log) {
@@ -391,6 +442,16 @@ function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report,
             $Report.failures[$check.test] = 'native_check_failed'
             try { $_ | Out-File -LiteralPath ($log + '.failure') -Append -ErrorAction Stop } catch { }
         } finally {
+            if ($Suite -ceq 'Isolation' -and $check.test -ceq 'protection::windows::scratch::tests::owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit') {
+                $passed = $Report.checks[$check.test] -ceq 'passed'
+                $projection = Get-ScratchStages $log $passed
+                $Report.scratch_stages = @($projection.stages)
+                $Report.scratch_diagnostics = $projection.status
+                if ($passed -and $projection.status -cne 'valid') {
+                    $Report.checks[$check.test] = 'failed'
+                    $Report.failures[$check.test] = 'scratch_diagnostics_invalid'
+                }
+            }
             if ($Suite -ceq 'Authentication') {
                 $Report.authentication_stages = @(Get-AuthenticationStages $log)
                 $Report.authentication_diagnostics = @(Get-AuthenticationDiagnostics $log)
@@ -456,6 +517,10 @@ function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost,
         manifest_sha256=$manifestHash; user_sid='S-1-5-18'; session_id=0;
         windows_version=[Environment]::OSVersion.Version.ToString(); checks=[ordered]@{};
         failures=[ordered]@{}; error=$null }
+    if ($Suite -ceq 'Isolation') {
+        $report.scratch_stages = @()
+        $report.scratch_diagnostics = 'unavailable'
+    }
     if ($Suite -ceq 'Authentication') {
         $report.authentication_stages = @()
         $report.authentication_diagnostics = @()

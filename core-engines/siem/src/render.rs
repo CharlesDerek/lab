@@ -401,14 +401,19 @@ pub fn filter_events<'a>(events: &'a [DisplayEvent], filters: &Filters) -> Vec<&
             let severity = filters.severity.is_empty()
                 || severity_label(event.event.severity) == filters.severity;
             let haystack = format!(
-                "{} {} {} {} {} {} {}",
+                "{} {} {} {} {} {} {} {}",
                 event.source_label,
                 event.subject_label,
                 event.object_label,
                 event.notation,
                 event.event.kind.label(),
                 event.event.outcome.label(),
-                event.event.id
+                event.event.id,
+                event
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.claimed_account.as_deref())
+                    .unwrap_or("")
             )
             .to_lowercase();
             kind && severity

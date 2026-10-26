@@ -17,6 +17,7 @@ fn event(n: u64, time: u64, severity: u8) -> InputEvent {
         trace: 7,
         idempotency_key: format!("occurrence-{n}"),
         context: Some(EventContext {
+            claimed_account: None,
             host: "workstation-a".into(),
             program: "curl".into(),
             pid: Some(7),

@@ -1,5 +1,7 @@
 //! Bounded Linux journal adapter. Reads the OS journal; never executes log text.
 //! Journal cursors checkpoint only with the archive commit that contains their events.
+#[cfg(test)]
+mod identity_tests;
 use crate::{
     engine::{Engine, LabResult},
     gateway::digest,
@@ -32,6 +34,15 @@ fn label(value: &str) -> String {
     } else {
         value
     }
+}
+/// Compact identity of an exact claimed account within one journal source.
+/// This does not establish account existence, an OS UID, or producer trust.
+/// The versioned tuple avoids lossy display normalization and scope ambiguity.
+pub fn journal_account_subject(source: &str, claimed_account: &str) -> String {
+    digest(
+        &serde_json::to_string(&("journal-claimed-account-v1", source, claimed_account))
+            .expect("Journal account identity contains only strings"),
+    )
 }
 fn bounded(value: &str, max: usize) -> String {
     let mut s = String::new();
@@ -67,6 +78,7 @@ pub fn normalize(record: &Value, source: &str, now: u64) -> LabResult<InputEvent
         field(record, "UNIT")
     });
     let mut kind = Kind::System;
+    let mut claimed_account = None;
     let mut outcome = Outcome::Observe;
     let mut severity = match field(record, "PRIORITY").parse::<u8>().unwrap_or(6) {
         0..=2 => 5,
@@ -118,7 +130,8 @@ pub fn normalize(record: &Value, source: &str, now: u64) -> LabResult<InputEvent
             Outcome::Deny
         };
         severity = if outcome == Outcome::Allow { 1 } else { 3 };
-        subject = label(report.claimed_user);
+        subject = journal_account_subject(source, report.claimed_user);
+        claimed_account = Some(report.claimed_user.into());
         object = format!("ssh:{}", report.source_ip);
         summary = if outcome == Outcome::Allow {
             "OpenSSH reported successful authentication"
@@ -134,13 +147,15 @@ pub fn normalize(record: &Value, source: &str, now: u64) -> LabResult<InputEvent
         severity = 1;
         object = label(comm);
         if let Some(user) = report.claimed_user {
-            subject = label(user);
+            subject = journal_account_subject(source, user);
+            claimed_account = Some(user.into());
         }
         summary = "PAM module reported failure; service authentication outcome is not established";
     } else if exe == "/usr/bin/sudo" {
         use athernex_endpoint_protocol::authentication::{sudo_report, SudoOutcome};
         if let Some(report) = sudo_report(message) {
-            subject = label(report.claimed_user);
+            subject = journal_account_subject(source, report.claimed_user);
+            claimed_account = Some(report.claimed_user.into());
             object = "sudo".into();
             match report.outcome {
                 SudoOutcome::PasswordDenied { .. } => {
@@ -201,6 +216,7 @@ pub fn normalize(record: &Value, source: &str, now: u64) -> LabResult<InputEvent
             ),
             pid: field(record, "_PID").parse().ok(),
             uid,
+            claimed_account,
             summary: summary.into(),
             journal_cursor: cursor.into(),
         }),
@@ -385,7 +401,10 @@ mod tests {
         .unwrap();
         assert_eq!(input.kind, Kind::Authentication);
         assert_eq!(input.outcome, Outcome::Deny);
-        assert_eq!(input.subject, "alice");
+        assert_eq!(
+            input.subject,
+            journal_account_subject("host-journal", "alice")
+        );
         assert_eq!(input.object, "ssh:192.0.2.10");
         assert!(!serde_json::to_string(&input)
             .unwrap()
@@ -422,7 +441,10 @@ mod tests {
                     let input = normalize(&row, "host-journal", now).unwrap();
                     assert_eq!(input.kind, Kind::Authentication);
                     assert_eq!(input.outcome, outcome);
-                    assert_eq!(input.subject, "alice");
+                    assert_eq!(
+                        input.subject,
+                        journal_account_subject("host-journal", "alice")
+                    );
                     assert_eq!(input.object, "ssh:192.0.2.10");
                     assert_eq!(
                         input.severity,
@@ -444,7 +466,10 @@ mod tests {
                 now,
             )
             .unwrap();
-            assert_eq!(input.subject, "alice");
+            assert_eq!(
+                input.subject,
+                journal_account_subject("host-journal", "alice")
+            );
             assert_eq!(input.object, "ssh:2001:db8::1");
             assert_eq!(input.kind, Kind::Authentication);
             assert_eq!(input.outcome, Outcome::Deny);
@@ -512,7 +537,7 @@ mod tests {
                 row["__CURSOR"] = format!("keyboard-fallback-{index}-{label}").into();
                 let input = normalize(&row, "host-journal", now).unwrap();
                 assert_eq!(input.kind, Kind::Authentication);
-                assert_eq!(input.subject, "alice");
+                assert_eq!(input.subject, journal_account_subject("host-journal", "alice"));
                 assert_eq!(input.outcome, if label == "module" { Outcome::Observe } else { Outcome::Allow });
                 engine.ingest(&[input], now).unwrap();
             }
@@ -558,8 +583,15 @@ mod tests {
                     .unwrap();
                 assert_eq!(input.kind, Kind::Authentication);
                 assert_eq!(input.outcome, outcome);
-                assert_eq!(input.subject, parsed.claimed_user);
-                assert_eq!(input.subject, "alice");
+                assert_eq!(
+                    input.subject,
+                    journal_account_subject("host-journal", parsed.claimed_user)
+                );
+                assert_eq!(parsed.claimed_user, "alice");
+                assert_eq!(
+                    input.subject,
+                    journal_account_subject("host-journal", "alice")
+                );
                 assert_eq!(input.object, format!("ssh:{}", parsed.source_ip));
                 assert_eq!(input.object, "ssh:192.0.2.10");
                 assert_eq!(parsed.source_port, 2222);
@@ -640,7 +672,10 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(report.claimed_user, Some("alice"));
-                assert_eq!(input.subject, "alice");
+                assert_eq!(
+                    input.subject,
+                    journal_account_subject("host-journal", "alice")
+                );
                 assert_eq!(input.object, "sshd");
                 assert_eq!(input.kind, Kind::Authentication);
                 assert_eq!(input.outcome, Outcome::Observe);
@@ -766,7 +801,10 @@ mod tests {
         let input = normalize(&failure, "host-journal", now).unwrap();
         assert_eq!(input.kind, Kind::Authentication);
         assert_eq!(input.outcome, Outcome::Deny);
-        assert_eq!(input.subject, "alice");
+        assert_eq!(
+            input.subject,
+            journal_account_subject("host-journal", "alice")
+        );
         for text in [
             "NOT in sudoers",
             "not allowed to execute",

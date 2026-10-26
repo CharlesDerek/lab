@@ -602,14 +602,21 @@ impl Engine {
             for key in links {
                 let kind = key.split(':').next().unwrap_or("");
                 let weight = match kind {
-                    "identity" => config.identity_weight,
+                    "identity" | "claimed-account" => config.identity_weight,
                     "endpoint" => config.endpoint_weight,
                     "process" => config.process_weight,
                     "destination" | "ip" => config.destination_weight,
                     "behavior" | "trace" | "detection" => config.behavior_weight,
                     _ => 0,
                 };
-                if types.insert(kind.to_string()) {
+                // A claim and its reporter UID remain separate relations but
+                // share one scoring category; matching both adds no bonus.
+                let category = if kind == "claimed-account" {
+                    "identity"
+                } else {
+                    kind
+                };
+                if types.insert(category.to_string()) {
                     score += weight;
                     reasons.push(format!("{key} (+{weight})"));
                 }
@@ -741,10 +748,23 @@ fn entities(event: &DisplayEvent) -> Vec<String> {
         .map(|c| c.host.as_str())
         .filter(|h| !h.is_empty())
         .unwrap_or(&event.source_label);
-    let mut keys = vec![
-        format!("identity:{}", event.subject_label),
-        format!("endpoint:{endpoint}"),
-    ];
+    let subject = match event
+        .context
+        .as_ref()
+        .and_then(|context| context.claimed_account.as_deref())
+    {
+        Some(account) => format!(
+            "claimed-account:{}",
+            hex(&digest(
+                &serde_json::to_vec(&("claimed-account-graph-v1", &event.source_label, account,))
+                    .expect("Claim graph identity contains only strings")
+            ))
+        ),
+        // Keep old graph identities intact. A new claim must never share this
+        // namespace merely because its compact digest equals an old username.
+        None => format!("identity:{}", event.subject_label),
+    };
+    let mut keys = vec![subject, format!("endpoint:{endpoint}")];
     if event.event.kind == Kind::Network {
         keys.push(format!("destination:{}", event.object_label));
         if event.object_label.parse::<std::net::IpAddr>().is_ok() {

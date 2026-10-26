@@ -94,6 +94,7 @@ impl Analysis {
                     "/outcome",
                     "/severity",
                     "/bytes",
+                    "/claimed_account",
                 ]
                 .contains(&fact.field.as_str())
                 || evidence.fields.pointer(&fact.field) != Some(&fact.value)
@@ -172,7 +173,26 @@ impl Engine {
         events.sort_by_key(|e| (e.event.time_ms, e.event.id));
         let incomplete = events.len() > request.max_events;
         events.truncate(request.max_events);
-        let evidence=events.iter().map(|e|Ok(Evidence{id:e.event.id,sha256:crate::memory::hex(&self.evidence_hash(e.event.id)?),fields:json!({"time_ms":e.event.time_ms,"source":e.source_label,"subject":e.subject_label,"object":e.object_label,"kind":e.event.kind,"outcome":e.event.outcome,"severity":e.event.severity,"bytes":e.event.bytes})})).collect::<LabResult<Vec<_>>>()?;
+        let evidence = events
+            .iter()
+            .map(|e| {
+                let mut fields = json!({"time_ms":e.event.time_ms,"source":e.source_label,"subject":e.subject_label,"object":e.object_label,"kind":e.event.kind,"outcome":e.event.outcome,"severity":e.event.severity,"bytes":e.event.bytes});
+                if let Some(account) = e
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.claimed_account.as_ref())
+                {
+                    // A source-scoped account claim, not the reporter's UID or
+                    // an assertion that a principal exists or was verified.
+                    fields["claimed_account"] = json!(account);
+                }
+                Ok(Evidence {
+                    id: e.event.id,
+                    sha256: crate::memory::hex(&self.evidence_hash(e.event.id)?),
+                    fields,
+                })
+            })
+            .collect::<LabResult<Vec<_>>>()?;
         let packet = Packet {
             request: request.clone(),
             case_revision: case.version,

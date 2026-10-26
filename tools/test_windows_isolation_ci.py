@@ -15,6 +15,14 @@ AUTHENTICATION_TEST = ('telemetry::windows_authentication::native_test::'
                        'security_logon_delivery_replays_and_reports_policy_gaps')
 PROCESS_SOURCE_TEST = ('telemetry::windows_process_events_probe::'
                        'owned_system_logger_reports_controlled_process_lifecycles')
+SCRATCH_TEST = ('protection::windows::scratch::tests::'
+                'owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit')
+SCRATCH_STAGES = [
+    'fixture_entered', 'state_ready', 'worker_started', 'worker_ready',
+    'health_rejections_verified', 'live_recovery_refused', 'acl_probe_completed',
+    'device_probe_completed', 'foreign_logon_denied', 'scanner_bounds_verified',
+    'worker_stopped', 'retained_network_refused', 'recovery_completed', 'passed',
+]
 PROCESS_FAILURES = [
     'schema_provenance', 'schema_identity', 'schema_bounds', 'schema_shape',
     'property_missing', 'property_type', 'property_scalar', 'property_size',
@@ -31,6 +39,10 @@ $report = [pscustomobject]@{ schema=1; suite=$SelectedSuite; native_windows_exec
     manifest_sha256=('a'*64); user_sid='S-1-5-18'; session_id=0; windows_version='fixture';
     checks=[pscustomobject]@{}; error=$null }
 foreach ($name in $checks) { $report.checks | Add-Member -NotePropertyName $name -NotePropertyValue 'passed' }
+if ($SelectedSuite -ceq 'Isolation') {
+    $report | Add-Member -NotePropertyName scratch_stages -NotePropertyValue @(Get-ScratchStageNames)
+    $report | Add-Member -NotePropertyName scratch_diagnostics -NotePropertyValue valid
+}
 if ($SelectedSuite -ceq 'ProcessSource') {
     $report | Add-Member -NotePropertyName proof_scope -NotePropertyValue source_only
     $report | Add-Member -NotePropertyName process_source_stages -NotePropertyValue @(Get-ProcessSourceStageNames)
@@ -76,6 +88,13 @@ try {
         'missing-schema' { $report.process_source_schema = @() }
         'reported-failure' { $report.process_source_failures = @('native_loss') }
         'missing-failures' { $report.PSObject.Properties.Remove('process_source_failures') }
+        'missing-scratch-stages' { $report.PSObject.Properties.Remove('scratch_stages') }
+        'invalid-scratch-diagnostics' { $report.scratch_diagnostics = 'invalid' }
+        'wrong-scratch-stage' { $report.scratch_stages[0] = 'private_fixture_payload' }
+        'nested-empty-scratch-stage' { for ($i=0; $i -lt $report.scratch_stages.Count; $i++) { $report.scratch_stages[$i] = @() } }
+        'nested-singleton-scratch-stage' { $report.scratch_stages[0] = @($report.scratch_stages[0]) }
+        'nonstring-scratch-stage' { $report.scratch_stages[0] = 1 }
+        'nonscalar-scratch-diagnostics' { $report.scratch_diagnostics = @('valid') }
     }
     Assert-IsolationReport $report ('a'*64) $SelectedSuite
     Invoke-IsolationCheck 'fixture.exe' $checks[0] (Join-Path $Root 'check.log')
@@ -123,6 +142,9 @@ $global:executedNames = @()
 function Invoke-IsolationCheck([string]$Executable, [string]$Name, [string]$Log) {
     $global:executed += 1
     $global:executedNames += $Name
+    if ($Name -ceq 'protection::windows::scratch::tests::owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit') {
+        Get-ScratchStageNames | ForEach-Object { 'ATHERNEX_SCRATCH_STAGE=' + $_ } | Set-Content -LiteralPath $Log
+    }
     if ($SelectedSuite -ceq 'Authentication' -and (Split-Path -Leaf $Executable) -cne 'endpoint.exe') {
         throw 'Authentication must execute the compiled endpoint test binary'
     }
@@ -145,6 +167,50 @@ catch { $failure = $_.Exception.Message }
    private_log_exists=((Test-Path -LiteralPath (Join-Path $Root 'check-0.log.failure')) -or
                        (Test-Path -LiteralPath (Join-Path $Root 'worker.log'))) } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
+'''
+SCRATCH_WRAPPER = r'''
+param([string]$Script, [string]$Case, [string]$Root, [string]$SelectedSuite)
+$ErrorActionPreference = 'Stop'
+. $Script
+$manifest = @{ schema=1; suite=$SelectedSuite; sha256=@{} }
+foreach ($name in @('endpoint.exe','native.exe')) {
+    $path = Join-Path $Root $name
+    Set-Content -LiteralPath $path -Value 'fixture, never executed'
+    $manifest.sha256[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+$target = 'protection::windows::scratch::tests::owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit'
+function Invoke-IsolationCheck([string]$Executable, [string]$Name, [string]$Log) {
+    if ($Name -cne $target) {
+        # Even exact-looking markers in another test's log are not considered.
+        'ATHERNEX_SCRATCH_STAGE=private_fixture_payload' | Set-Content -LiteralPath $Log
+        return
+    }
+    $stages = @(Get-ScratchStageNames)
+    $lines = @($stages | ForEach-Object { 'ATHERNEX_SCRATCH_STAGE=' + $_ })
+    switch ($Case) {
+        'partial' { $lines = $lines[0..3] }
+        'partial-success' { $lines = $lines[0..3] }
+        'duplicate' { $lines = @($lines[0]) + $lines + @($lines[-1]) }
+        'unknown' { $lines += 'ATHERNEX_SCRATCH_STAGE=private_fixture_payload' }
+        'suffix' { $lines += 'ATHERNEX_SCRATCH_STAGE=passed private_fixture_payload' }
+        'prefix' { $lines += 'private_fixture_payload ATHERNEX_SCRATCH_STAGE=passed' }
+        'wrong-case' { $lines += 'ATHERNEX_SCRATCH_STAGE=PASSED' }
+        'out-of-order' { $lines = @($lines[1], $lines[0]) + $lines[2..($lines.Count-1)] }
+        'raw-output' { $lines += 'private_fixture_payload path and arbitrary native error' }
+        'oversized' { $lines += ('x' * 1048577) }
+    }
+    if ($Case -cne 'missing') { $lines | Set-Content -LiteralPath $Log }
+    if ($Case -cin @('partial','contradictory','missing')) { throw 'private_fixture_payload' }
+}
+$report = @{ checks=[ordered]@{}; failures=[ordered]@{}; error=$null }
+$failure = $null
+try { Invoke-IsolationWorkerChecks $Root $manifest $report $SelectedSuite }
+catch { $failure = $_.Exception.Message }
+@{ failed=($null -ne $failure); error=$failure; checks=$report.checks;
+    failures=$report.failures; worker_error=$report.error;
+    has_scratch=$report.ContainsKey('scratch_stages'); stages=@($report.scratch_stages);
+    diagnostics=$report.scratch_diagnostics } |
+    ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
 '''
 STAGES_WRAPPER = r'''
 param([string]$Script, [string]$Case, [string]$Root, [string]$SelectedSuite)
@@ -238,6 +304,9 @@ function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [
         "ATHERNEX_AUTH_RENDER=bookmark_result:2:1:128:128:$([char]0x0661)",
         'ATHERNEX_AUTH_STAGE=cleanup_verified'
     ) | Set-Content -LiteralPath $Log
+    if ($SelectedSuite -ceq 'Isolation' -and $Arguments[1] -ceq 'protection::windows::scratch::tests::owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit') {
+        Get-ScratchStageNames | ForEach-Object { 'ATHERNEX_SCRATCH_STAGE=' + $_ } | Add-Content -LiteralPath $Log
+    }
     if ($Case -ceq 'diagnostic-flood') {
         0..63 | ForEach-Object { 'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:' + $_ } |
             Set-Content -LiteralPath $Log
@@ -530,6 +599,51 @@ class IsolationRunnerTests(unittest.TestCase):
                 self.assertEqual((value['executed'], value['passed'], value['failures'], value['failed']),
                                  (executed, passed, failures, failed), value)
                 self.assertEqual(value['names'], [AUTHENTICATION_TEST] if executed else [])
+
+    def test_scratch_projection_keeps_only_ordered_fixed_milestones_for_its_exact_test(self):
+        for case in ['passed', 'duplicate', 'raw-output']:
+            with self.subTest(case=case):
+                value = self.run_case(case, SCRATCH_WRAPPER)
+                self.assertFalse(value['failed'], value)
+                self.assertEqual(value['diagnostics'], 'valid')
+                self.assertEqual(value['stages'], SCRATCH_STAGES)
+                self.assertEqual(len(value['checks']), 11)
+                self.assertEqual(set(value['checks'].values()), {'passed'})
+                self.assertNotIn('private_fixture_payload', json.dumps(value))
+        value = self.run_case('partial', SCRATCH_WRAPPER)
+        self.assertTrue(value['failed'])
+        self.assertEqual(value['checks'][SCRATCH_TEST], 'failed')
+        self.assertEqual(value['stages'], SCRATCH_STAGES[:4])
+        self.assertEqual(value['diagnostics'], 'valid')
+        self.assertEqual(value['failures'], {SCRATCH_TEST: 'native_check_failed'})
+        self.assertNotIn('private_fixture_payload', json.dumps(value))
+        value = self.run_case('passed', SCRATCH_WRAPPER, 'Authentication')
+        self.assertFalse(value['has_scratch'])
+
+    def test_scratch_markers_cannot_hide_failure_or_publish_arbitrary_payloads(self):
+        for case in ['unknown', 'prefix', 'suffix', 'wrong-case', 'out-of-order',
+                     'partial-success', 'contradictory', 'missing', 'oversized']:
+            with self.subTest(case=case):
+                value = self.run_case(case, SCRATCH_WRAPPER)
+                self.assertTrue(value['failed'], value)
+                self.assertEqual(value['checks'][SCRATCH_TEST], 'failed')
+                self.assertEqual(value['stages'], [])
+                self.assertEqual(value['diagnostics'],
+                                 'unavailable' if case in ['missing', 'oversized'] else 'invalid')
+                self.assertEqual(value['worker_error'], 'native_worker_failed')
+                self.assertNotIn('private_fixture_payload', json.dumps(value))
+        for case in ['missing-scratch-stages', 'invalid-scratch-diagnostics', 'wrong-scratch-stage']:
+            value = self.run_case(case)
+            self.assertTrue(value['failed'], value)
+            self.assertEqual(value['executed'], 0)
+
+    def test_scratch_report_requires_scalar_string_stages_and_status(self):
+        for case in ['nested-empty-scratch-stage', 'nested-singleton-scratch-stage',
+                     'nonstring-scratch-stage', 'nonscalar-scratch-diagnostics']:
+            with self.subTest(case=case):
+                value = self.run_case(case)
+                self.assertTrue(value['failed'], value)
+                self.assertEqual(value['executed'], 0)
 
     def test_native_and_io_failures_remain_private_in_both_suite_reports(self):
         for suite in ['Isolation', 'Authentication']:

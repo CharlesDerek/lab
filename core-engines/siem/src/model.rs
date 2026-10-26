@@ -102,11 +102,19 @@ pub struct EventContext {
     #[serde(default)]
     pub parent_start_ms: Option<u64>,
     pub uid: Option<u32>,
+    /// Exact account claimed by a supported local journal report, not reporter UID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_account: Option<String>,
     pub summary: String,
     pub journal_cursor: String,
 }
 impl EventContext {
     pub fn validate(&self) -> Result<(), String> {
+        if self.claimed_account.as_ref().is_some_and(|account| {
+            account.is_empty() || account.len() > 256 || account.chars().any(char::is_control)
+        }) {
+            return Err("Claimed account exceeds its field budget".into());
+        }
         for (value, max) in [
             (&self.host, 64),
             (&self.program, 64),

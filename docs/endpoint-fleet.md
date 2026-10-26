@@ -579,6 +579,37 @@ The correction applies to newly ingested observations; existing normalized
 ledger records and investigation evidence are not rewritten. Review any
 historical findings affected by the earlier mapping.
 
+The local SIEM journal collector uses a versioned SHA-256 key of its configured
+source ID and the exact parsed claimed account for supported SSH, PAM and sudo
+reports. Punctuation, Unicode, long shared prefixes and different sources cannot
+be merged by display-label sanitization. The compact subject is an opaque key,
+not a UID or proof that the account exists. Reporter PID/UID and PAM module-only
+scope remain separate. New local records also retain the exact claimed account
+in optional context, bounded to 256 UTF-8 bytes without control characters. Event
+details show that escaped claim separately from reporter UID. Event search and
+bounded investigator packets retain the exact claim; packets omit the field
+when absent and permit only exact evidence-bound citations. Retained
+investigation evidence preserves it after source-journal expiry. Full raw
+messages remain outside this local archive and are available through journal
+retrieval only while the source retains them. Endpoint typed originals and their
+export behavior are unchanged.
+
+Existing local journal records and investigations keep their prior identities.
+Normal collection resumes after its durably committed cursor; new keys do not
+combine with legacy labels in a detection window. Detection histories and
+finding fingerprints distinguish exact claimed-account context from legacy
+subjects, even if an old literal username equals a new compact digest. Claims
+also cannot supply authentication history to an unrelated generic process fact
+with the same compact label. Retained-memory links use a separate, source-scoped
+claimed-account relation; old identity links and reporter UID relationships
+remain intact. Matching both a claim and its reporter contributes the existing
+identity weight once, and a shared host or reporter does not establish that
+claimed accounts are equal. Resetting a cursor across this
+normalization change can replay a previously committed record with different
+normalized facts. That replay is refused by the existing idempotency check,
+without changing the old record or advancing the checkpoint. A new source ID
+starts a distinct identity scope; it does not reconcile or rewrite old evidence.
+
 Endpoint and local-journal PAM normalization share the bounded `pam_unix`
 authentication-failure grammar. The exact `user=` field supplies the claimed
 account; an earlier empty or nonempty `ruser=` field cannot replace it. Reporter
@@ -587,9 +618,10 @@ the original message without a new normalized identity field. Duplicate or
 unsupported fields produce no authentication facts; a local generic journal
 observation may still be retained. Module failures remain observations rather
 than completed service denials. The
-existing private SSH/PAM and sudo fixtures now require local and endpoint
-identity to agree on actual reports with both remote-user forms. These assertions
-passed on Ubuntu 24.04 and Debian 13: nine SSH/PAM module reports with empty
+existing private SSH/PAM and sudo fixtures compare the exact local claimed
+account and its compact key with the endpoint's original account, while checking
+reporter UID/PID separately. The underlying field distinction was verified on
+Ubuntu 24.04 and Debian 13: nine SSH/PAM module reports with empty
 `ruser=` and seventeen sudo/PAM module reports with nonempty `ruser=` on each
 image, alongside the existing queue, replay, detection and missing-provenance
 gates. This does not

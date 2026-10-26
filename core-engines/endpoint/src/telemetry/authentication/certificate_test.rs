@@ -115,7 +115,16 @@ fn check_port(events: &[EndpointEvent], port: u16, outcomes: &[AuthenticationOut
             "_EXE":event.journal.executable,"_UID":event.journal.reporter_uid.to_string(),"_PID":event.journal.reporter_pid.to_string(),"MESSAGE":event.journal.message}), "fixture-journal", now_ms()).unwrap();
         assert!(
             local.kind == Kind::Authentication
-                && local.subject == "fixture"
+                && local.subject
+                    == collector::journal_account_subject("fixture-journal", "fixture")
+                && local
+                    .context
+                    .as_ref()
+                    .is_some_and(
+                        |context| context.claimed_account.as_deref() == Some("fixture")
+                            && context.uid == Some(event.journal.reporter_uid)
+                            && context.pid == Some(event.journal.reporter_pid)
+                    )
                 && local.object == "ssh:127.0.0.1",
             "Local collector changed certificate claimed identity"
         );

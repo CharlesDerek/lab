@@ -579,6 +579,10 @@ jobs:
         run: cargo test --locked -p athernex-siem --test macos_process_events --test macos_authentication --test macos_network_events --test endpoint_rollouts --test engine_rollouts
       - name: Test required Windows driver package delivery
         run: cargo test --locked -p athernex-siem --test fleet windows_filter_package_delivery_requires_exact_bytes_and_marker -- --exact
+      - name: Test exact journal identities and retained account claims
+        run: 'cargo test --locked -p athernex-siem --lib collector::'
+      - name: Test retained investigations and bounded evidence packets
+        run: cargo test --locked -p athernex-siem --test investigative_memory --test investigator
       - name: Refuse disabled assertions in validation tools and isolated helpers
         run: python tools/test_verification_guards.py -v
       - name: Test artifact packaging with controlled signature results

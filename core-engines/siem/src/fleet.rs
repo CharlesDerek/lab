@@ -438,6 +438,7 @@ impl Engine {
                 uid: process
                     .and_then(|p| p.user_id.as_ref())
                     .and_then(|u| u.parse().ok()),
+                claimed_account: None,
                 summary: if matches!(event.telemetry, Some(Telemetry::ProcessEvent { .. })) {
                     "Linux kernel lifecycle event; executable identity is not inferred"
                 } else if matches!(event.telemetry, Some(Telemetry::NetworkEvent { .. })) {

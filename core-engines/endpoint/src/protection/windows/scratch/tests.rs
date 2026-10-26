@@ -483,6 +483,9 @@ fn run_scanner(state: &Directory, token: &Token, ready: &Health, denied: bool) {
 #[test]
 #[ignore = "requires native Windows LocalSystem/session zero; formats and fills one new private 256 MiB scratch disk"]
 fn owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit() {
+    // These literals are the only scratch diagnostics projected into CI's
+    // public report. Leading newlines separate them from libtest's test label.
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=fixture_entered");
     let _serial = windows_job::TEST_SERIAL.lock().unwrap();
     let token = Token::new().unwrap();
     let retained = tempfile::tempdir().unwrap().keep().canonicalize().unwrap();
@@ -526,12 +529,14 @@ fn owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit() {
         state: state.path().into(),
         id: id.clone(),
     };
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=state_ready");
     let mut worker = Service::start(
         &invocation,
         Some(&serde_json::to_vec(&request).unwrap()),
         8192,
     )
     .unwrap();
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=worker_started");
     let deadline = Instant::now() + Duration::from_secs(180);
     let ready = loop {
         check_running(&mut worker, "scratch fixture worker").unwrap();
@@ -547,32 +552,41 @@ fn owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit() {
     };
     assert_eq!(ready.worker_pid, worker.id());
     assert_eq!(ready.worker_created, worker.creation_time().unwrap());
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=worker_ready");
     let mut stale = ready.clone();
     stale.checked_ms = now_ms().saturating_sub(6000);
     assert!(validate_observation(&state, &stale, token.logon_sid()).is_err());
     let mut changed = ready.clone();
     changed.directory.file_id[0] ^= 0xff;
     assert!(validate_observation(&state, &changed, token.logon_sid()).is_err());
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=health_rejections_verified");
     assert!(recovery::clean(&state).is_err());
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=live_recovery_refused");
     scratch_acl_probe(&ready, &token);
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=acl_probe_completed");
     diagnostics::inspect(&ready, &token);
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=device_probe_completed");
     run_scanner(&state, &Token::new().unwrap(), &ready, true);
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=foreign_logon_denied");
     // Inherited access on an existing SYSTEM-created child is an independent
     // diagnostic of the scanner's create-file permissions on the directory.
     std::fs::write(ready.path.join("existing-proof"), b"system fixture bytes").unwrap();
     run_scanner(&state, &token, &ready, false);
     health(&state, &id, token.logon_sid()).unwrap();
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=scanner_bounds_verified");
     let network = state.directory("network").unwrap();
     network
         .write_json("retained.json", &serde_json::json!({"unreconciled":true}))
         .unwrap();
     worker.stop().unwrap();
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=worker_stopped");
     assert!(recovery::clean(&state).is_err());
     assert!(runtime
         .path()
         .join(format!("scanner-{id}"))
         .join(native::IMAGE)
         .exists());
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=retained_network_refused");
     network.remove("retained.json").unwrap();
     assert_eq!(recovery::clean(&state).unwrap(), 1);
     assert_eq!(recovery::clean(&state).unwrap(), 0);
@@ -583,6 +597,8 @@ fn owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit() {
     assert!(names(&state.directory("scratch-health").unwrap())
         .unwrap()
         .is_empty());
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=recovery_completed");
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=passed");
 }
 
 #[test]

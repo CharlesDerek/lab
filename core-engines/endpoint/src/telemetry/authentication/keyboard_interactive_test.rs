@@ -189,7 +189,15 @@ fn terminal(
     let local = collector::normalize(&native, "fixture-journal", now_ms()).unwrap();
     assert!(
         local.kind == Kind::Authentication
-            && local.subject == "fixture"
+            && local.subject == collector::journal_account_subject("fixture-journal", "fixture")
+            && local
+                .context
+                .as_ref()
+                .is_some_and(
+                    |context| context.claimed_account.as_deref() == Some("fixture")
+                        && context.uid == Some(event.journal.reporter_uid)
+                        && context.pid == Some(event.journal.reporter_pid)
+                )
             && local.object == "ssh:127.0.0.1"
             && local.outcome
                 == if allowed {
@@ -242,7 +250,15 @@ fn module(store: &Store, database: &std::path::Path, before: &str, terminal: &se
     let local = collector::normalize(&native, "fixture-journal", now_ms()).unwrap();
     assert!(
         local.kind == Kind::Authentication
-            && local.subject == "fixture"
+            && local.subject == collector::journal_account_subject("fixture-journal", "fixture")
+            && local
+                .context
+                .as_ref()
+                .is_some_and(
+                    |context| context.claimed_account.as_deref() == Some("fixture")
+                        && context.uid == Some(event.journal.reporter_uid)
+                        && context.pid == Some(event.journal.reporter_pid)
+                )
             && local.outcome == Outcome::Observe,
         "Local PAM failure became a completed method result"
     );
