@@ -86,6 +86,9 @@ pub enum Telemetry {
     WindowsProcessEvent {
         event: crate::windows_process_events::WindowsProcessEvent,
     },
+    WindowsNetworkEvent {
+        event: crate::windows_network_events::WindowsNetworkEvent,
+    },
     ProcessEvent {
         boot_id: String,
         stream_id: String,
@@ -106,6 +109,7 @@ impl Telemetry {
             Self::NetworkEvent { .. } => "network_event",
             Self::Authentication { .. } | Self::WindowsAuthentication { .. } => "authentication",
             Self::WindowsProcessEvent { .. } => "windows_process_event",
+            Self::WindowsNetworkEvent { .. } => "windows_network_event",
             Self::ProcessEvent { .. } => "process_event",
             Self::Process { .. } => "process",
             Self::Connection { .. } => "connection",
@@ -134,6 +138,7 @@ impl Telemetry {
             Self::Authentication { event } => event.validate(now),
             Self::WindowsAuthentication { event } => event.validate(now),
             Self::WindowsProcessEvent { event } => event.validate(now),
+            Self::WindowsNetworkEvent { event } => event.validate(now),
             Self::ProcessEvent {
                 boot_id,
                 stream_id,
@@ -167,6 +172,7 @@ impl Telemetry {
             | Self::Authentication { .. }
             | Self::WindowsAuthentication { .. } => None,
             Self::WindowsProcessEvent { .. } => None,
+            Self::WindowsNetworkEvent { .. } => None,
             Self::ProcessEvent { .. } => None,
             Self::Process { process, .. } => Some(process),
             Self::Connection { connection, .. } => connection.process.as_ref(),
@@ -185,6 +191,8 @@ pub struct CollectorHealth {
     pub windows_authentication: Option<crate::authentication::AuthenticationHealth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub windows_process_events: Option<crate::windows_process_events::WindowsProcessEventHealth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_network_events: Option<crate::windows_network_events::WindowsNetworkEventHealth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_events: Option<crate::process_events::ProcessEventHealth>,
     pub mode: String,
@@ -208,6 +216,9 @@ impl CollectorHealth {
             authentication.validate()?;
         }
         if let Some(events) = &self.windows_process_events {
+            events.validate()?;
+        }
+        if let Some(events) = &self.windows_network_events {
             events.validate()?;
         }
         if let Some(events) = &self.process_events {

@@ -37,6 +37,8 @@ pub struct HealthGate {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub windows_process_events: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub windows_network_events: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authentication: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub windows_authentication: bool,
@@ -174,6 +176,17 @@ pub(crate) fn healthy(health: &Heartbeat, gate: &HealthGate, now: u64) -> bool {
             .collector
             .as_ref()
             .and_then(|c| c.windows_process_events.as_ref())
+            .is_none_or(|h| h.healthy(now))
+        && (!gate.windows_network_events
+            || health
+                .collector
+                .as_ref()
+                .and_then(|c| c.windows_network_events.as_ref())
+                .is_some_and(|h| h.healthy(now)))
+        && health
+            .collector
+            .as_ref()
+            .and_then(|c| c.windows_network_events.as_ref())
             .is_none_or(|h| h.healthy(now))
         && (!gate.signatures || !health.signature_version.is_empty())
         && (gate.protection_fingerprint.is_none() || scope == gate.protection_fingerprint)
@@ -380,6 +393,10 @@ impl Engine {
                     .collector
                     .as_ref()
                     .is_some_and(|c| c.windows_process_events.is_some()),
+                windows_network_events: health
+                    .collector
+                    .as_ref()
+                    .is_some_and(|c| c.windows_network_events.is_some()),
                 authentication: health
                     .collector
                     .as_ref()
@@ -751,6 +768,7 @@ mod native_coverage_tests {
             signatures: false,
             process_events: false,
             windows_process_events: false,
+            windows_network_events: false,
             authentication: false,
             windows_authentication: false,
             network_events: false,
@@ -1041,6 +1059,100 @@ mod native_coverage_tests {
             assert!(
                 !healthy(&health, &gate, now),
                 "Windows source failure {failure}"
+            );
+            assert!(
+                !healthy(&health, &legacy, now),
+                "Reported unhealthy source {failure}"
+            );
+        }
+    }
+    #[test]
+    fn windows_network_coverage_is_separate_and_restored_gaps_remain_unhealthy() {
+        use protocol::windows_network_events::WindowsNetworkEventHealth;
+        let now = 1_800_000_000_000;
+        let legacy: HealthGate = serde_json::from_str(
+            r#"{"protection_fingerprint":null,"collector":true,"signatures":false}"#,
+        )
+        .unwrap();
+        assert!(!legacy.windows_network_events);
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            r#"{"protection_fingerprint":null,"collector":true,"signatures":false}"#
+        );
+        let gate = HealthGate {
+            windows_network_events: true,
+            ..legacy.clone()
+        };
+        let mut health = Heartbeat {
+            version: "fixture".into(),
+            capabilities: vec![],
+            scanner: String::new(),
+            realtime: false,
+            signature_version: String::new(),
+            spool_events: 0,
+            error: String::new(),
+            protection: None,
+            updates: None,
+            controller_updates: None,
+            collector: Some(CollectorHealth {
+                mode: "snapshot".into(),
+                last_attempt_ms: now,
+                last_success_ms: now,
+                process_events: Some(ProcessEventHealth {
+                    boot_id: "a".repeat(64),
+                    stream_id: "b".repeat(64),
+                    state: "active".into(),
+                    started_ms: now,
+                    checked_ms: now,
+                    subscriptions: 1,
+                    received_events: 0,
+                    dropped_events: 0,
+                    loss_signals: 0,
+                    error: String::new(),
+                }),
+                ..Default::default()
+            }),
+        };
+        assert!(healthy(&health, &legacy, now));
+        assert!(!healthy(&health, &gate, now));
+        let windows = WindowsNetworkEventHealth {
+            stream_id: "c".repeat(64),
+            state: "active".into(),
+            started_ms: now - 60_000,
+            checked_ms: now,
+            subscriptions: 1,
+            ..Default::default()
+        };
+        health.collector.as_mut().unwrap().windows_network_events = Some(windows.clone());
+        assert!(healthy(&health, &gate, now));
+        for failure in 0..12 {
+            let mut degraded = windows.clone();
+            match failure {
+                0 => degraded.checked_ms = now - 30_001,
+                1 => degraded.callback_drops = 1,
+                2 => degraded.queue_drops = 1,
+                3 => degraded.events_lost = 1,
+                4 => degraded.log_buffers_lost = 1,
+                5 => degraded.realtime_buffers_lost = 1,
+                6 => {
+                    degraded.received_records = 1;
+                    degraded.rejected_records = 1;
+                }
+                7 => degraded.backpressured = true,
+                8 => degraded.error = "Source unavailable".into(),
+                9 => degraded.state = "stopped".into(),
+                10 => degraded.state = "degraded".into(),
+                _ => {
+                    // A new active subscription cannot erase an earlier gap.
+                    degraded.subscriptions = 2;
+                    degraded.loss_signals = 1;
+                    degraded.error.clear();
+                }
+            }
+            health.collector.as_mut().unwrap().windows_network_events = Some(degraded);
+            assert!(
+                !healthy(&health, &gate, now),
+                "Windows network source failure {failure}"
             );
             assert!(
                 !healthy(&health, &legacy, now),

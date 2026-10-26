@@ -11,6 +11,7 @@ pub mod protection;
 pub mod telemetry;
 pub mod update;
 pub mod windows_authentication;
+pub mod windows_network_events;
 pub mod windows_process_events;
 
 pub const PROTOCOL: u32 = 1;
@@ -332,6 +333,7 @@ impl EndpointEvent {
                 "network_event",
                 "authentication",
                 "windows_process_event",
+                "windows_network_event",
             ]
             .contains(&self.kind.as_str())
             || self.path.len() > 1024
@@ -364,6 +366,20 @@ impl EndpointEvent {
                     );
                 }
             }
+            if let telemetry::Telemetry::WindowsNetworkEvent { event } = telemetry {
+                if self.id != event.event_id() || self.time_ms != event.time_ms {
+                    return Err(
+                        "Windows network envelope does not match original identity/time".into(),
+                    );
+                }
+                if serde_json::to_vec(self)
+                    .map_err(|_| "Windows network envelope serialization failed")?
+                    .len()
+                    > windows_network_events::MAX_SERIALIZED_EVENT_BYTES
+                {
+                    return Err("Windows network envelope exceeds transport budget".into());
+                }
+            }
             if telemetry.kind() != self.kind {
                 return Err("Telemetry kind does not match event".into());
             }
@@ -381,6 +397,7 @@ impl EndpointEvent {
             "network_event",
             "authentication",
             "windows_process_event",
+            "windows_network_event",
         ]
         .contains(&self.kind.as_str())
         {

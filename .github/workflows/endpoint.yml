@@ -27,6 +27,7 @@ on:
       - 'tools/verify_automatic_update.py'
       - 'tools/verify_controller_maintenance.py'
       - 'tools/verify_controller_delivery.py'
+      - 'tools/test_controller_delivery.py'
       - 'tools/verify_endpoint_rollout.py'
       - 'tools/verify_native_protection.py'
       - 'tools/verify_native_adapter.py'
@@ -52,6 +53,8 @@ on:
       - 'tools/test_windows_workspace_ci.py'
       - 'tools/verify_windows_authentication_agent_ci.ps1'
       - 'tools/test_windows_authentication_agent_ci.py'
+      - 'tools/verify_windows_network_events_ci.ps1'
+      - 'tools/test_windows_network_events_ci.py'
       - 'tools/verify_windows_network_source_ci.ps1'
       - 'tools/test_windows_network_source_ci.py'
       - 'tools/test_verification_guards.py'
@@ -66,6 +69,48 @@ on:
 permissions:
   contents: read
 jobs:
+  windows-network-events:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify network-events evidence and privileged task failure handling
+        run: |
+          python tools/test_windows_service_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Task runner control-flow tests failed' }
+          python tools/test_windows_network_events_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Network-events evidence tests failed' }
+      - name: Build and select exact release agent and native network test executable
+        shell: pwsh
+        env:
+          CARGO_PROFILE_TEST_DEBUG: 0
+        run: |
+          cargo build --locked --release -p athernex-endpoint --bin athernex-endpoint
+          if ($LASTEXITCODE -ne 0) { throw 'Release network-events agent build failed' }
+          cargo test --locked -p athernex-endpoint --lib --no-run --message-format=json > "$env:RUNNER_TEMP/network-events-build.jsonl"
+          if ($LASTEXITCODE -ne 0) { throw 'Native network-events agent proof build failed' }
+          $records = Get-Content -LiteralPath "$env:RUNNER_TEMP/network-events-build.jsonl" | ForEach-Object { $_ | ConvertFrom-Json }
+          $matches = @($records | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -ceq 'athernex_endpoint' -and $_.profile.test -eq $true -and $_.executable })
+          if ($matches.Count -ne 1) { throw 'Expected one endpoint library test executable' }
+          ('NETWORK_EVENTS_ENDPOINT_TESTS=' + $matches[0].executable) >> $env:GITHUB_ENV
+      - name: Prove the actual release-agent ETW network component and agent loop as LocalSystem
+        timeout-minutes: 15
+        shell: pwsh
+        run: tools/verify_windows_network_events_ci.ps1 -AgentExecutable "target/release/athernex-endpoint.exe" -EndpointTests "$env:NETWORK_EVENTS_ENDPOINT_TESTS" -OutputDirectory "$env:RUNNER_TEMP/native-windows-network-events" -DisposableHost
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-windows-network-events
+          # Component and agent acceptance only. Raw records, tuples, logs and worker reports stay private.
+          path: |
+            ${{ runner.temp }}/native-windows-network-events/inputs.json
+            ${{ runner.temp }}/native-windows-network-events/network-events-validation.json
+          if-no-files-found: warn
   windows-authentication-agent:
     runs-on: windows-2022
     timeout-minutes: 40
@@ -553,6 +598,9 @@ jobs:
       - name: Verify launcher-owned controller updates and recovery
         if: runner.os != 'macOS'
         run: python tools/verify_controller_maintenance.py
+      - name: Verify owned controller snapshot read retry
+        if: runner.os != 'macOS'
+        run: python -m unittest tools/test_controller_delivery.py
       - name: Verify reviewed controller delivery and durable recovery receipts
         if: runner.os != 'macOS'
         run: python tools/verify_controller_delivery.py

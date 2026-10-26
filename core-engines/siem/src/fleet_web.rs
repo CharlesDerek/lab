@@ -278,6 +278,23 @@ async fn observations_page(
                     ("Original EVENT_RECORD", "Retained header, buffer context, extended data, payload and QPC clock anchor are included in the original observation JSON".into()),
                 ]);
             }
+            if let protocol::telemetry::Telemetry::WindowsNetworkEvent { event } = telemetry {
+                facts.extend([
+                    ("Windows ETW operation", crate::fleet::windows_network_operation(&event.operation).into()),
+                    ("Transport / family", format!("{} / {}", crate::fleet::windows_network_protocol(&event.protocol), crate::fleet::windows_network_family(&event.family))),
+                    ("Reported PID", event.reported_pid.to_string()),
+                    ("Reported source", event.source.to_string()),
+                    ("Reported destination", event.destination.to_string()),
+                    ("Reported operation size", event.reported_size.to_string()),
+                    ("Subscription", event.original.stream_id.clone()),
+                    ("Collector receipt sequence", event.original.receipt_sequence.to_string()),
+                    ("Source QPC ticks", event.original.header.timestamp_qpc.to_string()),
+                    ("QPC frequency (Hz)", event.original.clock.frequency_hz.to_string()),
+                    ("Time qualification", format!("Collector QPC estimate; sample-bracket and rounding uncertainty {} ms, excluding wall-clock changes or drift. Not a kernel UTC timestamp", event.time_uncertainty_ms)),
+                    ("Attribution", "Reported PID, addresses and opaque original connection token do not establish an executable, process incarnation, connection identity or complete lifetime. A send/receive report or its size does not prove packet delivery or transferred-byte accounting; no firewall decision is inferred".into()),
+                    ("Original EVENT_RECORD", "Retained header, buffer context, extended data, payload and QPC clock anchor are included in the original observation JSON".into()),
+                ]);
+            }
             if let protocol::telemetry::Telemetry::Connection { connection, .. } = telemetry {
                 facts.extend([
                     ("Protocol", connection.protocol.to_uppercase()),
@@ -505,6 +522,9 @@ async fn portal(State(app): State<App>) -> Result<Html<String>, WebError> {
             }
             if let Some(events) = &c.windows_process_events {
                 write!(content,"<p>Windows ETW process events: {} · {} received · {} admitted · {} rejected · {} loss notifications</p><p>Collection began {} UTC. Live source only; collector restarts and gaps have no ETW source replay. Reported identifiers do not establish verified process lifetimes.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_records,events.admitted_records,events.rejected_records,events.loss_signals,crate::render::time(events.started_ms),escape(&events.error)).unwrap();
+            }
+            if let Some(events) = &c.windows_network_events {
+                write!(content,"<p>Windows ETW network events: {} · {} received · {} admitted · {} rejected · {} loss notifications</p><p>Collection began {} UTC. Live TCP/UDP IPv4/IPv6 source only; collector restarts and gaps have no ETW source replay. Reported operations do not establish packet delivery, firewall decisions, executable identity or complete connection lifetimes.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_records,events.admitted_records,events.rejected_records,events.loss_signals,crate::render::time(events.started_ms),escape(&events.error)).unwrap();
             }
         }
         if let Some(p) = &endpoint.health.protection {

@@ -24,6 +24,37 @@ pub(crate) fn windows_process_change(
     }
 }
 
+pub(crate) fn windows_network_operation(
+    operation: &protocol::windows_network_events::WindowsNetworkOperation,
+) -> &'static str {
+    use protocol::windows_network_events::WindowsNetworkOperation;
+    match operation {
+        WindowsNetworkOperation::Connect => "connect",
+        WindowsNetworkOperation::Accept => "accept",
+        WindowsNetworkOperation::Send => "send",
+        WindowsNetworkOperation::Receive => "receive",
+        WindowsNetworkOperation::Disconnect => "disconnect",
+    }
+}
+pub(crate) fn windows_network_protocol(
+    protocol: &protocol::windows_network_events::WindowsNetworkProtocol,
+) -> &'static str {
+    use protocol::windows_network_events::WindowsNetworkProtocol;
+    match protocol {
+        WindowsNetworkProtocol::Tcp => "TCP",
+        WindowsNetworkProtocol::Udp => "UDP",
+    }
+}
+pub(crate) fn windows_network_family(
+    family: &protocol::windows_network_events::WindowsNetworkFamily,
+) -> &'static str {
+    use protocol::windows_network_events::WindowsNetworkFamily;
+    match family {
+        WindowsNetworkFamily::Ipv4 => "IPv4",
+        WindowsNetworkFamily::Ipv6 => "IPv6",
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct Endpoint {
     pub id: String,
@@ -327,6 +358,10 @@ impl Engine {
                 Some(Telemetry::WindowsProcessEvent { event }) => Some(event),
                 _ => None,
             };
+            let windows_network = match &event.telemetry {
+                Some(Telemetry::WindowsNetworkEvent { event }) => Some(event),
+                _ => None,
+            };
             let authentication_outcome = authentication
                 .and_then(|a| a.service_outcome())
                 .or_else(|| windows_authentication.and_then(|a| a.service_outcome()));
@@ -394,6 +429,14 @@ impl Engine {
                     windows_process_change(&process.change)
                 );
             }
+            if let Some(network) = windows_network {
+                context.program = "Windows kernel network ETW".into();
+                context.pid = Some(network.reported_pid);
+                context.summary = format!(
+                    "Windows ETW {} {} {} report; collector QPC estimate. PID/tuples do not verify process/connection identity, lifetime, firewall outcome or delivery.",
+                    windows_network_protocol(&network.protocol), windows_network_family(&network.family), windows_network_operation(&network.operation)
+                );
+            }
             let object = match &event.telemetry {
                 Some(Telemetry::NetworkEvent { event, .. }) => {
                     format!("{}:{}", event.protocol.label(), event.original.destination)
@@ -408,6 +451,9 @@ impl Engine {
                     .unwrap_or_else(|| "local-authentication".into()),
                 Some(Telemetry::WindowsProcessEvent { event }) => protocol::hash(
                     format!("{id}:windows-process-observation:{}", event.event_id()).as_bytes(),
+                ),
+                Some(Telemetry::WindowsNetworkEvent { event }) => protocol::hash(
+                    format!("{id}:windows-network-observation:{}", event.event_id()).as_bytes(),
                 ),
                 Some(Telemetry::ProcessEvent {
                     boot_id,
@@ -477,7 +523,7 @@ impl Engine {
                 kind: match event.kind.as_str() {
                     "malware" => Kind::Malware,
                     "process" | "process_event" | "windows_process_event" => Kind::Process,
-                    "connection" | "network_event" => Kind::Network,
+                    "connection" | "network_event" | "windows_network_event" => Kind::Network,
                     "authentication" => Kind::Authentication,
                     _ => Kind::System,
                 },

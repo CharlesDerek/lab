@@ -3,6 +3,7 @@
 if not __debug__:
     raise SystemExit('Validation requires Python assertions; do not use -O or PYTHONOPTIMIZE')
 
+import errno
 import hashlib
 import io
 import json
@@ -22,6 +23,32 @@ import urllib.parse
 import urllib.request
 import zipfile
 from verify_endpoint_update import alive, eventually
+
+
+def launcher_healthy(launcher, state, log):
+    if launcher.poll() is not None:
+        raise AssertionError('Launcher exited before health: '+log.read_text(errors='replace'))
+    path = state/'supervisor/ready.json'; lease = state/'supervisor/lease.json'
+    if not path.exists() or not lease.exists(): return False
+    documents = []
+    for snapshot in (path, lease, state/'supervisor/launcher.json'):
+        try:
+            text = snapshot.read_text()
+        except OSError as error:
+            # The native fixture observed CRT PermissionError/EACCES without a
+            # Win32 code. Its cause is unproven. Retry only these owned reads within
+            # the caller's existing readiness deadline; permanent denial still fails.
+            winerror = getattr(error, 'winerror', None)
+            if os.name == 'nt' and (winerror in (5, 32, 33) or (
+                    winerror is None and isinstance(error, PermissionError)
+                    and error.errno == errno.EACCES)):
+                return False
+            raise
+        documents.append(json.loads(text))
+    ready, owner, launched = documents
+    return (ready['token'] == owner['token'] and ready['pid'] == owner.get('child_pid')
+            and launched['controller_pid'] == owner['controller_pid'] and alive(ready['pid'])
+            and ready['time_ms'] >= launched['started_ms'])
 
 
 def main():
@@ -72,15 +99,7 @@ def main():
             return json.loads(run('controller-maintenance-status', state))
 
         def healthy():
-            if launcher.poll() is not None:
-                raise AssertionError('Launcher exited before health: '+logs[-1].read_text(errors='replace'))
-            path = state/'supervisor/ready.json'; lease = state/'supervisor/lease.json'
-            if not path.exists() or not lease.exists(): return False
-            ready = json.loads(path.read_text()); owner = json.loads(lease.read_text())
-            launched = json.loads((state/'supervisor/launcher.json').read_text())
-            return (ready['token'] == owner['token'] and ready['pid'] == owner.get('child_pid')
-                    and launched['controller_pid'] == owner['controller_pid'] and alive(ready['pid'])
-                    and ready['time_ms'] >= launched['started_ms'])
+            return launcher_healthy(launcher, state, logs[-1])
 
         logs = []
         def start(mode='', wait=True):

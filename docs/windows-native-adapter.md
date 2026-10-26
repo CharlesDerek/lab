@@ -833,17 +833,21 @@ per-template candidate, not a general documented correction; the observed
 eight-byte metadata length does not prove that the header caused that value.
 The structural hash covers captured metadata and property context, while the
 source revision binds the formatter argument selection. Explicit fixed-length
-mismatches remain refusals. Native verification must establish every controlled
-event kind before this experiment can support a network layout or production decoder.
+mismatches remain refusals. Hosted Windows acceptance has now established all
+fourteen controlled version-two event kinds with original 64-bit headers,
+including complete TDH consumption and independent original-byte agreement.
+Other versions and architectures remain outside this native proof.
 
 The test executable and three scripts are staged in a protected directory and
 bound to the exact source revision. Only `inputs.json` and the fixed
 `network-source-validation.json` projection are uploaded. Raw network records,
 addresses, ports, process identifiers, kernel tokens and worker reports remain
 private. The report retains `proof_scope: "source_only"` and
-`production_readiness: false`. Native acceptance is pending. This fixture does
-not implement the production Windows network collector, durable delivery,
-authenticated original export or rollout coverage gates.
+`production_readiness: false`. All twelve source-proof stages passed on the
+controlled hosted Windows fixture. This result does not validate production
+collector persistence, durable agent delivery, authenticated original export or
+rollout coverage gates. Those behaviors have a separate `windows-network-events`
+component/agent job whose native acceptance remains pending.
 
 Failure diagnostics identify fixed ownership-check branches. Only after the
 private session name and GUID match may they expose numeric mode/enable/clock

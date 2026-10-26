@@ -455,6 +455,7 @@ fn main() -> Result<()> {
                         || config.telemetry.linux_authentication
                         || config.telemetry.windows_authentication
                         || config.telemetry.windows_process_events
+                        || config.telemetry.windows_network_events
                         || config.telemetry.linux_network_events
                     {
                         5
@@ -477,6 +478,7 @@ fn main() -> Result<()> {
                     || telemetry_policy.linux_authentication
                     || telemetry_policy.windows_authentication
                     || telemetry_policy.windows_process_events
+                    || telemetry_policy.windows_network_events
                     || telemetry_policy.linux_network_events)
             {
                 return Err("Native event collection requires continuous run mode".into());

@@ -610,6 +610,55 @@ required. These isolated containers share the host kernel; this evidence does
 not establish separate-host reliability, every PAM provider, localized messages
 or production detection quality.
 
+### Optional Windows kernel network observations
+
+Set `"windows_network_events": true` in the enabled private telemetry
+configuration and upgrade the server before enabling the Windows agent source.
+This separate collector preserves bounded original ETW headers, extended bytes
+and payloads for supported TCP/UDP IPv4/IPv6 connect, accept, send, receive and
+disconnect reports. The owned-session source fixture has exercised all fourteen
+supported version-2 layouts on a 64-bit Windows host. Full production-collector
+acceptance remains pending; source-only proof does not establish agent lifecycle,
+continuous coverage or production readiness.
+
+The server reparses each original before admitting its normalized socket fields,
+reported PID, operation size and time. Time is a collector QPC estimate with a
+recorded sampling bracket; that bracket does not bound wall-clock changes or
+clock drift. Reported PIDs, tuples and opaque kernel tokens do not establish
+executable identity, process incarnation, connection identity or lifetime,
+firewall decisions or delivery. These records normalize as observations, with
+zero transferred bytes for detection rules. They create no process ancestry,
+file identity or malware claim. Subscription and receipt identities distinguish
+observations and replay; they are not a kernel sequence or durable ETW cursor.
+
+Authenticated operators can inspect escaped originals and export the exact
+committed envelopes. Duplicate replay is idempotent, conflicting replay is
+refused atomically, and records remain scoped to their enrolled device and
+subscription. Windows network health is displayed separately from process and
+authentication coverage. Agent, controller and engine rollout approvals pin this
+source requirement and stop when it is missing, stopped, degraded, stale, lost
+or backpressured. A healthy different source cannot substitute for it. Restart
+and source gaps remain visible; live ETW provides no retained-source replay.
+Raw event material stays in protected endpoint storage and authenticated server
+evidence, while CI artifacts expose only approved fixed fields and hashes.
+
+The separate `windows-network-events` job stages a release agent and one exact
+ignored fixture in a protected LocalSystem/session-zero directory. It requires
+controlled traffic and TDH comparison, independent process collection, visible
+source and queue loss, stalled delivery, forced agent termination and owned-session
+recovery. Exact queued originals must survive restart and acknowledged HTTP;
+authenticated exports, conflicting replay refusal, device separation, portal
+evidence, rollout health and server restart are required. Separate portable SIEM
+tests verify escaping of hostile original text. The rollout milestone uses the
+unchanged captured native network health in a synthetic otherwise-ready signing,
+enrollment and update-preflight context, evaluated as of the captured samples.
+It performs no deployment and establishes no SCM or signing acceptance. Raw
+records, addresses, ports, PIDs and kernel tokens remain private. Uploaded evidence is
+limited to `inputs.json` and `network-events-validation.json`, with
+`proof_scope: "component_and_agent"` and `production_readiness: false`. The new
+collector/agent gate must pass on its source revision before native acceptance
+is claimed; passing the earlier source fixture is insufficient.
+
 ### Optional Windows Security logons
 
 Set `"windows_authentication": true` alongside `"enabled": true` in the private
@@ -681,8 +730,10 @@ Its public artifact contains exactly `inputs.json` and
 `authentication-agent-validation.json`, bound to the source revision and five
 staged inputs. It exposes fixed status fields with `proof_scope: "actual_agent"`
 and `production_readiness: false`; accounts, XML, credentials and raw logs remain
-private. Native acceptance is pending. This fixture does not establish SCM
-lifecycle, signing, production coverage or resistance to a compromised administrator.
+private. Hosted Windows acceptance passed all 24 required stages, including
+the full-queue boundary, exact replay, authenticated delivery and verified cleanup.
+This fixture does not establish SCM lifecycle, signing, production coverage or
+resistance to a compromised administrator.
 
 ### Windows process source experiment
 
