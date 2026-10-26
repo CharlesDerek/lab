@@ -6,7 +6,9 @@ native Windows storage behavior. Use --powershell for an isolated pwsh binary,
 or Windows PowerShell 5.1 to check the production interpreter on Windows.
 """
 import argparse
+import contextlib
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -15,11 +17,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "core-engines/endpoint/src/protection/windows/scratch/format.ps1"
 WRAPPER = r"""
 param([string]$Formatter)
 $ErrorActionPreference = 'Stop'
+[IO.File]::WriteAllText($env:ATHERNEX_FORMAT_PHASE, 'wrapper_entered')
 Import-Module Microsoft.PowerShell.Utility
 $mock = New-Module -Name Storage -ScriptBlock {
     $script:fixture = Microsoft.PowerShell.Utility\ConvertFrom-Json $env:ATHERNEX_FORMAT_FIXTURE
@@ -61,6 +65,7 @@ Microsoft.PowerShell.Core\Import-Module $mock
 if ((Microsoft.PowerShell.Core\Get-Command 'Storage\Format-Volume').Module.Guid -ne $mock.Guid) {
     throw 'Fixture did not bind the fake Storage module'
 }
+[IO.File]::WriteAllText($env:ATHERNEX_FORMAT_PHASE, 'mock_bound')
 # Suppress OS Storage/CIM imports. The production script itself is unmodified;
 # its module-qualified Storage calls can reach only the above fake module.
 function Import-Module {
@@ -68,6 +73,7 @@ function Import-Module {
     if ($Name.EndsWith('Storage.psd1') -or $Name.EndsWith('CimCmdlets.psd1')) { return }
     Microsoft.PowerShell.Core\Import-Module -Name $Name -ErrorAction Stop
 }
+[IO.File]::WriteAllText($env:ATHERNEX_FORMAT_PHASE, 'formatter_invoked')
 & $Formatter
 exit $LASTEXITCODE
 """
@@ -79,6 +85,35 @@ FIXTURE = dict(volume=VOLUME, partition_id=TARGET["partition_id"], disk_number=8
                letter=0, no_letter=True, boot=False, before_fs="", after_fs="NTFS")
 
 
+def timeout_phase(path):
+    try:
+        with path.open('rb') as source:
+            value = source.read(64)
+    except OSError:
+        return 'not_observed'
+    for phase in ('wrapper_entered', 'mock_bound', 'formatter_invoked'):
+        if value == phase.encode():
+            return phase
+    return 'unknown'
+
+
+def retain_private_timeout(error):
+    # This directory is outside every published artifact path. Never include
+    # its path, the child command, or child output in the public test exception.
+    try:
+        folder = Path(tempfile.mkdtemp(prefix='athernex-scratch-format-private-'))
+        folder.chmod(0o700)
+        fd = os.open(folder/'child.log', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as output:
+            for value in (error.stdout, error.stderr):
+                if value is not None:
+                    output.write(value.encode('utf-8', errors='replace') if isinstance(value, str) else value)
+                    output.write(b'\n')
+    except OSError:
+        # Failure remains a timeout even if local diagnostic storage fails.
+        return
+
+
 class FormatterTests(unittest.TestCase):
     powershell = None
 
@@ -88,13 +123,53 @@ class FormatterTests(unittest.TestCase):
             wrapper = Path(folder) / "wrapper.ps1"
             wrapper.write_text(WRAPPER, encoding="utf-8")
             marker = Path(folder) / "formatted"
+            phase = Path(folder) / "phase"
             env = os.environ.copy()
             env.update(ATHERNEX_FORMAT_FIXTURE=json.dumps(fixture or FIXTURE), ATHERNEX_FORMAT_MARKER=str(marker),
+                       ATHERNEX_FORMAT_PHASE=str(phase),
                        POWERSHELL_TELEMETRY_OPTOUT="1", POWERSHELL_UPDATECHECK="Off")
-            completed = subprocess.run([self.powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper), str(SCRIPT)],
-                                       input=text if text is not None else json.dumps(request), text=True, capture_output=True,
-                                       env=env, timeout=20, check=False)
+            try:
+                completed = subprocess.run([self.powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper), str(SCRIPT)],
+                                           input=text if text is not None else json.dumps(request), text=True, capture_output=True,
+                                           env=env, timeout=20, check=False)
+            except subprocess.TimeoutExpired as error:
+                # subprocess.run has killed and reaped this child. Do not retry
+                # or turn an unobserved malformed-input refusal into success.
+                retain_private_timeout(error)
+                raise RuntimeError('Scratch formatter timeout at phase '+timeout_phase(phase)) from None
             return completed, marker.read_text() if marker.exists() else None
+
+    def test_timeout_reports_only_fixed_phase_and_preserves_private_child_output(self):
+        real_mkdtemp = tempfile.mkdtemp
+        for phase in (None, 'wrapper_entered', 'mock_bound', 'formatter_invoked', 'private injected phase\n'):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as private:
+                def child(command, **kwargs):
+                    self.assertEqual(kwargs['timeout'], 20)
+                    if phase is not None:
+                        Path(kwargs['env']['ATHERNEX_FORMAT_PHASE']).write_text(phase)
+                    raise subprocess.TimeoutExpired(['private-command'], 20, output=b'private child stdout', stderr='private child stderr')
+
+                def directory(*args, **kwargs):
+                    if kwargs.get('prefix') == 'athernex-scratch-format-private-':
+                        kwargs['dir'] = private
+                    return real_mkdtemp(*args, **kwargs)
+
+                public = io.StringIO()
+                with patch.object(subprocess, 'run', side_effect=child) as calls, \
+                     patch.object(tempfile, 'mkdtemp', side_effect=directory), \
+                     contextlib.redirect_stdout(public), contextlib.redirect_stderr(public):
+                    with self.assertRaises(RuntimeError) as caught:
+                        self.run_case()
+                expected = 'not_observed' if phase is None else 'unknown' if phase.startswith('private') else phase
+                self.assertEqual(str(caught.exception), 'Scratch formatter timeout at phase '+expected)
+                self.assertEqual(public.getvalue(), '')
+                calls.assert_called_once()
+                logs = list(Path(private).glob('athernex-scratch-format-private-*/child.log'))
+                self.assertEqual(len(logs), 1)
+                self.assertEqual(logs[0].read_bytes(), b'private child stdout\nprivate child stderr\n')
+                if os.name != 'nt':
+                    self.assertEqual(logs[0].stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(logs[0].parent.stat().st_mode & 0o777, 0o700)
 
     def test_correct_owned_volume_formats_and_acknowledges(self):
         result, formatted = self.run_case()

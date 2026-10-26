@@ -2,6 +2,8 @@
 //! A reported account name is not an OS UID or a verified cross-device identity.
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
+mod pam;
+pub use pam::{pam_unix_report, PamReport};
 mod ssh;
 mod sudo;
 pub use ssh::{ssh_report, SshReport};
@@ -159,32 +161,10 @@ pub fn from_journal(record: &JournalRecord) -> Result<Option<Authentication>, St
             return Ok(Some(result));
         }
     }
-    if let Some((prefix, fields)) = message.split_once("): authentication failure;") {
-        if !prefix.starts_with("pam_unix(") || !prefix.ends_with(":auth") {
-            return Ok(None);
-        }
+    if let Some(report) = pam_unix_report(message)? {
         result.mechanism = "pam_unix".into();
-        let mut seen = std::collections::BTreeSet::new();
-        for word in fields.split_whitespace() {
-            let (key, _) = word
-                .split_once('=')
-                .ok_or("Ambiguous PAM authentication fields")?;
-            if !["logname", "uid", "euid", "tty", "ruser", "rhost", "user"].contains(&key)
-                || !seen.insert(key)
-            {
-                return Err("Ambiguous or unsupported PAM authentication fields".into());
-            }
-            if let Some(user) = word.strip_prefix("user=").filter(|u| !u.is_empty()) {
-                if result.claimed_user.is_some() || !bounded(user, 256) {
-                    return Err("Ambiguous PAM account".into());
-                }
-                result.claimed_user = Some(user.into());
-            }
-            if let Some(host) = word.strip_prefix("rhost=") {
-                // Preserve the original text; a DNS hostname is never guessed to be an IP.
-                result.source_ip = host.parse().ok();
-            }
-        }
+        result.claimed_user = report.claimed_user.map(str::to_owned);
+        result.source_ip = report.source_ip;
         return Ok(Some(result));
     }
     Ok(None)

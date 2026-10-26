@@ -33,9 +33,6 @@ fn label(value: &str) -> String {
         value
     }
 }
-fn token_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
-    text.split_once(marker)?.1.split_whitespace().next()
-}
 fn bounded(value: &str, max: usize) -> String {
     let mut s = String::new();
     for c in value.chars().filter(|c| !c.is_control()) {
@@ -99,6 +96,13 @@ pub fn normalize(record: &Value, source: &str, now: u64) -> LabResult<InputEvent
     } else {
         None
     };
+    let pam_report = if pam {
+        athernex_endpoint_protocol::authentication::pam_unix_report(message)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
     if let Some(report) = ssh_report {
         kind = Kind::Authentication;
         outcome = if report.outcome
@@ -116,10 +120,7 @@ pub fn normalize(record: &Value, source: &str, now: u64) -> LabResult<InputEvent
         } else {
             "OpenSSH reported an authentication denial"
         };
-    } else if pam
-        && message.starts_with("pam_")
-        && message.contains(":auth): authentication failure;")
-    {
+    } else if let Some(report) = pam_report {
         kind = Kind::Authentication;
         // A sufficient/optional module may fail before another module accepts
         // the same login. Keep this evidence without asserting service denial
@@ -127,7 +128,7 @@ pub fn normalize(record: &Value, source: &str, now: u64) -> LabResult<InputEvent
         outcome = Outcome::Observe;
         severity = 1;
         object = label(comm);
-        if let Some(user) = token_after(message, "user=") {
+        if let Some(user) = report.claimed_user {
             subject = label(user);
         }
         summary = "PAM module reported failure; service authentication outcome is not established";
@@ -471,6 +472,110 @@ mod tests {
             assert_eq!(input.kind, Kind::System);
             assert_eq!(input.outcome, Outcome::Observe);
         }
+    }
+    #[test]
+    fn pam_account_uses_only_the_exact_user_field_for_trusted_producers() {
+        let now = 1_800_000_000_000;
+        let mut engine = Engine::memory().unwrap();
+        for (index, executable) in [
+            "/usr/sbin/sshd",
+            "/usr/lib/openssh/sshd-session",
+            "/usr/libexec/openssh/sshd-session",
+            "/usr/bin/sudo",
+            "/usr/bin/login",
+            "/bin/login",
+            "/usr/bin/su",
+            "/bin/su",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for remote_user in ["caller", ""] {
+                let message = format!("pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser={remote_user} rhost=192.0.2.10 user=alice");
+                let mut row = record(&message, executable);
+                row["__CURSOR"] = format!("pam-account-{index}-{remote_user}").into();
+                let input = normalize(&row, "host-journal", now).unwrap();
+                let report = athernex_endpoint_protocol::authentication::pam_unix_report(&message)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(report.claimed_user, Some("alice"));
+                assert_eq!(input.subject, "alice");
+                assert_eq!(input.object, "sshd");
+                assert_eq!(input.kind, Kind::Authentication);
+                assert_eq!(input.outcome, Outcome::Observe);
+                assert_eq!(input.severity, 1);
+                assert_eq!(input.context.as_ref().unwrap().uid, Some(0));
+                assert_eq!(input.idempotency_key, digest(field(&row, "__CURSOR")));
+                engine.ingest(&[input], now).unwrap();
+            }
+        }
+        assert!(!engine
+            .findings()
+            .unwrap()
+            .iter()
+            .any(|finding| finding.rule == "AX-001"));
+    }
+    #[test]
+    fn pam_without_a_reported_user_preserves_the_reporter_identity() {
+        let now = 1_800_000_000_000;
+        for fields in [
+            "ruser=caller rhost=192.0.2.10",
+            "ruser= rhost=192.0.2.10",
+            "ruser=caller rhost=192.0.2.10 user=",
+        ] {
+            let message = format!("pam_unix(sshd:auth): authentication failure; {fields}");
+            let mut row = record(&message, "/usr/sbin/sshd");
+            let input = normalize(&row, "host-journal", now).unwrap();
+            assert_eq!(input.kind, Kind::Authentication);
+            assert_eq!(input.outcome, Outcome::Observe);
+            assert_eq!(input.severity, 1);
+            assert_eq!(input.subject, "uid-0");
+            row.as_object_mut().unwrap().remove("_UID");
+            let input = normalize(&row, "host-journal", now).unwrap();
+            assert_eq!(input.subject, "sshd");
+            assert_eq!(input.context.unwrap().uid, None);
+        }
+    }
+    #[test]
+    fn ambiguous_or_untrusted_pam_reports_remain_system_observations() {
+        let now = 1_800_000_000_000;
+        let mut engine = Engine::memory().unwrap();
+        for (index, message) in [
+            "pam_unix(sshd:auth): authentication failure; ruser=caller user=alice user=bob",
+            "pam_unix(sshd:auth): authentication failure; ruser=caller ruser=other user=alice",
+            "pam_unix(sshd:auth): authentication failure; rhost=192.0.2.10 rhost=192.0.2.11 user=alice",
+            "pam_unix(sshd:auth): authentication failure; remote_user=caller user=alice",
+            "pam_unix(sshd:auth): authentication failure; ruser=caller user=alice trailing",
+            "pam_other(sshd:auth): authentication failure; ruser=caller user=alice",
+            "pam_unix(sshd:account): authentication failure; ruser=caller user=alice",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut row = record(message, "/usr/sbin/sshd");
+            row["__CURSOR"] = format!("unsupported-pam-{index}").into();
+            let input = normalize(&row, "host-journal", now).unwrap();
+            assert_eq!(input.kind, Kind::System);
+            assert_eq!(input.outcome, Outcome::Observe);
+            assert_eq!(input.subject, "uid-0");
+            engine.ingest(&[input], now).unwrap();
+        }
+        let message = "pam_unix(sshd:auth): authentication failure; ruser=caller user=alice";
+        for (index, executable) in ["/usr/bin/logger", "/tmp/sshd", ""].into_iter().enumerate() {
+            let mut row = record(message, executable);
+            row["SYSLOG_IDENTIFIER"] = "sshd".into();
+            row["__CURSOR"] = format!("forged-pam-{index}").into();
+            let input = normalize(&row, "host-journal", now).unwrap();
+            assert_eq!(input.kind, Kind::System);
+            assert_eq!(input.outcome, Outcome::Observe);
+            assert_eq!(input.subject, "uid-0");
+            engine.ingest(&[input], now).unwrap();
+        }
+        assert!(!engine
+            .findings()
+            .unwrap()
+            .iter()
+            .any(|finding| finding.rule == "AX-001"));
     }
     #[test]
     fn pam_module_reports_do_not_double_count_denied_service_authentications() {

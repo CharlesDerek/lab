@@ -567,6 +567,23 @@ The correction applies to newly ingested observations; existing normalized
 ledger records and investigation evidence are not rewritten. Review any
 historical findings affected by the earlier mapping.
 
+Endpoint and local-journal PAM normalization share the bounded `pam_unix`
+authentication-failure grammar. The exact `user=` field supplies the claimed
+account; an earlier empty or nonempty `ruser=` field cannot replace it. Reporter
+UID remains separate from the claimed account, and remote-user text remains in
+the original message without a new normalized identity field. Duplicate or
+unsupported fields produce no authentication facts; a local generic journal
+observation may still be retained. Module failures remain observations rather
+than completed service denials. The
+existing private SSH/PAM and sudo fixtures now require local and endpoint
+identity to agree on actual reports with both remote-user forms. These assertions
+passed on Ubuntu 24.04 and Debian 13: nine SSH/PAM module reports with empty
+`ruser=` and seventeen sudo/PAM module reports with nonempty `ruser=` on each
+image, alongside the existing queue, replay, detection and missing-provenance
+gates. This does not
+expand provider, localized-message or account-attestation coverage, and existing
+normalized records are not rewritten.
+
 First enablement starts at the current journal tail and records that boundary;
 it does not silently import earlier history. Later starts resume at the exact
 durable cursor. Records, cursor and health counters commit together. If delivery

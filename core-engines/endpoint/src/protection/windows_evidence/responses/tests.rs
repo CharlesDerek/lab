@@ -10,8 +10,16 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_storage(false)
+    }
+    fn with_storage(memory: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let queue = Queue::open(&temp.path().join("evidence.db")).unwrap();
+        let path = if memory {
+            Path::new(":memory:").to_path_buf()
+        } else {
+            temp.path().join("evidence.db")
+        };
+        let queue = Queue::open(&path).unwrap();
         let scope = scope();
         let receipt = receipt(&scope, 1);
         queue.register(&scope).unwrap();
@@ -61,6 +69,42 @@ impl Fixture {
     }
     fn admit(&self) {
         self.queue.begin_response(&self.probe).unwrap();
+    }
+    fn refresh_kernel(&self) {
+        self.queue
+            .observe_kernel(
+                &self.probe.session,
+                now_ms(),
+                &wire::Status {
+                    version: wire::VERSION,
+                    armed: 1,
+                    connected: 1,
+                    pending: 0,
+                    allowed: 0,
+                    malware: 0,
+                    errors: 0,
+                    evidence_dropped: 0,
+                    instance: [1; 16],
+                    policy_sha256: scope().config().unwrap().policy_sha256,
+                },
+            )
+            .unwrap();
+    }
+    fn current_probe(&self) -> Probe {
+        let mut probe = self.probe.clone();
+        probe.started_ms = now_ms();
+        probe.expires_ms = probe.started_ms + LIFETIME_MS;
+        probe
+    }
+    fn live_ids(&self) -> Vec<String> {
+        self.queue
+            .connection
+            .prepare("SELECT id FROM response_probes WHERE expires>?1 ORDER BY id")
+            .unwrap()
+            .query_map([now_ms()], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
     }
 }
 
@@ -175,14 +219,24 @@ fn probe_admission_requires_live_session_scope_and_unique_actor() {
 
 #[test]
 fn expiry_capacity_and_cancel_preserve_unrelated_pending_probes() {
-    let f = Fixture::new();
+    // Exercise admission/capacity, not 64 disk-sync latencies. Reopen and
+    // durability tests above retain their file-backed queues. Model a live
+    // source without extending or rewriting any already-admitted probe.
+    let f = Fixture::with_storage(true);
     for i in 0..LIMIT {
-        let mut probe = f.probe.clone();
+        f.refresh_kernel();
+        let mut probe = f.current_probe();
         probe.id = format!("{i:064x}");
         probe.actor_pid += i as u32 + 1;
         f.queue.begin_response(&probe).unwrap();
     }
-    assert!(f.queue.begin_response(&f.probe).is_err());
+    let expected = (0..LIMIT).map(|i| format!("{i:064x}")).collect::<Vec<_>>();
+    assert_eq!(f.live_ids(), expected);
+    f.refresh_kernel();
+    let probe = f.current_probe();
+    assert!(matches!(f.queue.begin_response(&probe), Err(error)
+        if error.to_string() == "Windows response probe capacity exhausted"));
+    assert_eq!(f.live_ids(), expected);
     f.queue
         .connection
         .execute(
@@ -190,10 +244,13 @@ fn expiry_capacity_and_cancel_preserve_unrelated_pending_probes() {
             [format!("{:064x}", 0)],
         )
         .unwrap();
-    f.admit();
-    f.queue.cancel_response(&f.probe).unwrap();
-    f.queue.cancel_response(&f.probe).unwrap();
-    assert!(f.queue.take_response(&f.probe).is_err());
+    f.refresh_kernel();
+    let probe = f.current_probe();
+    f.queue.begin_response(&probe).unwrap();
+    f.queue.cancel_response(&probe).unwrap();
+    f.queue.cancel_response(&probe).unwrap();
+    assert!(f.queue.take_response(&probe).is_err());
+    assert_eq!(f.live_ids(), expected[1..]);
     assert_eq!(
         f.queue
             .connection
@@ -202,6 +259,42 @@ fn expiry_capacity_and_cancel_preserve_unrelated_pending_probes() {
             .unwrap(),
         LIMIT - 1
     );
+}
+
+#[test]
+fn stale_coverage_or_kernel_checkpoint_refuses_admission_and_response() {
+    for stale_kernel in [false, true] {
+        let f = Fixture::new();
+        f.refresh_kernel();
+        let probe = f.current_probe();
+        f.queue.begin_response(&probe).unwrap();
+        let mut coverage = f.queue.coverage().unwrap().unwrap();
+        let now = now_ms();
+        coverage.checked_ms = now;
+        coverage.kernel.as_mut().unwrap().checked_ms = now;
+        let stale = now - 5001;
+        if stale_kernel {
+            coverage.kernel.as_mut().unwrap().checked_ms = stale;
+        } else {
+            coverage.checked_ms = stale;
+        }
+        coverage.validate().unwrap();
+        f.queue
+            .connection
+            .execute(
+                "UPDATE coverage_state SET payload=?1 WHERE name='current'",
+                [serde_json::to_string(&coverage).unwrap()],
+            )
+            .unwrap();
+        let refused = "Windows response protection session is unavailable or changed";
+        assert!(
+            matches!(f.queue.begin_response(&f.current_probe()), Err(error) if error.to_string() == refused)
+        );
+        assert!(
+            matches!(f.queue.take_response(&probe), Err(error) if error.to_string() == refused)
+        );
+        assert_eq!(f.live_ids(), vec![probe.id]);
+    }
 }
 
 #[test]

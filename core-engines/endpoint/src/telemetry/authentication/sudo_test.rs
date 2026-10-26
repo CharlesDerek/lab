@@ -140,6 +140,7 @@ fn native_sudo_denials_preserve_module_scope_identity_and_replay() {
         .endpoint_observations(&endpoint_id, i64::MAX as u64, 64)
         .unwrap();
     assert_eq!(observations.len(), 25);
+    let mut nonempty_remote_user_controls = 0;
     for row in &observations {
         let Some(Telemetry::Authentication { event }) = &row.event.telemetry else {
             panic!("Missing original authentication");
@@ -161,11 +162,55 @@ fn native_sudo_denials_preserve_module_scope_identity_and_replay() {
             "_COMM":"sudo","MESSAGE":event.journal.message}),"fixture-journal",now_ms()).unwrap();
         assert_eq!(local.kind, Kind::Authentication);
         assert_eq!(local.outcome, expected);
+        assert!(
+            Some(local.subject.as_str()) == event.claimed_user.as_deref(),
+            "Local sudo/PAM claimed identity differs from the endpoint user field"
+        );
+        if event.mechanism == "pam_unix" {
+            let fields = event
+                .journal
+                .message
+                .split_once(" authentication failure;")
+                .expect("Native sudo PAM field boundary missing")
+                .1
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            assert!(
+                fields
+                    .iter()
+                    .filter_map(|field| field.strip_prefix("user="))
+                    .collect::<Vec<_>>()
+                    == ["fixture"],
+                "Native sudo PAM user field changed"
+            );
+            assert!(
+                fields
+                    .iter()
+                    .filter_map(|field| field.strip_prefix("ruser="))
+                    .collect::<Vec<_>>()
+                    == ["fixture"],
+                "Native nonempty remote-user control missing"
+            );
+            assert!(
+                fields.iter().position(|field| field.starts_with("ruser="))
+                    < fields.iter().position(|field| field.starts_with("user=")),
+                "Native sudo PAM field-order control missing"
+            );
+            assert!(
+                event.service_outcome().is_none() && local.outcome == Outcome::Observe,
+                "Native sudo PAM module report became a service result"
+            );
+            nonempty_remote_user_controls += 1;
+        }
         assert!(events
             .iter()
             .any(|original| serde_json::to_value(original).unwrap()
                 == serde_json::to_value(&row.event).unwrap()));
     }
+    assert!(
+        nonempty_remote_user_controls == 17,
+        "Native nonempty remote-user control count changed"
+    );
     drop(collector);
     drop(store);
     let store = Store::open(&state).unwrap();

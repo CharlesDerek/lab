@@ -3,7 +3,11 @@ use super::{
     native_test::{queued, until},
     *,
 };
-use athernex_siem::{engine::Engine, model::Outcome};
+use athernex_siem::{
+    collector,
+    engine::Engine,
+    model::{Kind, Outcome},
+};
 use std::process::{Command, Stdio};
 
 fn stack(mode: &str) {
@@ -188,6 +192,7 @@ fn native_pam_preserves_module_scope_and_resumes_after_full_queue_restart() {
             .any(|f| f.rule == "AX-001"),
         "Module failures preceding successful PAM fallback must not create a denied-login burst"
     );
+    let mut empty_remote_user_controls = 0;
     for row in engine
         .endpoint_observations(&endpoint_id, i64::MAX as u64, 64)
         .unwrap()
@@ -199,12 +204,65 @@ fn native_pam_preserves_module_scope_and_resumes_after_full_queue_restart() {
         if event.mechanism == "pam_unix" {
             assert_eq!(normalized.event.outcome, Outcome::Observe);
             assert!(normalized.context.unwrap().summary.contains("module"));
+            // These are real SSH/PAM module reports. The empty ruser field
+            // preceding user must not hide the module's claimed account.
+            let fields = event
+                .journal
+                .message
+                .split_once(" authentication failure;")
+                .expect("Native PAM field boundary missing")
+                .1
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            assert!(
+                fields
+                    .iter()
+                    .filter_map(|field| field.strip_prefix("user="))
+                    .collect::<Vec<_>>()
+                    == ["fixture"],
+                "Native PAM user field changed"
+            );
+            assert!(
+                fields
+                    .iter()
+                    .filter_map(|field| field.strip_prefix("ruser="))
+                    .collect::<Vec<_>>()
+                    == [""],
+                "Native empty remote-user control missing"
+            );
+            assert!(
+                fields.iter().position(|field| field.starts_with("ruser="))
+                    < fields.iter().position(|field| field.starts_with("user=")),
+                "Native PAM field-order control missing"
+            );
+            assert!(
+                event.claimed_user.as_deref() == Some("fixture")
+                    && event.service_outcome().is_none(),
+                "Native PAM claimed identity or scope changed"
+            );
+            let local = collector::normalize(&serde_json::json!({"__CURSOR":event.journal.cursor,
+                "__REALTIME_TIMESTAMP":event.journal.realtime_us.to_string(),"_EXE":event.journal.executable,
+                "_UID":event.journal.reporter_uid.to_string(),"_PID":event.journal.reporter_pid.to_string(),
+                "MESSAGE":event.journal.message}), "fixture-journal", now_ms()).unwrap();
+            assert!(
+                local.kind == Kind::Authentication && local.outcome == Outcome::Observe,
+                "Local PAM module report became a service result"
+            );
+            assert!(
+                Some(local.subject.as_str()) == event.claimed_user.as_deref(),
+                "Local PAM claimed identity differs from the exact endpoint user field"
+            );
+            empty_remote_user_controls += 1;
         }
         assert!(events
             .iter()
             .any(|expected| serde_json::to_value(expected).unwrap()
                 == serde_json::to_value(&row.event).unwrap()));
     }
+    assert!(
+        empty_remote_user_controls == 9,
+        "Native empty remote-user control count changed"
+    );
     println!("Verified real PAM module failure plus SSH denial, full-queue cursor retention across restart, exact admission after capacity returns, and eight successful fallback logins without a false denial burst");
     drop(collector);
 }
