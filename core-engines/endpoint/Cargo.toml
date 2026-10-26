@@ -7,6 +7,8 @@ rust-version = "1.89"
 [dependencies]
 athernex-endpoint-protocol = { path = "../endpoint-protocol" }
 athernex-endpoint-native = { path = "../endpoint-native" }
+athernex-macos-network = { path = "../macos-network" }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

@@ -74,3 +74,10 @@ Git hosting APIs bypass local hooks, so API publication must perform these check
 against the exact outgoing tree before uploading any objects. CI runs after upload
 and cannot prevent an initial disclosure. These checks supplement human review;
 they cannot determine whether every arbitrary document contains private information.
+
+Generated macOS `.app` and `.systemextension` bundles are private deployment
+outputs, including text metadata beneath those paths. The committed-tree checker
+rejects those path components case-insensitively and rejects `.mobileprovision`
+and `.provisionprofile` files even if force-added. Keep approved signing identities,
+app-group values and provisioning material in private release inputs. Source
+`.plist.in` templates and synthetic public tests remain reviewable source files.

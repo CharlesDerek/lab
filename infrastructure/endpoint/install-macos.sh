@@ -6,14 +6,27 @@ umask 077
 chmod 700 ./athernex-endpoint
 native_hash=''
 native_check=''
+native_pending=''
+network_check=''
+trap '[ -z "$native_check" ] || rm -rf -- "$native_check"; [ -z "$native_pending" ] || rm -f -- "$native_pending"; [ -z "$network_check" ] || rm -rf -- "$network_check"' EXIT
+trap 'exit 1' HUP INT TERM
+if [ -e ./macos-network.required ]; then
+  network_hash=$(./athernex-endpoint installer-network-hash ./release.json)
+  [ -n "$network_hash" ] || { echo 'Required network metadata is missing.' >&2; exit 1; }
+  [ -f ./macos-network.zip ] || { echo 'Required network archive is missing.' >&2; exit 1; }
+  network_check=$(mktemp -d /private/tmp/athernex-network.XXXXXXXX)
+  # Fixed upper read bounds; validation rejects truncation, changes and overflows.
+  dd if=./macos-network.zip of="$network_check/network.zip" bs=1048576 count=65 2>/dev/null
+  dd if=./release.json of="$network_check/release.json" bs=16384 count=2 2>/dev/null
+  ./athernex-endpoint installer-network-check "$network_check/network.zip" "$network_check/release.json"
+elif [ -e ./macos-network.zip ]; then
+  echo 'The network archive is not declared in this release.' >&2; exit 1
+fi
 if [ -e ./native-adapter.required ]; then
   native_hash=$(./athernex-endpoint installer-native-hash ./release.json)
   [ -n "$native_hash" ] || { echo 'Native adapter metadata is missing.' >&2; exit 1; }
   [ -f ./athernex-endpoint-native ] || { echo 'The declared native adapter is missing.' >&2; exit 1; }
   native_check=$(mktemp -d /private/tmp/athernex-native.XXXXXXXX)
-  native_pending=''
-  trap 'rm -rf -- "$native_check"; [ -z "$native_pending" ] || rm -f -- "$native_pending"' EXIT
-  trap 'exit 1' HUP INT TERM
   native_sum=$(/usr/bin/shasum -a 256 ./athernex-endpoint-native)
   [ "${native_sum%% *}" = "$native_hash" ] || { echo 'Native adapter checksum mismatch.' >&2; exit 1; }
   cp ./athernex-endpoint-native "$native_check/adapter"
@@ -57,6 +70,9 @@ if [ -n "$native_hash" ]; then
   /Library/AthernexEndpoint/athernex-endpoint configure-macos-process-adapter /Library/AthernexEndpoint/state /Library/AthernexEndpoint/athernex-endpoint-native "$native_hash"
   /Library/AthernexEndpoint/athernex-endpoint configure-macos-authentication-adapter /Library/AthernexEndpoint/state /Library/AthernexEndpoint/athernex-endpoint-native "$native_hash"
 fi
+if [ -n "$network_check" ]; then
+  /Library/AthernexEndpoint/athernex-endpoint install-macos-network-bundle /Library/AthernexEndpoint/state "$network_check/network.zip" "$network_check/release.json"
+fi
 /Library/AthernexEndpoint/athernex-endpoint provision-antivirus ./bootstrap.json /Library/AthernexEndpoint/state
 if [ -n "$native_hash" ]; then
   /Library/AthernexEndpoint/athernex-endpoint configure-native-protection /Library/AthernexEndpoint/state /Library/AthernexEndpoint/athernex-endpoint-native
@@ -77,4 +93,8 @@ rm -- ./bootstrap.json
 echo 'Installed. Configure ClamAV paths and approved folders in /Library/AthernexEndpoint/state/config.json. Existing protection is preserved.'
 if [ -n "$native_hash" ]; then
   echo 'Native scanner setup is prepared. The controller starts enabled protection; Endpoint Security authorization and Full Disk Access must be granted on this Mac. Native real-time protection remains unverified until live blocking is proven.'
+fi
+
+if [ -n "$network_check" ]; then
+  echo 'The approved network app is installed and pinned; existing collection policy is preserved. Installation does not enable collection. Activate the owned extension explicitly, grant required OS/MDM approval, then enable macos_network_events. Stopping the endpoint consumer does not disable the OS provider. Use the container disable action to stop its filtering configuration.'
 fi

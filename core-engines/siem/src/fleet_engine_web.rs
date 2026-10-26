@@ -508,6 +508,16 @@ async fn portal(
                 .iter()
                 .position(|id| id == &member.endpoint_id)
                 .and_then(|index| plan.gates.get(index))
+                .is_some_and(|gate| gate.macos_network_events)
+            {
+                html.push_str("<p>Required: healthy macOS network metadata pipeline with the reviewed source policy; Other network or process sources cannot replace it.</p>");
+            }
+            if plan
+                .request
+                .endpoint_ids
+                .iter()
+                .position(|id| id == &member.endpoint_id)
+                .and_then(|index| plan.gates.get(index))
                 .is_some_and(|gate| gate.windows_process_events)
             {
                 html.push_str("<p>Required: healthy Windows ETW process coverage; Linux process coverage cannot replace this source.</p>");

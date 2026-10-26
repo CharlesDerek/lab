@@ -343,6 +343,7 @@ fn engine_rollouts_keep_the_reviewed_authentication_requirement() {
                 windows_process_events: None,
                 macos_process_events: None,
                 macos_authentication: None,
+                macos_network_events: None,
                 windows_network_events: None,
                 windows_authentication: windows.then_some(healthy.clone()),
                 mode: "snapshot".into(),
@@ -928,6 +929,158 @@ fn engine_rollouts_pin_macos_authentication_coverage_and_stop_after_a_gap() {
             .as_mut()
             .unwrap()
             .scope_checked_ms = NOW + 60_010;
+        for index in 0..3 {
+            f.beat(index, index == 0, NOW + 60_010);
+        }
+        f.engine.tick_engine_rollouts(NOW + 60_010).unwrap();
+        let record = f.engine.engine_rollout(&id).unwrap();
+        assert_eq!(record.state, "failed");
+        assert_eq!(record.plan_hash, pinned_hash);
+        assert!(record.members[1..]
+            .iter()
+            .all(|member| member.deployment_id.is_none()));
+    }
+}
+
+#[test]
+fn engine_rollouts_pin_macos_network_events_coverage_and_stop_after_a_gap() {
+    for failure in 0..8 {
+        let mut f = Fixture::for_platform(Platform::Macos, "aarch64");
+        f.health.collector = Some(p::telemetry::CollectorHealth {
+            mode: "snapshot".into(),
+            last_attempt_ms: NOW,
+            last_success_ms: NOW,
+            macos_network_events: Some(p::macos_network_events::MacosNetworkEventHealth {
+                stream_id: "c".repeat(64),
+                state: "active".into(),
+                source_policy_sha256: p::macos_network_events::source_policy_sha256(),
+
+                started_ms: NOW - 60_000,
+                checked_ms: NOW,
+
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        for index in 0..3 {
+            f.beat(index, false, NOW);
+        }
+        let id = f.propose();
+        assert!(f
+            .engine
+            .engine_rollout(&id)
+            .unwrap()
+            .plan
+            .gates
+            .iter()
+            .all(|gate| gate.macos_network_events
+                && !gate.network_events
+                && !gate.windows_network_events
+                && !gate.macos_authentication
+                && !gate.process_events
+                && !gate.authentication
+                && !gate.windows_authentication
+                && !gate.macos_process_events
+                && gate.macos_network_policy_sha256.as_deref()
+                    == Some(p::macos_network_events::source_policy_sha256().as_str())));
+        let pinned_hash = f.engine.engine_rollout(&id).unwrap().plan_hash;
+        f.review(&id, "approve", NOW);
+        f.engine.tick_engine_rollouts(NOW).unwrap();
+        f.install(0, "installed", NOW + 1);
+        f.beat(0, true, NOW + 2);
+        let mut bad = f.health.clone();
+        let collector = bad.collector.as_mut().unwrap();
+        let other_auth = p::authentication::AuthenticationHealth {
+            state: "active".into(),
+            started_ms: NOW,
+            checked_ms: NOW,
+            caught_up: true,
+            ..Default::default()
+        };
+        collector.authentication = Some(other_auth.clone());
+        collector.windows_authentication = Some(other_auth);
+        collector.windows_network_events =
+            Some(p::windows_network_events::WindowsNetworkEventHealth {
+                stream_id: "b".repeat(64),
+                state: "active".into(),
+                started_ms: NOW,
+                checked_ms: NOW,
+                subscriptions: 1,
+                ..Default::default()
+            });
+        collector.macos_process_events = Some(p::macos_process_events::MacosProcessEventHealth {
+            stream_id: "d".repeat(64),
+            state: "active".into(),
+            source_policy_sha256: p::macos_process_events::source_policy_sha256(),
+            started_ms: NOW,
+            checked_ms: NOW,
+            scope_checked_ms: NOW,
+            mute_snapshot_sha256: "e".repeat(64),
+            subscriptions: 3,
+            ..Default::default()
+        });
+        let macos_auth = p::macos_authentication::MacosAuthenticationHealth {
+            stream_id: "a".repeat(64),
+            state: "active".into(),
+            source_policy_sha256: p::macos_authentication::source_policy_sha256(),
+            started_ms: NOW,
+            checked_ms: NOW,
+            scope_checked_ms: NOW,
+            mute_snapshot_sha256: "e".repeat(64),
+            subscriptions: 1,
+            ..Default::default()
+        };
+        assert!(macos_auth.healthy(NOW));
+        collector.macos_authentication = Some(macos_auth);
+        let linux_network = p::network_events::NetworkEventHealth {
+            boot_id: "a".repeat(64),
+            stream_id: "b".repeat(64),
+            namespace: 42,
+            families: vec![4, 6],
+            state: "active".into(),
+            started_ms: NOW,
+            checked_ms: NOW,
+            source_checked_ms: NOW,
+            received_events: 0,
+            skipped_protocols: 0,
+            dropped_events: 0,
+            loss_signals: 0,
+            subscriptions: 1,
+            error: String::new(),
+        };
+        assert!(linux_network.healthy(NOW));
+        collector.network_events = Some(linux_network);
+        if failure == 0 {
+            collector.macos_network_events = None;
+        } else {
+            let source = collector.macos_network_events.as_mut().unwrap();
+            match failure {
+                1 => source.loss_signals = 1,
+                2 => source.checked_ms = NOW - 30_001,
+                3 => source.source_policy_sha256 = "f".repeat(64),
+                4 => source.backpressured = true,
+                5 => source.restarts = 1,
+                6 => source.transport_errors = 1,
+                _ => {
+                    source.loss_signals = 1;
+                    source.state = "active".into();
+                    source.error.clear();
+                }
+            }
+        }
+        f.engine
+            .endpoint_heartbeat(&f.ids[0], &bad, NOW + 3)
+            .unwrap();
+        let record = f.engine.engine_rollout(&id).unwrap();
+        assert_eq!(record.state, "failed");
+        assert_eq!(record.plan_hash, pinned_hash);
+        assert!(record.members[1..]
+            .iter()
+            .all(|member| member.deployment_id.is_none()));
+        let collector = f.health.collector.as_mut().unwrap();
+        collector.last_attempt_ms = NOW + 60_010;
+        collector.last_success_ms = NOW + 60_010;
+        collector.macos_network_events.as_mut().unwrap().checked_ms = NOW + 60_010;
         for index in 0..3 {
             f.beat(index, index == 0, NOW + 60_010);
         }

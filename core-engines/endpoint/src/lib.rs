@@ -4,6 +4,7 @@ pub mod engine_update;
 pub mod guardian;
 #[cfg(any(windows, test))]
 pub mod installer;
+pub mod macos_network_bundle;
 pub mod managed_engine;
 pub mod managed_update;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -166,6 +167,7 @@ pub struct Store {
     pub(crate) windows_process_events_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) macos_process_events_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) macos_authentication_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) macos_network_events_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) windows_network_events_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
     _lock: Option<StateLock>,
 }
@@ -208,6 +210,7 @@ impl Store {
             windows_process_events_live: Default::default(),
             macos_process_events_live: Default::default(),
             macos_authentication_live: Default::default(),
+            macos_network_events_live: Default::default(),
             windows_network_events_live: Default::default(),
             _lock: Some(lock),
         })
@@ -232,6 +235,7 @@ impl Store {
             windows_process_events_live: self.windows_process_events_live.clone(),
             macos_process_events_live: self.macos_process_events_live.clone(),
             macos_authentication_live: self.macos_authentication_live.clone(),
+            macos_network_events_live: self.macos_network_events_live.clone(),
             windows_network_events_live: self.windows_network_events_live.clone(),
             _lock: None,
         })

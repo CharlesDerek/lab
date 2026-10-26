@@ -45,6 +45,10 @@ pub struct HealthGate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macos_authentication_policy_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub macos_network_events: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macos_network_policy_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub windows_network_events: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub authentication: bool,
@@ -205,6 +209,22 @@ pub(crate) fn healthy(health: &Heartbeat, gate: &HealthGate, now: u64) -> bool {
             .collector
             .as_ref()
             .and_then(|c| c.macos_authentication.as_ref())
+            .is_none_or(|h| h.healthy(now))
+        && (!gate.macos_network_events
+            || health
+                .collector
+                .as_ref()
+                .and_then(|c| c.macos_network_events.as_ref())
+                .is_some_and(|h| {
+                    h.healthy(now)
+                        && gate.macos_network_policy_sha256.as_ref()
+                            == Some(&h.source_policy_sha256)
+                }))
+        && (gate.macos_network_events || gate.macos_network_policy_sha256.is_none())
+        && health
+            .collector
+            .as_ref()
+            .and_then(|c| c.macos_network_events.as_ref())
             .is_none_or(|h| h.healthy(now))
         && (!gate.windows_process_events
             || health
@@ -446,6 +466,15 @@ impl Engine {
                     .collector
                     .as_ref()
                     .and_then(|c| c.macos_authentication.as_ref())
+                    .map(|h| h.source_policy_sha256.clone()),
+                macos_network_events: health
+                    .collector
+                    .as_ref()
+                    .is_some_and(|c| c.macos_network_events.is_some()),
+                macos_network_policy_sha256: health
+                    .collector
+                    .as_ref()
+                    .and_then(|c| c.macos_network_events.as_ref())
                     .map(|h| h.source_policy_sha256.clone()),
                 windows_process_events: health
                     .collector
@@ -828,6 +857,8 @@ mod native_coverage_tests {
             windows_process_events: false,
             macos_process_events: false,
             macos_process_policy_sha256: None,
+            macos_network_events: false,
+            macos_network_policy_sha256: None,
             macos_authentication: false,
             macos_authentication_policy_sha256: None,
             windows_network_events: false,
@@ -1186,6 +1217,82 @@ mod native_coverage_tests {
         restored.state = "active".into();
         restored.error.clear();
         health.collector.as_mut().unwrap().macos_authentication = Some(restored);
+        assert!(!healthy(&health, &gate, now));
+        assert!(!healthy(&health, &legacy, now));
+    }
+    #[test]
+    fn macos_network_events_source_policy_is_independent_and_keeps_legacy_plans() {
+        use protocol::macos_network_events::{source_policy_sha256, MacosNetworkEventHealth};
+        let now = 1_800_000_000_000;
+        let raw = r#"{"protection_fingerprint":null,"collector":true,"signatures":false}"#;
+        let legacy: HealthGate = serde_json::from_str(raw).unwrap();
+        assert!(!legacy.macos_network_events);
+        assert!(legacy.macos_network_policy_sha256.is_none());
+        assert_eq!(serde_json::to_string(&legacy).unwrap(), raw);
+        let gate = HealthGate {
+            macos_network_events: true,
+            macos_network_policy_sha256: Some(source_policy_sha256()),
+            ..legacy.clone()
+        };
+        let mut health = Heartbeat {
+            version: "fixture".into(),
+            capabilities: vec![],
+            scanner: String::new(),
+            realtime: false,
+            signature_version: String::new(),
+            spool_events: 0,
+            error: String::new(),
+            protection: None,
+            updates: None,
+            controller_updates: None,
+            collector: Some(CollectorHealth {
+                mode: "snapshot".into(),
+                last_attempt_ms: now,
+                last_success_ms: now,
+                windows_process_events: Some(
+                    protocol::windows_process_events::WindowsProcessEventHealth {
+                        stream_id: "a".repeat(64),
+                        state: "active".into(),
+                        started_ms: now,
+                        checked_ms: now,
+                        subscriptions: 1,
+
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            }),
+        };
+        assert!(healthy(&health, &legacy, now));
+        assert!(!healthy(&health, &gate, now));
+        let source = MacosNetworkEventHealth {
+            stream_id: "b".repeat(64),
+            state: "active".into(),
+            source_policy_sha256: source_policy_sha256(),
+            started_ms: now,
+            checked_ms: now,
+
+            ..Default::default()
+        };
+        health.collector.as_mut().unwrap().macos_network_events = Some(source.clone());
+        assert!(healthy(&health, &gate, now));
+        let mut no_policy = gate.clone();
+        no_policy.macos_network_policy_sha256 = None;
+        assert!(!healthy(&health, &no_policy, now));
+        let mut wrong_policy = gate.clone();
+        wrong_policy.macos_network_policy_sha256 = Some("d".repeat(64));
+        assert!(!healthy(&health, &wrong_policy, now));
+        let mut changed_scope = source.clone();
+        changed_scope.received_records = 1;
+        changed_scope.pending_records = 1;
+        changed_scope.pending_bytes = 200;
+        health.collector.as_mut().unwrap().macos_network_events = Some(changed_scope);
+        assert!(healthy(&health, &gate, now));
+        let mut restored = source;
+        restored.loss_signals = 1;
+        restored.state = "active".into();
+        restored.error.clear();
+        health.collector.as_mut().unwrap().macos_network_events = Some(restored);
         assert!(!healthy(&health, &gate, now));
         assert!(!healthy(&health, &legacy, now));
     }

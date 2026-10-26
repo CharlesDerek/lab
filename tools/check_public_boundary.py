@@ -17,8 +17,10 @@ PRIVATE_DIRS = {
     ".terraform", "target", "node_modules", "__pycache__", "logs", "tmp", "temp",
 }
 PRIVATE_NAMES = {"AGENTS.md", "CODEX.md", "CLAUDE.md", "GEMINI.md", ".mrgi", ".gitleaksignore"}
+PRIVATE_BUNDLE_SUFFIXES = (".app", ".systemextension")
 PRIVATE_GLOBS = (
     "*.pem", "*.key", "*.pk8", "*.p8", "*.crt", "*.p12", "*.pfx", "*.jks", "*.keystore",
+    "*.mobileprovision", "*.provisionprofile",
     "*.log", "*.db", "*.db-*", "*.sqlite", "*.sqlite3", "*.sqlite-*",
     "*.tfstate", "*.tfstate.*", "*kubeconfig*", "*.pyc",
     "*.exe", "*.dll", "*.sys", "*.zip", "*.tar", "*.gz", "*.dmp", "*.pcap",
@@ -101,6 +103,7 @@ def check_tree(repo, ref):
         count += 1
         if (
             any(part in PRIVATE_DIRS for part in parts[:-1])
+            or any(part.lower().endswith(PRIVATE_BUNDLE_SUFFIXES) for part in parts)
             or name in PRIVATE_NAMES
             or (name.startswith(".env") and name != ".env.example")
             or any(fnmatch.fnmatch(name.lower(), pattern) for pattern in PRIVATE_GLOBS)

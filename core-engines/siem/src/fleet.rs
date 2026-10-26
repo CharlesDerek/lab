@@ -47,6 +47,26 @@ pub(crate) fn windows_process_change(
     }
 }
 
+pub(crate) fn macos_network_protocol(
+    value: &protocol::macos_network_events::MacosNetworkProtocol,
+) -> &'static str {
+    use protocol::macos_network_events::MacosNetworkProtocol;
+    match value {
+        MacosNetworkProtocol::Undetermined => "Undetermined (reported protocol 0)",
+        MacosNetworkProtocol::Tcp => "TCP",
+        MacosNetworkProtocol::Udp => "UDP",
+    }
+}
+pub(crate) fn macos_network_direction(
+    value: &protocol::macos_network_events::MacosNetworkDirection,
+) -> &'static str {
+    use protocol::macos_network_events::MacosNetworkDirection;
+    match value {
+        MacosNetworkDirection::Unspecified => "Unspecified",
+        MacosNetworkDirection::Inbound => "Inbound",
+        MacosNetworkDirection::Outbound => "Outbound",
+    }
+}
 pub(crate) fn windows_network_operation(
     operation: &protocol::windows_network_events::WindowsNetworkOperation,
 ) -> &'static str {
@@ -389,6 +409,10 @@ impl Engine {
                 Some(Telemetry::WindowsProcessEvent { event }) => Some(event),
                 _ => None,
             };
+            let macos_network = match &event.telemetry {
+                Some(Telemetry::MacosNetworkEvent { event }) => Some(event),
+                _ => None,
+            };
             let windows_network = match &event.telemetry {
                 Some(Telemetry::WindowsNetworkEvent { event }) => Some(event),
                 _ => None,
@@ -473,6 +497,10 @@ impl Engine {
                     macos_process_change(&process.change)
                 );
             }
+            if let Some(network) = macos_network {
+                context.program = "macOS NetworkExtension metadata".into();
+                context.summary = format!("macOS {} new-flow observation; initial direction {}. Collector receipt time/order only; reported endpoints and separate app/process tokens do not establish delivery, firewall outcome, process ownership or complete lifetimes. Upstream OS loss accounting is unavailable; retained projection only", macos_network_protocol(&network.protocol), macos_network_direction(&network.direction));
+            }
             if let Some(network) = windows_network {
                 context.program = "Windows kernel network ETW".into();
                 context.pid = Some(network.reported_pid);
@@ -493,6 +521,9 @@ impl Engine {
                     .source_ip
                     .map(|ip| ip.to_string())
                     .unwrap_or_else(|| "local-authentication".into()),
+                Some(Telemetry::MacosNetworkEvent { event }) => protocol::hash(
+                    format!("{id}:macos-network-observation:{}", event.event_id()).as_bytes(),
+                ),
                 Some(Telemetry::MacosAuthentication { event }) => protocol::hash(
                     format!("{id}:macos-authentication-object:{}", event.event_id()).as_bytes(),
                 ),
@@ -571,6 +602,13 @@ impl Engine {
                             )
                         })
                     })
+                    .or_else(|| {
+                        macos_network.map(|n| {
+                            protocol::hash(
+                                format!("{id}:macos-network-subject:{}", n.event_id()).as_bytes(),
+                            )
+                        })
+                    })
                     .unwrap_or_else(|| {
                         process
                             .and_then(|p| p.user_id.as_ref())
@@ -584,7 +622,10 @@ impl Engine {
                     | "process_event"
                     | "windows_process_event"
                     | "macos_process_event" => Kind::Process,
-                    "connection" | "network_event" | "windows_network_event" => Kind::Network,
+                    "connection"
+                    | "network_event"
+                    | "windows_network_event"
+                    | "macos_network_event" => Kind::Network,
                     "authentication" => Kind::Authentication,
                     _ => Kind::System,
                 },

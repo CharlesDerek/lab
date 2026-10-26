@@ -703,6 +703,7 @@ fn installer_checks_artifact_integrity_and_contains_platform_bootstrap() {
     std::fs::write(dir.path().join("athernex-endpoint-linux-x86_64"), binary).unwrap();
     let artifact = athernex_siem::fleet_web::Artifact {
         native_adapter: None,
+        macos_network: None,
         target: "linux-x86_64".into(),
         version: "fixture".into(),
         sha256: p::hash(binary),
@@ -758,6 +759,7 @@ fn macos_installer_binds_the_optional_native_adapter_to_architecture_and_catalog
             version: "fixture".into(),
             sha256: p::hash(main),
             signing: "native-signature-verified".into(),
+            macos_network: None,
             native_adapter: Some(NativeArtifact {
                 backend: "macos-endpoint-security".into(),
                 sha256: p::hash(&adapter),
@@ -847,6 +849,7 @@ fn native_adapter_metadata_cannot_claim_unsigned_or_wrong_platform_components() 
             version: "fixture".into(),
             sha256: "a".repeat(64),
             signing: main_signing.into(),
+            macos_network: None,
             native_adapter: Some(NativeArtifact {
                 backend: backend.into(),
                 sha256: "b".repeat(64),
@@ -1073,4 +1076,130 @@ async fn pam_module_failures_remain_original_evidence_without_becoming_service_d
     let html = std::str::from_utf8(&bytes).unwrap();
     assert!(html.contains("Module failure; service outcome not reported"));
     assert!(html.contains("pam_unix(sshd:auth): authentication failure;"));
+}
+
+#[test]
+fn macos_network_bundle_binds_marker_hash_size_and_combined_component_budget() {
+    use athernex_siem::fleet_web::{Artifact, NativeArtifact};
+    use p::installer::MacosNetworkArtifact;
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let target = "macos-aarch64";
+    let main = b"controlled management bytes";
+    let archive = b"opaque archive fixture; target installer owns internal validation";
+    let mut native = vec![0u8; 64];
+    native[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+    native[4..8].copy_from_slice(&0x100000cu32.to_le_bytes());
+    std::fs::write(dir.path().join(format!("athernex-endpoint-{target}")), main).unwrap();
+    std::fs::write(
+        dir.path()
+            .join(format!("athernex-endpoint-native-{target}")),
+        &native,
+    )
+    .unwrap();
+    let network_path = dir
+        .path()
+        .join(format!("athernex-macos-network-{target}.zip"));
+    std::fs::write(&network_path, archive).unwrap();
+    let descriptor = MacosNetworkArtifact {
+        schema: 1,
+        backend: "macos-network-extension".into(),
+        signing: "native-signature-verified".into(),
+        sha256: p::hash(archive),
+        bytes: archive.len() as u64,
+        tree_sha256: "a".repeat(64),
+        container_sha256: "b".repeat(64),
+        provider_sha256: "c".repeat(64),
+        source_policy_sha256: p::macos_network_events::source_policy_sha256(),
+        team_id: "ABCDEFGHIJ".into(),
+        agent_identifier: "test.fixture.agent".into(),
+        container_identifier: "test.fixture.container".into(),
+        provider_identifier: "test.fixture.provider".into(),
+        app_group: "group.test.fixture".into(),
+        mach_service_name: "group.test.fixture.source".into(),
+        provider_cdhashes: vec!["a".repeat(40)],
+    };
+    let mut artifact = Artifact {
+        target: target.into(),
+        version: "fixture".into(),
+        sha256: p::hash(main),
+        signing: "native-signature-verified".into(),
+        native_adapter: Some(NativeArtifact {
+            backend: "macos-endpoint-security".into(),
+            sha256: p::hash(&native),
+            signing: "native-signature-verified".into(),
+        }),
+        macos_network: Some(descriptor.clone()),
+    };
+    let manifest = dir.path().join(format!("{target}.json"));
+    let save = |a: &Artifact| std::fs::write(&manifest, serde_json::to_vec(a).unwrap()).unwrap();
+    save(&artifact);
+    let bootstrap = p::Bootstrap {
+        protocol: 1,
+        server: "https://example.test/".into(),
+        enrollment_token: "a".repeat(64),
+        platform: Platform::Macos,
+        antivirus: vec![],
+    };
+    let bytes = athernex_siem::fleet_web::installer_bundle(dir.path(), target, &bootstrap).unwrap();
+    let mut bundle = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut embedded = Vec::new();
+    bundle
+        .by_name("macos-network.zip")
+        .unwrap()
+        .read_to_end(&mut embedded)
+        .unwrap();
+    assert_eq!(embedded, archive);
+    let mut marker = String::new();
+    bundle
+        .by_name("macos-network.required")
+        .unwrap()
+        .read_to_string(&mut marker)
+        .unwrap();
+    assert_eq!(marker, "1\n");
+    let mut instructions = String::new();
+    bundle
+        .by_name("macos-network.txt")
+        .unwrap()
+        .read_to_string(&mut instructions)
+        .unwrap();
+    assert!(instructions.contains("does not activate"));
+    assert!(instructions.contains("does not stop or uninstall"));
+    for invalid in 0..4 {
+        let mut candidate = descriptor.clone();
+        match invalid {
+            0 => candidate.sha256 = "f".repeat(64),
+            1 => candidate.bytes += 1,
+            2 => candidate.source_policy_sha256 = "f".repeat(64),
+            _ => candidate.signing = "development-unsigned".into(),
+        };
+        artifact.macos_network = Some(candidate);
+        save(&artifact);
+        assert!(
+            athernex_siem::fleet_web::installer_bundle(dir.path(), target, &bootstrap).is_err()
+        );
+    }
+    // Declared network bytes plus management fit alone; the native component
+    // makes the combined budget exceed the cap before reading archive bytes.
+    artifact.macos_network = Some(descriptor.clone());
+    artifact.macos_network.as_mut().unwrap().bytes = 64 * 1024 * 1024 - main.len() as u64;
+    save(&artifact);
+    assert!(
+        athernex_siem::fleet_web::installer_bundle(dir.path(), target, &bootstrap)
+            .unwrap_err()
+            .to_string()
+            .contains("Combined endpoint components")
+    );
+    artifact.macos_network = Some(descriptor);
+    save(&artifact);
+    std::fs::write(&network_path, b"tampered").unwrap();
+    assert!(athernex_siem::fleet_web::installer_bundle(dir.path(), target, &bootstrap).is_err());
+    std::fs::remove_file(&network_path).unwrap();
+    assert!(athernex_siem::fleet_web::installer_bundle(dir.path(), target, &bootstrap).is_err());
+    artifact.macos_network = None;
+    save(&artifact);
+    let bytes = athernex_siem::fleet_web::installer_bundle(dir.path(), target, &bootstrap).unwrap();
+    let mut bundle = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    assert!(bundle.by_name("macos-network.required").is_err());
+    assert!(bundle.by_name("macos-network.zip").is_err());
 }

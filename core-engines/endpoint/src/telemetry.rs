@@ -1,6 +1,7 @@
 //! Bounded native OS snapshots, committed atomically with their durable outbox deltas.
 mod authentication;
 mod macos_authentication;
+mod macos_network_events;
 mod macos_process_events;
 #[cfg(target_os = "macos")]
 mod macos_process_setup;
@@ -94,6 +95,10 @@ pub struct TelemetryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macos_authentication_adapter: Option<MacosAuthenticationAdapter>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub macos_network_events: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macos_network_deployment: Option<crate::macos_network_bundle::Deployment>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub windows_network_events: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linux_network_events: bool,
@@ -111,6 +116,8 @@ impl Default for TelemetryConfig {
             macos_process_adapter: None,
             macos_authentication: false,
             macos_authentication_adapter: None,
+            macos_network_events: false,
+            macos_network_deployment: None,
             windows_network_events: false,
             linux_network_events: false,
         }
@@ -135,6 +142,16 @@ impl TelemetryConfig {
                 || self.macos_authentication_adapter.is_none())
         {
             return Err("Mac authentication collection requires enabled telemetry on macOS and an approved adapter".into());
+        }
+        if let Some(deployment) = &self.macos_network_deployment {
+            deployment.validate()?;
+        }
+        if self.macos_network_events
+            && (!self.enabled
+                || !cfg!(target_os = "macos")
+                || self.macos_network_deployment.is_none())
+        {
+            return Err("Mac network collection requires enabled telemetry on macOS and an approved deployment".into());
         }
         if self.windows_network_events && (!self.enabled || !cfg!(windows)) {
             return Err("Windows network collection requires enabled telemetry on Windows".into());
@@ -488,6 +505,20 @@ pub fn health(store: &Store, config: &TelemetryConfig) -> Result<CollectorHealth
                 "Mac authentication collection is unavailable, stale or has a coverage gap".into()
             });
     }
+    status.macos_network_events = if config.macos_network_events {
+        macos_network_events::health(store)?
+    } else {
+        None
+    };
+    if config.macos_network_events
+        && !status
+            .macos_network_events
+            .as_ref()
+            .is_some_and(|h| h.healthy(now_ms()))
+    {
+        status.incomplete = true;
+        status.error = "Mac network collection is unavailable, stale or has a coverage gap; upstream loss accounting is unavailable".into();
+    }
     status.windows_network_events = if config.windows_network_events {
         windows_network_events::health(store)?
     } else {
@@ -541,6 +572,7 @@ fn item_key(item: &Telemetry) -> Result<String> {
         | Telemetry::WindowsProcessEvent { .. }
         | Telemetry::MacosProcessEvent { .. }
         | Telemetry::MacosAuthentication { .. }
+        | Telemetry::MacosNetworkEvent { .. }
         | Telemetry::WindowsNetworkEvent { .. }
         | Telemetry::Authentication { .. } => {
             return Err("Kernel events must not enter the snapshot comparison cache".into())
@@ -677,6 +709,7 @@ pub fn commit_snapshot(store: &Store, snapshot: &Snapshot) -> Result<CollectorHe
         windows_process_events: None,
         macos_process_events: None,
         macos_authentication: None,
+        macos_network_events: None,
         windows_network_events: None,
         mode: "snapshot".into(),
         last_attempt_ms: now,
@@ -836,6 +869,7 @@ pub struct ContinuousCollector<'a> {
     windows_process_events: Option<windows_process_events::Collector<'a>>,
     macos_process_events: Option<macos_process_events::Collector<'a>>,
     macos_authentication: Option<macos_authentication::Collector<'a>>,
+    macos_network_events: Option<macos_network_events::Collector<'a>>,
     windows_network_events: Option<windows_network_events::Collector<'a>>,
     network: Option<network_events::Collector<'a>>,
     owner: PhantomData<&'a Store>,
@@ -893,6 +927,17 @@ impl<'a> ContinuousCollector<'a> {
         } else {
             None
         };
+        let macos_network_events = if policy.macos_network_events {
+            Some(macos_network_events::Collector::start(
+                store,
+                policy
+                    .macos_network_deployment
+                    .as_ref()
+                    .ok_or("Missing approved Mac network deployment")?,
+            )?)
+        } else {
+            None
+        };
         let windows_network_events = if policy.windows_network_events {
             Some(windows_network_events::Collector::start(store)?)
         } else {
@@ -926,6 +971,7 @@ impl<'a> ContinuousCollector<'a> {
             windows_process_events,
             macos_process_events,
             macos_authentication,
+            macos_network_events,
             windows_network_events,
             network,
             owner: PhantomData,
@@ -953,6 +999,9 @@ impl<'a> ContinuousCollector<'a> {
         }
         if let Some(authentication) = &self.macos_authentication {
             authentication.check()?;
+        }
+        if let Some(events) = &self.macos_network_events {
+            events.check()?;
         }
         if let Some(events) = &self.windows_network_events {
             events.check()?;

@@ -18,6 +18,22 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{fmt::Write as _, io::Write, path::Path as FsPath};
 
+fn macos_network_endpoint(
+    value: Option<&protocol::macos_network_events::MacosNetworkEndpoint>,
+) -> String {
+    value
+        .map(|v| {
+            format!(
+                "{} port {}{}",
+                v.address,
+                v.port,
+                v.scope_id
+                    .map(|n| format!(" scope {n}"))
+                    .unwrap_or_default()
+            )
+        })
+        .unwrap_or_else(|| "Not reported".into())
+}
 fn macos_authentication_token(value: &str) -> String {
     if value.is_empty() {
         return "Empty token".into();
@@ -446,6 +462,23 @@ async fn observations_page(
                     ("Original EVENT_RECORD", "Retained header, buffer context, extended data, payload and QPC clock anchor are included in the original observation JSON".into()),
                 ]);
             }
+            if let protocol::telemetry::Telemetry::MacosNetworkEvent { event } = telemetry {
+                facts.extend([
+                    ("macOS NetworkExtension observation", "New flow; selected metadata only".into()),
+                    ("Reported transport", crate::fleet::macos_network_protocol(&event.protocol).into()),
+                    ("Initial flow direction", crate::fleet::macos_network_direction(&event.direction).into()),
+                    ("Raw socket family / type / protocol", format!("{} / {} / {}", event.original.socket_family, event.original.socket_type, event.original.socket_protocol)),
+                    ("Reported local endpoint", macos_network_endpoint(event.local.as_ref())),
+                    ("Reported remote endpoint", macos_network_endpoint(event.remote.as_ref())),
+                    ("Source application audit token (hex)", event.original.source_app_audit_token_hex.clone().unwrap_or_else(|| "Not reported".into())),
+                    ("Creator process audit token (hex)", event.original.source_process_audit_token_hex.clone().unwrap_or_else(|| "Not reported".into())),
+                    ("Reported flow UUID", event.original.flow_id.clone()),
+                    ("Provider stream", event.original.stream_id.clone()),
+                    ("Collector admission ordinal", event.original.receipt_sequence.to_string()),
+                    ("Time and identity qualification", "Collector receipt time and serialized admission order, not kernel event time/order. Local/remote are reported roles; tokens remain separate. No delivery, firewall verdict, process ownership or complete connection lifetime is established".into()),
+                    ("Original network projection", "Exact selected metadata is retained in original JSON; packet bytes, URLs and hostnames are excluded. Upstream OS loss accounting is unavailable".into()),
+                ]);
+            }
             if let protocol::telemetry::Telemetry::WindowsNetworkEvent { event } = telemetry {
                 facts.extend([
                     ("Windows ETW operation", crate::fleet::windows_network_operation(&event.operation).into()),
@@ -697,6 +730,9 @@ async fn portal(State(app): State<App>) -> Result<Html<String>, WebError> {
             if let Some(events) = &c.windows_process_events {
                 write!(content,"<p>Windows ETW process events: {} · {} received · {} admitted · {} rejected · {} loss notifications</p><p>Collection began {} UTC. Live source only; collector restarts and gaps have no ETW source replay. Reported identifiers do not establish verified process lifetimes.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_records,events.admitted_records,events.rejected_records,events.loss_signals,crate::render::time(events.started_ms),escape(&events.error)).unwrap();
             }
+            if let Some(events) = &c.macos_network_events {
+                write!(content,"<p>macOS NetworkExtension metadata: {} · {} received · {} admitted · {} excluded · {} rejected · {} loss notifications</p><p>New-flow metadata only. Local pipeline status does not establish absence of upstream OS loss: kernel loss accounting is unavailable. No packet delivery, firewall decision, process ownership or full lifetime is inferred. Provider may outlive the agent; disconnect does not uninstall it. Source policy: <code>{}</code>.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"local pipeline active"},events.received_records,events.admitted_records,events.excluded_records,events.rejected_records,events.loss_signals,escape(&events.source_policy_sha256),escape(&events.error)).unwrap();
+            }
             if let Some(events) = &c.windows_network_events {
                 write!(content,"<p>Windows ETW network events: {} · {} received · {} admitted · {} rejected · {} loss notifications</p><p>Collection began {} UTC. Live TCP/UDP IPv4/IPv6 source only; collector restarts and gaps have no ETW source replay. Reported operations do not establish packet delivery, firewall decisions, executable identity or complete connection lifetimes.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_records,events.admitted_records,events.rejected_records,events.loss_signals,crate::render::time(events.started_ms),escape(&events.error)).unwrap();
             }
@@ -892,7 +928,15 @@ pub fn installer_bundle(
     if std::fs::metadata(&binary_path)?.len() > 64 * 1024 * 1024 {
         return Err("Endpoint artifact exceeds size budget".into());
     }
-    let binary = std::fs::read(binary_path)?;
+    use std::io::Read;
+    let mut binary = Vec::new();
+    std::fs::File::open(binary_path)?
+        .take(64 * 1024 * 1024 + 1)
+        .read_to_end(&mut binary)?;
+    if binary.len() > 64 * 1024 * 1024 {
+        return Err("Endpoint artifact exceeds size budget".into());
+    }
+
     if artifact.target != target || protocol::hash(&binary) != artifact.sha256 {
         return Err("Endpoint build checksum mismatch".into());
     }
@@ -914,6 +958,24 @@ pub fn installer_bundle(
             || protocol::hash(&bytes) != component.sha256
         {
             return Err("Native adapter build integrity or architecture mismatch".into());
+        }
+        Some(bytes)
+    } else {
+        None
+    };
+    let network = if let Some(component) = artifact.network()? {
+        let total = (binary.len() as u64)
+            .checked_add(native.as_ref().map_or(0, |v| v.len()) as u64)
+            .and_then(|n| n.checked_add(component.bytes));
+        if total.is_none_or(|n| n > 64 * 1024 * 1024) {
+            return Err("Combined endpoint components exceed size budget".into());
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(root.join(format!("athernex-macos-network-{target}.zip")))?
+            .take(component.bytes + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != component.bytes || protocol::hash(&bytes) != component.sha256 {
+            return Err("macOS network archive build checksum or size mismatch".into());
         }
         Some(bytes)
     } else {
@@ -942,6 +1004,11 @@ pub fn installer_bundle(
         entry("athernex-endpoint-native", bytes)?;
         entry("native-adapter.required", b"1\n")?;
         entry("native-adapter.txt", b"This bundle contains a signature-verified macOS Endpoint Security adapter. Setup verifies its hash, signature and entitlement, prepares a dedicated scanner account and runtime, and configures the controller to start native services. Signatures must be provisioned or already configured. Existing local protection policy is preserved, including a disabled policy. Endpoint Security authorization, Full Disk Access and native runtime validation are required on the Mac. Protection remains unverified until live blocking is proven.\n")?;
+    }
+    if let Some(bytes) = &network {
+        entry("macos-network.zip", bytes)?;
+        entry("macos-network.required", b"1\n")?;
+        entry("macos-network.txt", b"Keep this deployment bundle private. Setup verifies the approved macOS network extension archive, signed identities and installed snapshot before changing the owned application. Installation does not activate the extension or enable collection. Activation requires separate user or MDM approval; native acceptance remains unverified. Stopping the agent detaches its consumer and does not stop or uninstall the OS-managed provider.\n")?;
     }
     entry("README.txt",b"Athernex endpoint installer\nEnrollment expires in 15 minutes and registers one device. Keep this bundle private.\nWindows: run install.ps1 as Administrator. Linux/macOS: sudo sh install.sh.\nLinux command cleanup requires permitted pidfd_open and close_range syscalls (mainline Linux 5.9 or later); installation checks these before stopping an existing service.\nIf selected in the portal, setup downloads and verifies ClamAV, installs it, and initializes signatures. Linux also configures a separate on-access prevention service for the local scan roots. Check protection health in the portal. Windows/macOS currently provide scheduled and on-demand scans. Existing AV is preserved.\nRead release.json for signing status; do not treat a development build as a signed production release.\n")?;
     if target.starts_with("windows") {

@@ -49,6 +49,8 @@ fn main() -> Result<()> {
         println!("athernex-endpoint configure-macos-process-adapter STATE_DIR APPROVED_SIGNED_ADAPTER SHA256\nRecords the approved process helper pin with services stopped. This does not enable telemetry or protection and does not require ClamAV. Enable macos_process_events separately in local telemetry policy.");
         #[cfg(target_os = "macos")]
         println!("athernex-endpoint configure-macos-authentication-adapter STATE_DIR APPROVED_SIGNED_ADAPTER SHA256\nRecords the approved authentication helper pin with services stopped. Collection remains disabled. Enable macos_authentication separately on macOS13 or newer; no ClamAV setup is required.");
+        #[cfg(target_os = "macos")]
+        println!("athernex-endpoint install-macos-network-bundle STATE_DIR APPROVED_ARCHIVE RELEASE_JSON\nInstalls the approved network app and records its private pin with services stopped. Existing enablement is preserved; this does not activate the OS extension. Activate the container and enable macos_network_events separately on macOS13 or newer. Stopping the consumer does not stop the provider.");
         return Ok(());
     }
     match args[0].as_str() {
@@ -121,6 +123,36 @@ fn main() -> Result<()> {
                     std::path::Path::new(&args[1])
                 )?)?
             );
+        }
+        "installer-network-hash" if args.len() == 2 => {
+            if let Some(hash) = athernex_endpoint::macos_network_bundle::installer_hash(
+                std::path::Path::new(&args[1]),
+            )? {
+                println!("{hash}");
+            }
+        }
+        #[cfg(target_os = "macos")]
+        "inspect-macos-network-bundle" if args.len() == 3 => {
+            let result = athernex_endpoint::macos_network_bundle::inspect(
+                std::path::Path::new(&args[1]),
+                std::path::Path::new(&args[2]),
+            )?;
+            println!("{}", serde_json::to_string(&result)?);
+        }
+        #[cfg(target_os = "macos")]
+        "installer-network-check" if args.len() == 3 => {
+            athernex_endpoint::macos_network_bundle::preflight(
+                std::path::Path::new(&args[1]),
+                std::path::Path::new(&args[2]),
+            )?;
+        }
+        #[cfg(target_os = "macos")]
+        "install-macos-network-bundle" if args.len() == 4 => {
+            athernex_endpoint::macos_network_bundle::install(
+                std::path::Path::new(&args[1]),
+                std::path::Path::new(&args[2]),
+                std::path::Path::new(&args[3]),
+            )?;
         }
         "installer-native-hash" if args.len() == 2 => {
             if let Some(hash) =
@@ -477,6 +509,7 @@ fn main() -> Result<()> {
                         || config.telemetry.windows_process_events
                         || config.telemetry.macos_process_events
                         || config.telemetry.macos_authentication
+                        || config.telemetry.macos_network_events
                         || config.telemetry.windows_network_events
                         || config.telemetry.linux_network_events
                     {
@@ -502,6 +535,7 @@ fn main() -> Result<()> {
                     || telemetry_policy.windows_process_events
                     || telemetry_policy.macos_process_events
                     || telemetry_policy.macos_authentication
+                    || telemetry_policy.macos_network_events
                     || telemetry_policy.windows_network_events
                     || telemetry_policy.linux_network_events)
             {

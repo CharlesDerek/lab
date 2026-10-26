@@ -1,0 +1,16 @@
+[package]
+name = "athernex-macos-network"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Bounded metadata transport for an independently managed macOS network extension"
+
+[dependencies]
+athernex-endpoint-protocol = { path = "../endpoint-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+getrandom = "0.4"
+
+[build-dependencies]
+cc = "1"

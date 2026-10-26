@@ -772,3 +772,83 @@ behavior under an actual kernel read barrier; it does not execute Apple's
 authorization API or implement a malware decision engine. The native
 CI matrix builds and tests the adapter on Mac runners but does not have signing or
 Endpoint Security permissions provisioned.
+
+## Optional macOS network metadata
+
+The separate `athernex-macos-network` component consumes a macOS13-or-newer
+NetworkExtension data-filter system extension. `macos_network_events` defaults
+to false and requires an approved private `macos_network_deployment` pin. It is
+independent of the Endpoint Security process, authentication and authorization
+helpers; installing this component does not enable any collector or protection.
+
+The finite source profile selects initial socket-flow metadata under explicit
+TCP and UDP rules, with default allow and immediate allow from every new-flow
+callback. It does not inspect packets, URLs, DNS names, app names or byte/end
+reports. IPv4/IPv6 numeric endpoints and numeric scope IDs are optional; unsupported
+endpoint representations produce visible projection refusals without resolution.
+Raw socket protocol zero remains Undetermined. Source app and creator-process
+audit tokens remain distinct optional facts. Receipt time and serialized admission
+order belong to the collector; neither represents kernel event time or loss.
+A flow UUID does not establish complete socket lifetime or current process ownership.
+
+The root agent connects directly through the registered app-group Mach service.
+The provider requires the approved agent signing role and connection effective
+UID zero; the agent also pins the approved provider CodeDirectory hash for its
+platform. Both peers validate code requirements before resuming XPC. The activation
+container has no telemetry-consumer role. Deployment Team IDs, app groups, signing
+identities, provisioning profiles and signed bundles belong in private release
+inputs and catalogs, never this public repository.
+
+Package a separately approved signed app on a matching Mac using
+`tools/package_endpoint.py --require-native-signature --macos-network-app
+/PRIVATE/RELEASE/AthernexNetwork.app --macos-network-identity
+/PRIVATE/RELEASE/network-identity.json`, together with the ordinary binary, target
+and output arguments. The private identity JSON contains `team_id`,
+`agent_identifier`, `container_identifier`, `provider_identifier`, `app_group`
+and `mach_service_name`. The inspector verifies signatures, Gatekeeper acceptance,
+entitlements and the running management binary's app-group compatibility.
+Direct Developer-ID distribution requires the network extension's
+`content-filter-provider-systemextension` entitlement value. Production signing,
+notarization and actual OS approval must be supplied and validated separately.
+
+The installer verifies an immutable bounded archive before stopping services,
+installs only `/Applications/AthernexNetwork.app`, and records the private pin
+under maintenance ownership. It supports first installation and exact idempotent
+reuse. A different existing bundle refuses before service changes; retiring or
+upgrading an active OS-managed provider requires a separately controlled lifecycle.
+It does not replace another application's filter configuration. Required-component
+markers and a management readiness command prevent old installers silently skipping
+the new component. Source templates are public; generated `.app`/`.systemextension`
+bundles and provisioning profiles are blocked by the publication checker.
+
+Activate the approved container explicitly, complete user/MDM approval and any
+requested restart, then enable `macos_network_events` in local telemetry policy.
+Stopping or disabling the endpoint consumer only detaches its XPC connection.
+The OS provider can remain active and retain bounded metadata; use the container's
+explicit disable action to disable its owned filter configuration. Extension
+removal is a separate OS lifecycle operation. Immediate allow describes programmed
+callback behavior, not a guarantee about OS traffic behavior during startup,
+crash, scheduling stalls or deactivation.
+
+Provider queues and the immutable inflight batch share a 2,048-record/8MiB original
+JSON budget; a batch holds at most 64 originals and its control plus body is at most
+1 MiB. Framework decoding/getter allocations precede some application bounds and
+are outside those byte budgets. Each XPC request has a five-second deadline.
+Worker shutdown retains database ownership and joins the worker; filesystem,
+SQLite and OS scheduling stalls prevent a total shutdown wall-clock guarantee.
+
+The agent commits originals, counters and batch identity before ACK. A reconnect
+to the same provider resumes the exact retained batch without duplicate admission.
+A new provider stream records an unknown interval. An empty/reset database cannot
+adopt an already advanced provider ACK frontier as complete history. Local drops,
+projection failures, transport failures, pressure, restart and stale status remain
+visible; upstream kernel loss accounting is explicitly unavailable. The SIEM
+normalizes observations as Network/Observe, keeps authenticated exact exports and
+requires an independent policy-bound health gate when selected for agent,
+controller or engine rollouts. Healthy local delivery does not prove lossless
+network coverage.
+
+Portable tests and hosted SDK compilation do not establish entitled activation,
+real peer authorization, live flow fields, traffic latency or recovery on installed
+Intel/Apple-silicon Macs. Those native acceptance and production release gates
+remain open.

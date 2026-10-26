@@ -37,10 +37,27 @@ elif role=='PlistBuddy':
     if key not in values: sys.exit(1)
     print(str(values[key]).lower())
 elif role in ('athernex-endpoint','athernex-controller'):
-    if args[0]=='installer-native-hash':
+    if args[0]=='installer-network-hash':
+        if case=='network-legacy': sys.exit(19)
+        print(json.loads(Path(args[1]).read_text())['macos_network']['sha256'])
+    elif args[0]=='installer-network-check':
+        if case=='network-check-failure': sys.exit(1)
+        data=Path(args[1]).read_bytes()
+        if hashlib.sha256(data).hexdigest()!=json.loads(Path(args[2]).read_text())['macos_network']['sha256']: sys.exit(1)
+        if case=='network-changed-input': (Path(os.environ['FIXTURE_BUNDLE'])/'macos-network.zip').write_bytes(b'changed after check')
+    elif args[0]=='install-macos-network-bundle':
+        if case=='network-install-failure': sys.exit(1)
+        data=Path(args[2]).read_bytes()
+        if hashlib.sha256(data).hexdigest()!=json.loads(Path(args[3]).read_text())['macos_network']['sha256']: sys.exit(1)
+        (Path(args[1]).parent/'network-installed').write_bytes(data)
+    elif args[0]=='installer-native-hash':
         if case=='legacy': sys.exit(19)
         value=json.loads(Path(args[1]).read_text())['native_adapter']['sha256']
         print(value)
+    elif args[0]=='installer-check':
+        bundle=Path(os.environ['FIXTURE_BUNDLE'])
+        release=json.loads((bundle/'release.json').read_text())
+        if 'macos_network' in release and (not (bundle/'macos-network.required').is_file() or not (bundle/'macos-network.zip').is_file()): sys.exit(1)
     elif args[0]=='enroll': Path(args[2]).mkdir(parents=True,exist_ok=True)
     elif args[0]=='configure-macos-process-adapter' and case=='process-pin-failure': sys.exit(1)
     elif args[0]=='configure-macos-authentication-adapter' and case=='authentication-pin-failure': sys.exit(1)
@@ -77,7 +94,15 @@ class InstallerTests(unittest.TestCase):
             (bundle / 'athernex-endpoint-native').write_bytes(native)
         if case == 'missing-component': (bundle / 'athernex-endpoint-native').unlink()
         if case == 'tampered': (bundle / 'athernex-endpoint-native').write_bytes(b'wrong bytes')
-        (bundle / 'release.json').write_text(json.dumps(dict(native_adapter=dict(sha256=hashlib.sha256(native).hexdigest()))))
+        release=dict(native_adapter=dict(sha256=hashlib.sha256(native).hexdigest()))
+        if case.startswith('network-'):
+            release['macos_network']=dict(sha256=hashlib.sha256(b'private approved network archive').hexdigest())
+            (bundle/'macos-network.required').write_text('1\n')
+            if case!='network-missing': (bundle/'macos-network.zip').write_bytes(b'private approved network archive')
+        if case=='network-both-missing':
+            (bundle/'macos-network.required').unlink()
+            (bundle/'macos-network.zip').unlink()
+        (bundle / 'release.json').write_text(json.dumps(release))
         (bundle / 'bootstrap.json').write_text('{}')
         script = (Path(__file__).resolve().parent.parent / 'infrastructure/endpoint/install-macos.sh').read_text()
         script = script.replace('/Library/',str(root / 'Library')+'/').replace('/private/tmp/',str(root / 'tmp')+'/')
@@ -91,6 +116,35 @@ class InstallerTests(unittest.TestCase):
         result = subprocess.run(['sh',str(path)],env=env,capture_output=True,text=True,timeout=20)
         calls = log.read_text()
         return result,calls,retained,native,installed,bundle,root
+
+    def test_network_snapshot_is_verified_before_services_and_retained_through_input_change(self):
+        result,calls,_,_,installed,bundle,root=self.run_installer('network-changed-input')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertLess(calls.index('"installer-network-check"'),calls.index('"bootout"'))
+        self.assertLess(calls.index('"enroll"'),calls.index('"install-macos-network-bundle"'))
+        self.assertLess(calls.index('"install-macos-network-bundle"'),calls.index('"provision-antivirus"'))
+        self.assertEqual((installed/'network-installed').read_bytes(),b'private approved network archive')
+        self.assertNotEqual((bundle/'macos-network.zip').read_bytes(),b'private approved network archive')
+        self.assertEqual(list((root/'tmp').iterdir()),[])
+        self.assertIn('existing collection policy is preserved',result.stdout)
+        self.assertNotIn('activate',calls)
+
+    def test_missing_unsupported_or_failed_network_validation_cannot_stop_services(self):
+        for case in ['network-missing','network-legacy','network-check-failure','network-both-missing']:
+            with self.subTest(case=case):
+                result,calls,retained,_,_,_,root=self.run_installer(case)
+                self.assertNotEqual(result.returncode,0)
+                self.assertNotIn('"bootout"',calls)
+                self.assertEqual(retained.read_bytes(),b'previous adapter')
+                self.assertEqual(list((root/'tmp').iterdir()),[])
+
+    def test_network_install_failure_cannot_start_services(self):
+        result,calls,_,_,_,bundle,root=self.run_installer('network-install-failure')
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn('"bootstrap"',calls)
+        self.assertNotIn('"provision-antivirus"',calls)
+        self.assertTrue((bundle/'bootstrap.json').exists())
+        self.assertEqual(list((root/'tmp').iterdir()),[])
 
     def test_verified_native_component_is_staged_before_service_changes(self):
         result,calls,retained,native,installed,bundle,root = self.run_installer('valid')

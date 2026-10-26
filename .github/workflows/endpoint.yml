@@ -5,10 +5,15 @@ on:
       - 'core-engines/endpoint/**'
       - 'core-engines/endpoint-protocol/**'
       - 'core-engines/endpoint-native/**'
+      - 'core-engines/macos-network/**'
       - 'core-engines/siem/**'
       - 'infrastructure/endpoint/**'
       - 'tools/package_endpoint.py'
       - 'tools/test_package_endpoint.py'
+      - 'tools/package_macos_network.py'
+      - 'tools/test_package_macos_network.py'
+      - 'tools/build_macos_network.py'
+      - 'tools/test_build_macos_network.py'
       - 'tools/package_engine.py'
       - 'tools/test_package_engine.py'
       - 'tools/verify_engine_update.py'
@@ -563,15 +568,18 @@ jobs:
         timeout-minutes: 20
         env:
           CARGO_PROFILE_TEST_DEBUG: 0
-        run: cargo test --locked --no-fail-fast -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native
+        run: cargo test --locked --no-fail-fast -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native -p athernex-macos-network
       - name: Test native evidence sealing and verified backup recovery
         run: cargo test --locked -p athernex-siem --test storage_segments complete_backup_verifies_and_restores_history
-      - name: Test retained Mac process and authentication observations and independent rollout gates
-        run: cargo test --locked -p athernex-siem --test macos_process_events --test macos_authentication --test endpoint_rollouts --test engine_rollouts
+      - name: Test retained Mac process, authentication and network observations and independent rollout gates
+        run: cargo test --locked -p athernex-siem --test macos_process_events --test macos_authentication --test macos_network_events --test endpoint_rollouts --test engine_rollouts
       - name: Refuse disabled assertions in validation tools and isolated helpers
         run: python tools/test_verification_guards.py -v
       - name: Test artifact packaging with controlled signature results
-        run: python tools/test_package_endpoint.py
+        run: |
+          python tools/test_package_endpoint.py
+          python tools/test_package_macos_network.py
+          python -m unittest tools.test_build_macos_network
       - name: Test bounded engine bundle assembly
         run: python tools/test_package_engine.py
       - name: Test scratch formatter refusals with mocked storage
@@ -582,7 +590,7 @@ jobs:
         if: runner.os != 'Windows'
         run: python tools/test_macos_installer.py
       - name: Lint endpoint
-        run: cargo clippy --locked -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native --all-targets -- -D warnings
+        run: cargo clippy --locked -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native -p athernex-macos-network --all-targets -- -D warnings
       - name: Build native endpoint
         id: native_endpoint_build
         run: cargo build --locked --release -p athernex-endpoint -p athernex-siem
@@ -599,6 +607,9 @@ jobs:
               exit 1
               ;;
           esac
+      - name: Compile unsigned macOS network components and run bounded source controls
+        if: runner.os == 'macOS'
+        run: python3 tools/build_macos_network.py --output "$RUNNER_TEMP/macos-network" --development
       - uses: actions/upload-artifact@v4
         if: runner.os == 'macOS'
         with:

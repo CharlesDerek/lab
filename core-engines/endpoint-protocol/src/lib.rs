@@ -6,6 +6,7 @@ pub mod engine;
 pub mod engine_fleet;
 pub mod installer;
 pub mod macos_authentication;
+pub mod macos_network_events;
 pub mod macos_process_events;
 pub mod network_events;
 pub mod process_events;
@@ -337,6 +338,7 @@ impl EndpointEvent {
                 "windows_process_event",
                 "macos_process_event",
                 "windows_network_event",
+                "macos_network_event",
             ]
             .contains(&self.kind.as_str())
             || self.path.len() > 1024
@@ -398,6 +400,20 @@ impl EndpointEvent {
                     );
                 }
             }
+            if let telemetry::Telemetry::MacosNetworkEvent { event } = telemetry {
+                if self.id != event.event_id() || self.time_ms != event.time_ms {
+                    return Err(
+                        "macOS network envelope does not match original identity/time".into(),
+                    );
+                }
+                if serde_json::to_vec(self)
+                    .map_err(|_| "macOS network envelope serialization failed")?
+                    .len()
+                    > macos_network_events::MAX_SERIALIZED_EVENT_BYTES
+                {
+                    return Err("macOS network envelope exceeds transport budget".into());
+                }
+            }
             if let telemetry::Telemetry::WindowsNetworkEvent { event } = telemetry {
                 if self.id != event.event_id() || self.time_ms != event.time_ms {
                     return Err(
@@ -431,6 +447,7 @@ impl EndpointEvent {
             "windows_process_event",
             "macos_process_event",
             "windows_network_event",
+            "macos_network_event",
         ]
         .contains(&self.kind.as_str())
         {

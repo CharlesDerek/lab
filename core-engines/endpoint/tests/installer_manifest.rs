@@ -22,6 +22,7 @@ fn installer_metadata_command_is_platform_and_binary_bound() {
         sha256: hash(&fs::read(binary).unwrap()),
         signing: "native-signature-verified".into(),
         native_adapter: native,
+        macos_network: None,
     };
     let run = || {
         Command::new(binary)
@@ -112,4 +113,65 @@ fn installer_refuses_unavailable_command_lifetime_monitoring_before_state_change
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("close_range"));
     assert!(!state.exists());
+}
+
+#[test]
+fn network_component_readiness_is_binary_and_platform_bound() {
+    use athernex_endpoint_protocol::installer::MacosNetworkArtifact;
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = directory.path().join("release.json");
+    let binary = env!("CARGO_BIN_EXE_athernex-endpoint");
+    let mut artifact = Artifact {
+        target: target(),
+        version: "fixture".into(),
+        sha256: hash(&fs::read(binary).unwrap()),
+        signing: "native-signature-verified".into(),
+        native_adapter: None,
+        macos_network: None,
+    };
+    let run = || {
+        Command::new(binary)
+            .arg("installer-network-hash")
+            .arg(&manifest)
+            .output()
+            .unwrap()
+    };
+    fs::write(&manifest, serde_json::to_vec(&artifact).unwrap()).unwrap();
+    let output = run();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    artifact.macos_network = Some(MacosNetworkArtifact {
+        schema: 1,
+        backend: "macos-network-extension".into(),
+        signing: "native-signature-verified".into(),
+        sha256: "a".repeat(64),
+        bytes: 1,
+        tree_sha256: "b".repeat(64),
+        container_sha256: "c".repeat(64),
+        provider_sha256: "d".repeat(64),
+        source_policy_sha256:
+            athernex_endpoint_protocol::macos_network_events::source_policy_sha256(),
+        team_id: "ABCDE12345".into(),
+        agent_identifier: "invalid.example.agent".into(),
+        container_identifier: "invalid.example.container".into(),
+        provider_identifier: "invalid.example.provider".into(),
+        app_group: "ABCDE12345.invalid.example.group".into(),
+        mach_service_name: "ABCDE12345.invalid.example.group.telemetry".into(),
+        provider_cdhashes: vec!["a".repeat(40)],
+    });
+    fs::write(&manifest, serde_json::to_vec(&artifact).unwrap()).unwrap();
+    let output = run();
+    assert_eq!(output.status.success(), cfg!(target_os = "macos"));
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "a".repeat(64)
+        );
+    }
+    artifact.sha256 = "0".repeat(64);
+    fs::write(&manifest, serde_json::to_vec(&artifact).unwrap()).unwrap();
+    assert!(!run().status.success());
+    artifact.target = "unsupported".into();
+    fs::write(&manifest, serde_json::to_vec(&artifact).unwrap()).unwrap();
+    assert!(!run().status.success());
 }

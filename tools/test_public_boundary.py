@@ -64,6 +64,19 @@ class PublicBoundaryTests(unittest.TestCase):
         self.assertEqual(len(findings), 2)
         self.assertNotIn("private-person", repr(findings))
 
+    def test_generated_bundle_text_and_provisioning_profiles_are_rejected(self):
+        names = ["output/Example.app/Contents/Info.plist",
+                 "output/Example.SYSTEMEXTENSION/Contents/Resources/settings.json",
+                 "output/profile.mobileprovision", "nested/profile.PROVISIONPROFILE",
+                 "output/Empty.app"]
+        for name in names:
+            self.write(name, "synthetic private deployment metadata\n")
+        self.write("src/Info.plist.in", "public source template\n")
+        self.write("docs/application.md", "public documentation\n")
+        findings = check_tree(self.repo, self.tree())[2]
+        self.assertEqual({row[0] for row in findings}, set(names))
+        self.assertNotIn("synthetic private deployment metadata", repr(findings))
+
     def test_fixture_exception_is_bound_to_exact_path_and_file(self):
         fixture = "/" + "home/fixture/test.txt"
         self.write("core-engines/siem/tests/fleet.rs", fixture)

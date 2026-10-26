@@ -105,6 +105,7 @@ fn boot(item: &Telemetry) -> Option<&str> {
         Telemetry::Authentication { event } => Some(&event.journal.boot_id),
         Telemetry::WindowsAuthentication { .. }
         | Telemetry::MacosAuthentication { .. }
+        | Telemetry::MacosNetworkEvent { .. }
         | Telemetry::MacosProcessEvent { .. }
         | Telemetry::WindowsProcessEvent { .. }
         | Telemetry::WindowsNetworkEvent { .. } => None,

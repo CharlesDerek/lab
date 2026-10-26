@@ -2,6 +2,7 @@
 """Catalog verification with controlled signatures; never claims Apple validation."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import struct
@@ -86,6 +87,25 @@ class PackageTests(unittest.TestCase):
             package.verify_macos_signature(self.native, True)
             self.assertEqual(run.call_count, 3)
             self.assertEqual(run.call_args_list[1].args[0][:2], ['/usr/sbin/spctl', '--assess'])
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX permission control')
+    def test_private_publication_is_atomic_and_does_not_follow_existing_symlink(self):
+        output = package.private_catalog(self.output)
+        victim = self.root / 'untouched-private-file'
+        victim.write_bytes(b'unchanged')
+        destination = output / 'network.zip'
+        destination.symlink_to(victim)
+        original_replace = os.replace
+        def inspect(source, target):
+            self.assertEqual(Path(source).stat().st_mode & 0o777, 0o600)
+            self.assertEqual(output.stat().st_mode & 0o777, 0o700)
+            return original_replace(source, target)
+        with patch.object(package.os, 'replace', side_effect=inspect):
+            package.private_publish(destination, b'private profile fixture')
+        self.assertEqual(victim.read_bytes(), b'unchanged')
+        self.assertFalse(destination.is_symlink())
+        self.assertEqual(destination.read_bytes(), b'private profile fixture')
+        self.assertEqual(list(output.glob('.catalog-*')), [])
 
     def test_development_catalog_without_native_component_remains_supported(self):
         self.argv = self.argv[:-3]

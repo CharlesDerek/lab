@@ -775,6 +775,7 @@ pub fn installer_native_hash(manifest: &Path) -> Result<Option<String>> {
 }
 
 pub fn installer_check(state: &Path, binary: &Path, stopped: bool) -> Result<()> {
+    crate::macos_network_bundle::installer_components(binary)?;
     crate::engine_update::require_settled(state)?;
     #[cfg(target_os = "linux")]
     athernex_endpoint_native::child::check_lifetime_support()?;
