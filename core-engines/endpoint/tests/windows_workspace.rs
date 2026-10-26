@@ -4,13 +4,101 @@
 use athernex_endpoint::{run_bounded, secret, Process};
 use athernex_endpoint_native::{windows_scanner::Token, windows_state::Directory};
 use serde_json::{json, Value};
-use std::{fs, path::Path};
+use std::{
+    fs,
+    os::windows::io::{FromRawHandle, OwnedHandle},
+    path::{Path, PathBuf},
+    ptr::null_mut,
+};
 
-fn run(state: &Path, nonce: &str, spoof_parent: bool) -> (i32, String) {
-    run_cleanup("windows-workspace-cleanup", state, nonce, spoof_parent)
+struct Fixture {
+    agent: PathBuf,
+    private: tempfile::TempDir,
 }
 
-fn run_cleanup(command: &str, state: &Path, nonce: &str, spoof_parent: bool) -> (i32, String) {
+impl Fixture {
+    fn new() -> Self {
+        use windows_sys::Win32::{
+            Foundation::{GetLastError, ERROR_NO_TOKEN},
+            Security::TOKEN_QUERY,
+            System::{
+                RemoteDesktop::ProcessIdToSessionId,
+                Threading::{GetCurrentThread, OpenThreadToken},
+            },
+        };
+        assert!(
+            std::env::var("ATHERNEX_WINDOWS_WORKSPACE_DISPOSABLE_HOST").as_deref() == Ok("1"),
+            "Disposable workspace fixture opt-in required"
+        );
+        assert!(
+            athernex_endpoint_native::windows_state::require_local_system().is_ok(),
+            "Native LocalSystem identity required"
+        );
+        let mut session = u32::MAX;
+        assert!(
+            unsafe { ProcessIdToSessionId(std::process::id(), &mut session) } != 0 && session == 0,
+            "Native session zero required"
+        );
+        let mut handle = null_mut();
+        let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut handle) };
+        let error = unsafe { GetLastError() };
+        if opened != 0 {
+            assert!(!handle.is_null(), "Thread token handle missing");
+            let _token = unsafe { OwnedHandle::from_raw_handle(handle) };
+            panic!("Workspace fixture refuses impersonation");
+        }
+        assert!(
+            error == ERROR_NO_TOKEN,
+            "Thread identity could not be verified"
+        );
+        let agent = PathBuf::from(
+            std::env::var_os("ATHERNEX_NATIVE_WORKSPACE_AGENT")
+                .expect("Exact staged release agent required"),
+        );
+        assert!(
+            agent.is_absolute()
+                && agent.is_file()
+                && agent.file_name().is_some_and(|v| v == "agent.exe"),
+            "Staged agent path invalid"
+        );
+        let agent = agent
+            .canonicalize()
+            .expect("Staged agent resolution failed");
+        let executable = std::env::current_exe()
+            .and_then(|value| value.canonicalize())
+            .expect("Fixture executable resolution failed");
+        let parent = agent.parent().expect("Staged agent parent missing");
+        assert!(
+            executable.parent() == Some(parent),
+            "Agent and fixture must share the protected staging directory"
+        );
+        // The source-bound runner stages both binaries under a System/Admin-only
+        // ACL. Keep all nonce-bearing journals and worker output in that tree.
+        let private = tempfile::Builder::new()
+            .prefix("workspace-private-")
+            .tempdir_in(parent)
+            .expect("Private fixture directory creation failed");
+        Self { agent, private }
+    }
+}
+
+fn run(agent: &Path, state: &Path, nonce: &str, spoof_parent: bool) -> (i32, String) {
+    run_cleanup(
+        agent,
+        "windows-workspace-cleanup",
+        state,
+        nonce,
+        spoof_parent,
+    )
+}
+
+fn run_cleanup(
+    agent: &Path,
+    command: &str,
+    state: &Path,
+    nonce: &str,
+    spoof_parent: bool,
+) -> (i32, String) {
     assert!(["windows-workspace-cleanup", "windows-scratch-cleanup"].contains(&command));
     let root = std::env::var_os("SystemRoot").unwrap();
     let powershell = Path::new(&root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
@@ -27,10 +115,7 @@ fn run_cleanup(command: &str, state: &Path, nonce: &str, spoof_parent: bool) -> 
                 "-Command",
                 script,
             ])
-            .env(
-                "ATHERNEX_WORKSPACE_BINARY",
-                env!("CARGO_BIN_EXE_athernex-endpoint"),
-            )
+            .env("ATHERNEX_WORKSPACE_BINARY", agent)
             .env("ATHERNEX_WORKSPACE_COMMAND", command)
             .env(
                 "ATHERNEX_WORKSPACE_SPOOF",
@@ -42,7 +127,7 @@ fn run_cleanup(command: &str, state: &Path, nonce: &str, spoof_parent: bool) -> 
             ),
         40,
     )
-    .unwrap()
+    .unwrap_or_else(|_| panic!("Bounded cleanup worker failed"))
 }
 
 #[test]
@@ -51,8 +136,9 @@ fn actual_scratch_cleanup_excludes_live_workers_and_replays_partial_image_retire
     use athernex_endpoint_native::{windows_filter::peer, windows_scratch};
     use std::io::Write;
 
+    let fixture = Fixture::new();
     let token = Token::new().unwrap();
-    let retained = tempfile::tempdir().unwrap().keep();
+    let retained = fixture.private.path();
     let state = Directory::create_under(&retained.canonicalize().unwrap(), "private").unwrap();
     let _lease = state.lock("supervisor.lock").unwrap();
     let runtime = state.directory("scratch-runtime").unwrap();
@@ -77,7 +163,15 @@ fn actual_scratch_cleanup_excludes_live_workers_and_replays_partial_image_retire
     let name = format!("{id}.json");
     journal.write_json(&name, &record).unwrap();
     let nonce = secret().unwrap();
-    let run = |spoof| run_cleanup("windows-scratch-cleanup", state.path(), &nonce, spoof);
+    let run = |spoof| {
+        run_cleanup(
+            &fixture.agent,
+            "windows-scratch-cleanup",
+            state.path(),
+            &nonce,
+            spoof,
+        )
+    };
     assert_ne!(run(true).0, 0, "spoofed parent must be refused");
     assert_ne!(run(false).0, 0, "live recorded owner must be retained");
     assert!(runtime
@@ -105,26 +199,29 @@ fn actual_scratch_cleanup_excludes_live_workers_and_replays_partial_image_retire
     );
     network.remove("retained.json").unwrap();
     let (code, output) = run(false);
-    assert_eq!(code, 0, "{output}");
-    assert_eq!(
-        serde_json::from_str::<Value>(&output).unwrap(),
-        json!({"schema":1,"nonce":nonce,"removed":1})
+    assert!(code == 0, "Cleanup command failed");
+    assert!(
+        serde_json::from_str::<Value>(&output).unwrap()
+            == json!({"schema":1,"nonce":nonce,"removed":1}),
+        "Cleanup response differs"
     );
     assert!(!runtime.path().join(&leaf).exists());
     assert!(!journal.path().join(&name).exists());
 
     journal.write_json(&name, &record).unwrap();
     let (code, output) = run(false);
-    assert_eq!(code, 0, "{output}");
-    assert_eq!(
-        serde_json::from_str::<Value>(&output).unwrap(),
-        json!({"schema":1,"nonce":nonce,"removed":1})
+    assert!(code == 0, "Cleanup command failed");
+    assert!(
+        serde_json::from_str::<Value>(&output).unwrap()
+            == json!({"schema":1,"nonce":nonce,"removed":1}),
+        "Cleanup response differs"
     );
     let (code, output) = run(false);
-    assert_eq!(code, 0, "{output}");
-    assert_eq!(
-        serde_json::from_str::<Value>(&output).unwrap(),
-        json!({"schema":1,"nonce":nonce,"removed":0})
+    assert!(code == 0, "Cleanup command failed");
+    assert!(
+        serde_json::from_str::<Value>(&output).unwrap()
+            == json!({"schema":1,"nonce":nonce,"removed":0}),
+        "Cleanup replay response differs"
     );
 }
 
@@ -133,8 +230,9 @@ fn actual_scratch_cleanup_excludes_live_workers_and_replays_partial_image_retire
 fn actual_preview_recovery_waits_for_workers_and_retires_scratch_before_staged_files() {
     use athernex_endpoint_native::{windows_filter::peer, windows_scratch};
     use std::io::Write;
+    let fixture = Fixture::new();
     let token = Token::new().unwrap();
-    let retained = tempfile::tempdir().unwrap().keep();
+    let retained = fixture.private.path();
     let endpoint = Directory::create_under(&retained.canonicalize().unwrap(), "private").unwrap();
     let protection = endpoint.directory("protection").unwrap();
     let state = protection.directory("windows").unwrap();
@@ -175,12 +273,12 @@ fn actual_preview_recovery_waits_for_workers_and_retires_scratch_before_staged_f
         .unwrap();
     let run = || {
         run_bounded(
-            Process::new(env!("CARGO_BIN_EXE_athernex-endpoint"))
+            Process::new(&fixture.agent)
                 .arg("windows-protection-recover")
                 .arg(endpoint.path()),
             75,
         )
-        .unwrap()
+        .unwrap_or_else(|_| panic!("Bounded recovery command failed"))
     };
     let common = protection.lock("supervisor.lock").unwrap();
     assert_ne!(run().0, 0);
@@ -204,10 +302,10 @@ fn actual_preview_recovery_waits_for_workers_and_retires_scratch_before_staged_f
     network.remove("retained.json").unwrap();
     for _ in 0..2 {
         let (code, output) = run();
-        assert_eq!(code, 0, "{output}");
-        assert_eq!(
-            serde_json::from_str::<Value>(&output).unwrap(),
-            json!({"schema":1,"recovered":true})
+        assert!(code == 0, "Cleanup command failed");
+        assert!(
+            serde_json::from_str::<Value>(&output).unwrap() == json!({"schema":1,"recovered":true}),
+            "Recovery response differs"
         );
     }
     for name in [
@@ -229,8 +327,9 @@ fn actual_preview_recovery_waits_for_workers_and_retires_scratch_before_staged_f
 #[test]
 #[ignore = "requires native Windows LocalSystem session zero; runs actual agent cleanup worker"]
 fn actual_cleanup_worker_preserves_live_journals_and_replays_committed_workspace_deletion() {
+    let fixture = Fixture::new();
     let token = Token::new().unwrap();
-    let retained = tempfile::tempdir().unwrap().keep();
+    let retained = fixture.private.path();
     let state = Directory::create_under(&retained.canonicalize().unwrap(), "private").unwrap();
     let _lease = state.lock("supervisor.lock").unwrap();
     let network = state.directory("network").unwrap();
@@ -252,19 +351,22 @@ fn actual_cleanup_worker_preserves_live_journals_and_replays_committed_workspace
         .unwrap();
     drop(workspace);
     let nonce = secret().unwrap();
-    assert_ne!(run(state.path(), &nonce, true).0, 0);
+    assert_ne!(run(&fixture.agent, state.path(), &nonce, true).0, 0);
     assert!(runtime.path().join(&name).exists());
     network
         .write_json("retained.json", &json!({"unreconciled":true}))
         .unwrap();
-    assert_ne!(run(state.path(), &nonce, false).0, 0);
+    assert_ne!(run(&fixture.agent, state.path(), &nonce, false).0, 0);
     assert!(runtime.path().join(&name).join("staged-file").exists());
     assert!(journal.path().join(&record_name).exists());
     network.remove("retained.json").unwrap();
-    let (code, output) = run(state.path(), &nonce, false);
-    assert_eq!(code, 0, "{output}");
+    let (code, output) = run(&fixture.agent, state.path(), &nonce, false);
+    assert!(code == 0, "Cleanup command failed");
     let response: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(response, json!({"schema":1,"nonce":nonce,"removed":1}));
+    assert!(
+        response == json!({"schema":1,"nonce":nonce,"removed":1}),
+        "Cleanup response differs"
+    );
     assert!(!runtime.path().join(&name).exists());
     assert!(!journal.path().join(&record_name).exists());
 
@@ -275,8 +377,8 @@ fn actual_cleanup_worker_preserves_live_journals_and_replays_committed_workspace
             &json!({"schema":1,"id":id,"identity":identity}),
         )
         .unwrap();
-    let (code, output) = run(state.path(), &nonce, false);
-    assert_eq!(code, 0, "{output}");
+    let (code, _) = run(&fixture.agent, state.path(), &nonce, false);
+    assert!(code == 0, "Cleanup command failed");
     assert!(!journal.path().join(&record_name).exists());
     assert_eq!(fs::read_dir(runtime.path()).unwrap().count(), 0);
 }

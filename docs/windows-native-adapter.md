@@ -759,12 +759,23 @@ Real ClamAV volume-path compatibility,
 low-space behavior, crashes during each storage phase, reboot recovery and native
 permissions/sharing behavior still need validation.
 
-The `windows_workspace` integration target also exercises the actual agent's
-`windows-scratch-cleanup` command with an incomplete private image. It checks
-parent binding, worker-lease and live-owner exclusion, scanner recovery ordering,
-nonce-bound acknowledgements and interruption replay. This ignored fixture
-requires LocalSystem and never attaches or formats a disk. It remains unexecuted
-on Windows.
+The `windows_workspace` integration target exercises the actual agent's scratch
+cleanup, preview recovery and workspace cleanup commands. Its three ignored
+fixtures check parent binding, worker-lease and live-owner exclusion, scanner
+recovery ordering, nonce-bound acknowledgements, partial-image retirement and
+idempotent replay. They create incomplete private images and never attach or
+format a disk; they do not satisfy the full scratch-capacity gate above.
+
+The separate `windows-workspace-recovery` CI job runs those exact three fixtures
+against a staged release agent on an explicitly disposable LocalSystem/session-zero
+worker with no impersonation. Both executables, runner and helpers are hash-bound
+to the source revision in a System/Admin-only directory. Raw journals, logon
+identities, nonces, commands and output stay within that protected directory.
+Only `inputs.json` and a fixed `workspace-recovery-validation.json` projection are
+uploaded after task ownership, cleanup, input hashes and the complete three-test
+result have been checked. The report keeps `proof_scope: "agent_cleanup_recovery"`
+and `production_readiness: false`. Native acceptance remains pending until that
+job succeeds on the exact source revision.
 
 ## Reproduce the development build
 

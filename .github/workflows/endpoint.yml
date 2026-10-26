@@ -48,6 +48,8 @@ on:
       - 'tools/test_windows_isolation_ci.py'
       - 'tools/verify_windows_process_events_ci.ps1'
       - 'tools/test_windows_process_events_ci.py'
+      - 'tools/verify_windows_workspace_ci.ps1'
+      - 'tools/test_windows_workspace_ci.py'
       - 'tools/test_verification_guards.py'
       - 'tools/verify_ecosystem_recovery.py'
       - 'Cargo.toml'
@@ -60,6 +62,50 @@ on:
 permissions:
   contents: read
 jobs:
+  windows-workspace-recovery:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify workspace-recovery evidence and privileged task failure handling
+        run: |
+          python tools/test_windows_service_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Task runner control-flow tests failed' }
+          python tools/test_windows_workspace_ci.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace-recovery evidence tests failed' }
+      - name: Build release agent and select exact workspace-recovery test executable
+        shell: pwsh
+        env:
+          CARGO_PROFILE_TEST_DEBUG: 0
+          CARGO_PROFILE_RELEASE_DEBUG: 0
+        run: |
+          cargo build --locked --release -p athernex-endpoint
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace-recovery release agent build failed' }
+          cargo test --locked --no-run --test windows_workspace -p athernex-endpoint --message-format=json > "$env:RUNNER_TEMP/workspace-recovery-build.jsonl"
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace-recovery test build failed' }
+          $records = Get-Content -LiteralPath "$env:RUNNER_TEMP/workspace-recovery-build.jsonl" | ForEach-Object { $_ | ConvertFrom-Json }
+          $matches = @($records | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -ceq 'windows_workspace' -and $_.profile.test -eq $true -and $_.executable })
+          if ($matches.Count -ne 1) { throw 'Expected one workspace integration test executable' }
+          ('WORKSPACE_RECOVERY_TESTS=' + $matches[0].executable) >> $env:GITHUB_ENV
+      - name: Verify actual agent cleanup and partial-state recovery as LocalSystem
+        timeout-minutes: 15
+        shell: pwsh
+        run: tools/verify_windows_workspace_ci.ps1 -AgentExecutable target/release/athernex-endpoint.exe -WorkspaceTests "$env:WORKSPACE_RECOVERY_TESTS" -OutputDirectory "$env:RUNNER_TEMP/native-windows-workspace-recovery" -DisposableHost
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-windows-workspace-recovery
+          # Exact public projection only. Worker state, paths, logon identities,
+          # nonces, private reports and captured output stay on the VM.
+          path: |
+            ${{ runner.temp }}/native-windows-workspace-recovery/inputs.json
+            ${{ runner.temp }}/native-windows-workspace-recovery/workspace-recovery-validation.json
+          if-no-files-found: warn
   windows-authentication:
     runs-on: windows-2022
     timeout-minutes: 30
