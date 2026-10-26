@@ -16,6 +16,46 @@ struct Fixture {
     private: tempfile::TempDir,
 }
 
+enum Operation {
+    ScratchCleanup,
+    PreviewRecovery,
+    WorkspaceCleanup,
+}
+
+fn unexpected_exit(operation: Operation, code: i32, output: &str) {
+    if code == 0 {
+        return;
+    }
+    let operation = match operation {
+        Operation::ScratchCleanup => "scratch_cleanup",
+        Operation::PreviewRecovery => "preview_recovery",
+        Operation::WorkspaceCleanup => "workspace_cleanup",
+    };
+    // These are command exit statuses, not inferred Win32 API errors. Match
+    // complete static error lines only; all other worker output stays private.
+    let category = output
+        .lines()
+        .find_map(|line| match line {
+            "Error: \"Invalid scratch recovery request\"" => Some("invalid_scratch_request"),
+            "Error: \"Invalid Windows workspace cleanup request\"" => {
+                Some("invalid_workspace_request")
+            }
+            "Error: \"Scratch helper is still alive; retain its image and journal\"" => {
+                Some("scratch_live_owner")
+            }
+            "Error: \"Scanner launch/network recovery must finish before scratch reclamation\"" => {
+                Some("scratch_network_pending")
+            }
+            "Error: \"Scanner launch/network recovery must finish before workspace cleanup\"" => {
+                Some("workspace_network_pending")
+            }
+            _ => None,
+        })
+        .unwrap_or("other_private");
+    println!("\nATHERNEX_WORKSPACE_EXIT={operation}:{code}");
+    println!("\nATHERNEX_WORKSPACE_FAILURE={category}");
+}
+
 impl Fixture {
     fn new() -> Self {
         use windows_sys::Win32::{
@@ -26,6 +66,7 @@ impl Fixture {
                 Threading::{GetCurrentThread, OpenThreadToken},
             },
         };
+        println!("\nATHERNEX_WORKSPACE_STAGE=guard_started");
         assert!(
             std::env::var("ATHERNEX_WINDOWS_WORKSPACE_DISPOSABLE_HOST").as_deref() == Ok("1"),
             "Disposable workspace fixture opt-in required"
@@ -51,6 +92,7 @@ impl Fixture {
             error == ERROR_NO_TOKEN,
             "Thread identity could not be verified"
         );
+        println!("\nATHERNEX_WORKSPACE_STAGE=guard_verified");
         let agent = PathBuf::from(
             std::env::var_os("ATHERNEX_NATIVE_WORKSPACE_AGENT")
                 .expect("Exact staged release agent required"),
@@ -72,12 +114,14 @@ impl Fixture {
             executable.parent() == Some(parent),
             "Agent and fixture must share the protected staging directory"
         );
+        println!("\nATHERNEX_WORKSPACE_STAGE=agent_verified");
         // The source-bound runner stages both binaries under a System/Admin-only
         // ACL. Keep all nonce-bearing journals and worker output in that tree.
         let private = tempfile::Builder::new()
             .prefix("workspace-private-")
             .tempdir_in(parent)
             .expect("Private fixture directory creation failed");
+        println!("\nATHERNEX_WORKSPACE_STAGE=private_ready");
         Self { agent, private }
     }
 }
@@ -127,7 +171,10 @@ fn run_cleanup(
             ),
         40,
     )
-    .unwrap_or_else(|_| panic!("Bounded cleanup worker failed"))
+    .unwrap_or_else(|_| {
+        println!("\nATHERNEX_WORKSPACE_FAILURE=bounded_cleanup_failed");
+        panic!("Bounded cleanup worker failed")
+    })
 }
 
 #[test]
@@ -172,7 +219,9 @@ fn actual_scratch_cleanup_excludes_live_workers_and_replays_partial_image_retire
             spoof,
         )
     };
+    println!("\nATHERNEX_WORKSPACE_STAGE=scratch_prepared");
     assert_ne!(run(true).0, 0, "spoofed parent must be refused");
+    println!("\nATHERNEX_WORKSPACE_STAGE=scratch_spoof_refused");
     assert_ne!(run(false).0, 0, "live recorded owner must be retained");
     assert!(runtime
         .path()
@@ -180,6 +229,7 @@ fn actual_scratch_cleanup_excludes_live_workers_and_replays_partial_image_retire
         .join(windows_scratch::IMAGE)
         .exists());
     assert!(journal.path().join(&name).exists());
+    println!("\nATHERNEX_WORKSPACE_STAGE=scratch_live_owner_retained");
 
     // A different creation time proves this PID no longer names the original
     // owner. The cleanup command must never terminate the current process.
@@ -188,6 +238,7 @@ fn actual_scratch_cleanup_excludes_live_workers_and_replays_partial_image_retire
     let worker_lease = state.lock("scratch-worker.lock").unwrap();
     assert_ne!(run(false).0, 0, "worker lease must exclude cleanup");
     drop(worker_lease);
+    println!("\nATHERNEX_WORKSPACE_STAGE=scratch_worker_lease_refused");
     let network = state.directory("network").unwrap();
     network
         .write_json("retained.json", &json!({"unreconciled":true}))
@@ -197,8 +248,10 @@ fn actual_scratch_cleanup_excludes_live_workers_and_replays_partial_image_retire
         0,
         "scanner recovery must precede scratch cleanup"
     );
+    println!("\nATHERNEX_WORKSPACE_STAGE=scratch_network_retained");
     network.remove("retained.json").unwrap();
     let (code, output) = run(false);
+    unexpected_exit(Operation::ScratchCleanup, code, &output);
     assert!(code == 0, "Cleanup command failed");
     assert!(
         serde_json::from_str::<Value>(&output).unwrap()
@@ -207,22 +260,27 @@ fn actual_scratch_cleanup_excludes_live_workers_and_replays_partial_image_retire
     );
     assert!(!runtime.path().join(&leaf).exists());
     assert!(!journal.path().join(&name).exists());
+    println!("\nATHERNEX_WORKSPACE_STAGE=scratch_cleanup_verified");
 
     journal.write_json(&name, &record).unwrap();
     let (code, output) = run(false);
+    unexpected_exit(Operation::ScratchCleanup, code, &output);
     assert!(code == 0, "Cleanup command failed");
     assert!(
         serde_json::from_str::<Value>(&output).unwrap()
             == json!({"schema":1,"nonce":nonce,"removed":1}),
         "Cleanup response differs"
     );
+    println!("\nATHERNEX_WORKSPACE_STAGE=scratch_retirement_replayed");
     let (code, output) = run(false);
+    unexpected_exit(Operation::ScratchCleanup, code, &output);
     assert!(code == 0, "Cleanup command failed");
     assert!(
         serde_json::from_str::<Value>(&output).unwrap()
             == json!({"schema":1,"nonce":nonce,"removed":0}),
         "Cleanup replay response differs"
     );
+    println!("\nATHERNEX_WORKSPACE_STAGE=scratch_empty_replayed");
 }
 
 #[test]
@@ -278,16 +336,22 @@ fn actual_preview_recovery_waits_for_workers_and_retires_scratch_before_staged_f
                 .arg(endpoint.path()),
             75,
         )
-        .unwrap_or_else(|_| panic!("Bounded recovery command failed"))
+        .unwrap_or_else(|_| {
+            println!("\nATHERNEX_WORKSPACE_FAILURE=bounded_recovery_failed");
+            panic!("Bounded recovery command failed")
+        })
     };
+    println!("\nATHERNEX_WORKSPACE_STAGE=preview_prepared");
     let common = protection.lock("supervisor.lock").unwrap();
     assert_ne!(run().0, 0);
     drop(common);
+    println!("\nATHERNEX_WORKSPACE_STAGE=preview_supervisor_refused");
     for name in ["supervisor.lock", "client.lock", "scratch-worker.lock"] {
         let worker = state.lock(name).unwrap();
         assert_ne!(run().0, 0, "live {name} must prevent recovery");
         drop(worker);
     }
+    println!("\nATHERNEX_WORKSPACE_STAGE=preview_workers_refused");
     assert_ne!(
         run().0,
         0,
@@ -299,14 +363,21 @@ fn actual_preview_recovery_waits_for_workers_and_retires_scratch_before_staged_f
         .join(windows_scratch::IMAGE)
         .exists());
     assert!(runtime.path().join(&leaf).join("retired-engine").exists());
+    println!("\nATHERNEX_WORKSPACE_STAGE=preview_network_retained");
     network.remove("retained.json").unwrap();
-    for _ in 0..2 {
+    for attempt in 0..2 {
         let (code, output) = run();
+        unexpected_exit(Operation::PreviewRecovery, code, &output);
         assert!(code == 0, "Cleanup command failed");
         assert!(
             serde_json::from_str::<Value>(&output).unwrap() == json!({"schema":1,"recovered":true}),
             "Recovery response differs"
         );
+        if attempt == 0 {
+            println!("\nATHERNEX_WORKSPACE_STAGE=preview_cleanup_verified");
+        } else {
+            println!("\nATHERNEX_WORKSPACE_STAGE=preview_empty_replayed");
+        }
     }
     for name in [
         "network",
@@ -322,6 +393,7 @@ fn actual_preview_recovery_waits_for_workers_and_retires_scratch_before_staged_f
             "{name}"
         );
     }
+    println!("\nATHERNEX_WORKSPACE_STAGE=preview_storage_empty");
 }
 
 #[test]
@@ -351,16 +423,20 @@ fn actual_cleanup_worker_preserves_live_journals_and_replays_committed_workspace
         .unwrap();
     drop(workspace);
     let nonce = secret().unwrap();
+    println!("\nATHERNEX_WORKSPACE_STAGE=workspace_prepared");
     assert_ne!(run(&fixture.agent, state.path(), &nonce, true).0, 0);
     assert!(runtime.path().join(&name).exists());
+    println!("\nATHERNEX_WORKSPACE_STAGE=workspace_spoof_refused");
     network
         .write_json("retained.json", &json!({"unreconciled":true}))
         .unwrap();
     assert_ne!(run(&fixture.agent, state.path(), &nonce, false).0, 0);
     assert!(runtime.path().join(&name).join("staged-file").exists());
     assert!(journal.path().join(&record_name).exists());
+    println!("\nATHERNEX_WORKSPACE_STAGE=workspace_network_retained");
     network.remove("retained.json").unwrap();
     let (code, output) = run(&fixture.agent, state.path(), &nonce, false);
+    unexpected_exit(Operation::WorkspaceCleanup, code, &output);
     assert!(code == 0, "Cleanup command failed");
     let response: Value = serde_json::from_str(&output).unwrap();
     assert!(
@@ -369,6 +445,7 @@ fn actual_cleanup_worker_preserves_live_journals_and_replays_committed_workspace
     );
     assert!(!runtime.path().join(&name).exists());
     assert!(!journal.path().join(&record_name).exists());
+    println!("\nATHERNEX_WORKSPACE_STAGE=workspace_cleanup_verified");
 
     // Crash after root deletion but before journal unlink: replay is harmless.
     journal
@@ -377,8 +454,10 @@ fn actual_cleanup_worker_preserves_live_journals_and_replays_committed_workspace
             &json!({"schema":1,"id":id,"identity":identity}),
         )
         .unwrap();
-    let (code, _) = run(&fixture.agent, state.path(), &nonce, false);
+    let (code, output) = run(&fixture.agent, state.path(), &nonce, false);
+    unexpected_exit(Operation::WorkspaceCleanup, code, &output);
     assert!(code == 0, "Cleanup command failed");
     assert!(!journal.path().join(&record_name).exists());
     assert_eq!(fs::read_dir(runtime.path()).unwrap().count(), 0);
+    println!("\nATHERNEX_WORKSPACE_STAGE=workspace_deletion_replayed");
 }

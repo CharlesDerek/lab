@@ -763,8 +763,12 @@ The `windows_workspace` integration target exercises the actual agent's scratch
 cleanup, preview recovery and workspace cleanup commands. Its three ignored
 fixtures check parent binding, worker-lease and live-owner exclusion, scanner
 recovery ordering, nonce-bound acknowledgements, partial-image retirement and
-idempotent replay. They create incomplete private images and never attach or
-format a disk; they do not satisfy the full scratch-capacity gate above.
+idempotent replay. Internal cleanup requests accept the canonical local drive
+names retained by the private directory handles; public response paths keep
+their stricter syntax. Private ancestry, reparse refusal, parent binding and
+nonce checks still apply. The fixtures create incomplete private images and
+never attach or format a disk; they do not satisfy the full scratch-capacity
+gate above.
 
 The separate `windows-workspace-recovery` CI job runs those exact three fixtures
 against a staged release agent on an explicitly disposable LocalSystem/session-zero
@@ -772,10 +776,16 @@ worker with no impersonation. Both executables, runner and helpers are hash-boun
 to the source revision in a System/Admin-only directory. Raw journals, logon
 identities, nonces, commands and output stay within that protected directory.
 Only `inputs.json` and a fixed `workspace-recovery-validation.json` projection are
-uploaded after task ownership, cleanup, input hashes and the complete three-test
-result have been checked. The report keeps `proof_scope: "agent_cleanup_recovery"`
-and `production_readiness: false`. Native acceptance remains pending until that
-job succeeds on the exact source revision.
+uploaded. Whole-job acceptance requires task ownership and removal, unchanged
+input hashes, a valid worker report and all three exact native test results.
+On failure, a fixed runner category identifies the failed verification boundary.
+Separate native-check diagnostics require fresh source/input and private-report
+binding before exposing fixed progress, phase/error categories and bounded
+command exit statuses. Completed diagnostic progress does not establish whole-job
+acceptance, and command status is not a Win32 error. Raw worker output and private
+report fields remain excluded. The report keeps
+`proof_scope: "agent_cleanup_recovery"` and `production_readiness: false`. Native
+acceptance remains pending until that job succeeds on the exact source revision.
 
 ## Reproduce the development build
 

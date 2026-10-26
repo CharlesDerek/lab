@@ -18,11 +18,23 @@ TESTS = [
 ]
 INPUTS = ['agent.exe', 'windows_workspace.exe', 'verify_windows_workspace_ci.ps1',
           'verify_windows_isolation_ci.ps1', 'verify_windows_service_ci.ps1']
+STAGES = ['guard_started', 'guard_verified', 'agent_verified', 'private_ready', 'scratch_prepared',
+          'scratch_spoof_refused', 'scratch_live_owner_retained', 'scratch_worker_lease_refused',
+          'scratch_network_retained', 'scratch_cleanup_verified', 'scratch_retirement_replayed',
+          'scratch_empty_replayed', 'preview_prepared', 'preview_supervisor_refused',
+          'preview_workers_refused', 'preview_network_retained', 'preview_cleanup_verified',
+          'preview_empty_replayed', 'preview_storage_empty', 'workspace_prepared',
+          'workspace_spoof_refused', 'workspace_network_retained', 'workspace_cleanup_verified',
+          'workspace_deletion_replayed']
+FAILURES = ['bounded_cleanup_failed', 'bounded_recovery_failed', 'invalid_scratch_request',
+            'invalid_workspace_request', 'scratch_live_owner', 'scratch_network_pending',
+            'workspace_network_pending', 'other_private']
 WRAPPER = r'''
-param([string]$Script, [string]$Case, [string]$Root)
+param([string]$Script, [string]$Case, [string]$Root, [string]$Configuration)
 $ErrorActionPreference = 'Stop'
 . $Script
 . (Join-Path (Split-Path -Parent $Script) 'verify_windows_isolation_ci.ps1')
+$scenario = Get-Content -LiteralPath $Configuration -Raw | ConvertFrom-Json
 $testNames = @(Get-WorkspaceRecoveryTests)
 $inputNames = @(Get-WorkspaceRecoveryInputNames)
 $manifest = @{ schema=1; suite='WorkspaceRecovery'; github_sha=('a'*40); sha256=@{} }
@@ -43,16 +55,40 @@ switch ($Case) {
     'input-schema-string' { $manifest.schema = '1' }
     'input-schema-float' { $manifest.schema = 1.0 }
     'input-schema-bool' { $manifest.schema = $true }
+    'input-suite-array' { $manifest.suite = @('WorkspaceRecovery') }
+    'input-suite-object' { $manifest.suite = @{ value='WorkspaceRecovery' } }
+    'input-source-array' { $manifest.github_sha = @('a'*40) }
+    'input-source-object' { $manifest.github_sha = @{ value=('a'*40) } }
+    'input-hash-array' { $manifest.sha256['agent.exe'] = @($manifest.sha256['agent.exe']) }
+    'input-hash-object' { $manifest.sha256['agent.exe'] = @{ value=$manifest.sha256['agent.exe'] } }
+    'input-suite-unicode' { $manifest.suite = 'Workspace' + [char]0x00ad + 'Recovery' }
 }
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath
 $digest = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($scenario.remove_input) { Remove-Item -LiteralPath (Join-Path $Root $scenario.remove_input) }
 $report = [pscustomobject]@{ schema=1; suite='WorkspaceRecovery'; proof_scope='agent_cleanup_recovery';
     native_windows_executed=$true; production_readiness=$false; manifest_sha256=$digest;
     user_sid='S-1-5-18'; session_id=0; windows_version='fixture'; error=$null;
-    checks=[pscustomobject]@{}; private_payload='private_fixture_payload';
-    raw_output='private_fixture_payload'; process_id=1234; state_path='private_fixture_payload';
-    nonce='private_fixture_payload'; credential='private_fixture_payload' }
-foreach ($name in $testNames) { $report.checks | Add-Member -NotePropertyName $name -NotePropertyValue passed }
+    checks=[pscustomobject]@{}; progress=[pscustomobject]@{} }
+foreach ($name in $testNames) {
+    $report.checks | Add-Member -NotePropertyName $name -NotePropertyValue passed
+    $report.progress | Add-Member -NotePropertyName $name -NotePropertyValue completed
+}
+foreach ($property in $scenario.report.PSObject.Properties) {
+    $report | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value -Force
+}
+foreach ($name in $scenario.remove_fields) { $report.PSObject.Properties.Remove($name) }
+for ($index=0; $scenario.logs -and $index -lt $scenario.logs.Count; $index++) {
+    if ($null -ne $scenario.logs[$index]) {
+        $encoding = switch ($scenario.log_encoding) {
+            'utf16le' { [Text.Encoding]::Unicode }
+            'utf8bom' { [Text.UTF8Encoding]::new($true) }
+            default { [Text.UTF8Encoding]::new($false) }
+        }
+        [IO.File]::WriteAllText((Join-Path $Root ('check-' + $index + '.log')),
+            (($scenario.logs[$index] -join "`r`n") + "`r`n"), $encoding)
+    }
+}
 function Mutate-Input([string]$Target) {
     Add-Content -LiteralPath (Join-Path $Root $Target) -Value 'changed'
 }
@@ -60,6 +96,38 @@ $global:executed = @()
 $global:listed = 0
 $global:taskCalls = 0
 $global:betweenChecksMutated = $false
+$global:checkpointWrites = 0
+# Only filesystem I/O boundaries are mocked. The checkpoint/parser and worker
+# catch/finally remain the production implementations.
+if ($scenario.checkpoint_failure) {
+    function Set-Content {
+        [CmdletBinding()]
+        param([Parameter(ValueFromPipeline=$true)]$Value, [string]$LiteralPath, [string]$Encoding)
+        begin { $values = [Collections.Generic.List[object]]::new() }
+        process { $values.Add($Value) }
+        end {
+            if ($LiteralPath.EndsWith('workspace-recovery-worker.pending.private.json', [StringComparison]::Ordinal)) {
+                $global:checkpointWrites += 1
+                if ($global:checkpointWrites -eq $scenario.checkpoint_failure -or
+                    ($scenario.checkpoint_persistent -and $global:checkpointWrites -ge $scenario.checkpoint_failure)) {
+                    throw 'private_fixture_payload'
+                }
+            }
+            $PSBoundParameters['Value'] = $values.ToArray()
+            Microsoft.PowerShell.Management\Set-Content @PSBoundParameters
+        }
+    }
+}
+if ($scenario.log_io_failure) {
+    function Get-Content {
+        [CmdletBinding()]
+        param([string]$LiteralPath, [switch]$Raw, [string]$Encoding)
+        if (-not $Raw -and $LiteralPath -ceq (Join-Path $Root ('check-' + $scenario.log_io_index + '.log'))) {
+            throw 'private_fixture_payload'
+        }
+        Microsoft.PowerShell.Management\Get-Content @PSBoundParameters
+    }
+}
 # A real file hash is returned, then the filesystem changes between the first
 # post-check and the next pre-check. This proves each call has its own precheck.
 if ($Case -ceq 'worker-between-checks') {
@@ -96,6 +164,7 @@ function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [
         $Log -cne (Join-Path $Root ('check-' + $index + '.log'))) { throw 'Incorrect exact native invocation' }
     $global:executed += $Arguments[1]
     $lines = @('private_fixture_payload', 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out;')
+    if ($scenario.worker_markers) { $lines = @($scenario.worker_markers) + $lines }
     if ($Case -ceq ('worker-zero-tests:' + $index)) { $lines = @('test result: ok. 0 passed; 0 failed; 0 ignored;') }
     if ($Case -ceq ('worker-ignored:' + $index)) { $lines = @('test result: ok. 1 passed; 0 failed; 1 ignored;') }
     if ($Case -ceq ('worker-failed-count:' + $index)) { $lines = @('test result: ok. 1 passed; 1 failed; 0 ignored;') }
@@ -111,10 +180,14 @@ function Invoke-ServiceFixtureTask($TaskName, $Action, $ResultFile, $Hash, $Time
     if ($Timeout -ne 840 -or $Hash -cne $digest -or $TaskName -cne 'fixture-task' -or
         $ResultFile -cne (Join-Path $Root 'workspace-recovery-worker.private.json')) { throw 'Invalid task binding' }
     if ($Case -ceq 'publish-task-failure') { throw 'private_fixture_payload' }
+    if ($scenario.task_error_before) { throw $scenario.task_error_before }
     if ($Case -ceq 'publish-report-failure') { $report.checks.($testNames[1]) = 'not_verified' }
     if ($Case -ceq 'publish-report-error') { $report.error = 'private_fixture_payload' }
     $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ResultFile
+    if ($scenario.corrupt_report) { Set-Content -LiteralPath $ResultFile -Value '{invalid' }
+    if ($scenario.task_error) { throw $scenario.task_error }
     & $Validator $report $Hash
+    if ($scenario.cleanup_error) { throw $scenario.cleanup_error }
     if ($Case -ceq 'publish-cleanup-failure') { throw 'private_fixture_payload' }
     if ($Case.StartsWith('publish-change:')) { Mutate-Input $Case.Substring(15) }
     if ($Case -ceq 'publish-report-change') {
@@ -139,8 +212,8 @@ try {
         $output.tests = $testNames; $output.inputs = $inputNames
     } elseif ($Case.StartsWith('worker-') -or $Case.StartsWith('input-')) {
         if ($Case.StartsWith('worker-change:')) { Mutate-Input $Case.Substring(14) }
-        $workerReport = @{ manifest_sha256=$digest; checks=[ordered]@{}; error=$null }
-        foreach ($name in $testNames) { $workerReport.checks[$name] = 'not_verified' }
+        $workerReport = @{ manifest_sha256=$digest; checks=[ordered]@{}; progress=[ordered]@{}; error=$null }
+        foreach ($name in $testNames) { $workerReport.checks[$name] = 'not_verified'; $workerReport.progress[$name] = 'not_attempted' }
         Invoke-WorkspaceRecoveryWorkerChecks $Root $workerReport
     } elseif ($Case.StartsWith('publish-')) {
         $source = if ($Case -ceq 'publish-wrong-source') { 'b'*40 } else { 'a'*40 }
@@ -148,13 +221,21 @@ try {
         Invoke-WorkspaceRecoveryEvidence $Root 'fixture-task' @{} $boundDigest $source
     } elseif ($Case -ceq 'guard') {
         Invoke-WorkspaceRecoveryWorker $Root $false
+    } elseif ($Case -ceq 'markers') {
+        $output.markers = Get-WorkspaceRecoveryLogMarkers (Join-Path $Root 'check-0.log') -RequireLog
+    } elseif ($Case -ceq 'classify') {
+        $output.categories = @($scenario.messages | ForEach-Object { Get-WorkspaceRecoveryRunnerFailure $_ })
     } else {
-        switch ($Case) {
+        $validationCase = $Case -replace '^partial-', 'report-'
+        switch ($validationCase) {
             'report-schema' { $report.schema = 2 }
             'report-schema-string' { $report.schema = '1' }
             'report-schema-float' { $report.schema = 1.0 }
             'report-schema-bool' { $report.schema = $true }
             'report-hash' { $report.manifest_sha256 = 'b'*64 }
+            'report-hash-array' { $report.manifest_sha256 = @($digest) }
+            'report-hash-object' { $report.manifest_sha256 = @{ value=$digest } }
+            'report-hash-unicode' { $report.manifest_sha256 = $digest.Substring(0,1) + [char]0x00ad + $digest.Substring(1) }
             'report-suite' { $report.suite = 'Isolation' }
             'report-missing-suite' { $report.PSObject.Properties.Remove('suite') }
             'report-scope' { $report.proof_scope = 'source_only' }
@@ -176,14 +257,15 @@ try {
             'report-error-empty' { $report.error = '' }
             'report-extra-test' { $report.checks | Add-Member -NotePropertyName other -NotePropertyValue passed }
         }
-        if ($Case.StartsWith('report-no-test:')) { $report.checks.PSObject.Properties.Remove($testNames[[int]$Case.Split(':')[1]]) }
-        if ($Case.StartsWith('report-skipped:')) { $report.checks.($testNames[[int]$Case.Split(':')[1]]) = 'skipped' }
-        if ($Case.StartsWith('report-case:')) {
-            $name = $testNames[[int]$Case.Split(':')[1]]
+        if ($validationCase.StartsWith('report-no-test:')) { $report.checks.PSObject.Properties.Remove($testNames[[int]$validationCase.Split(':')[1]]) }
+        if ($validationCase.StartsWith('report-skipped:')) { $report.checks.($testNames[[int]$validationCase.Split(':')[1]]) = 'skipped' }
+        if ($validationCase.StartsWith('report-case:')) {
+            $name = $testNames[[int]$validationCase.Split(':')[1]]
             $report.checks.PSObject.Properties.Remove($name)
             $report.checks | Add-Member -NotePropertyName $name.ToUpperInvariant() -NotePropertyValue passed
         }
-        Assert-WorkspaceRecoveryReport $report $digest
+        if ($Case.StartsWith('partial-')) { Assert-WorkspaceRecoveryPartialReport $report $digest }
+        else { Assert-WorkspaceRecoveryReport $report $digest }
     }
 } catch { $failed = $true; $caught = $_.Exception.Message }
 $output.failed = $failed
@@ -196,6 +278,11 @@ $output.environment_restored = @($environment | Where-Object {
     [Environment]::GetEnvironmentVariable($_, 'Process') -cne $previous[$_]
 }).Count -eq 0
 if ($workerReport) { $output.worker = $workerReport }
+$checkpointPath = Join-Path $Root 'workspace-recovery-worker.private.json'
+if ($workerReport -and (Test-Path -LiteralPath $checkpointPath)) {
+    $saved = Get-Content -LiteralPath $checkpointPath -Raw | ConvertFrom-Json
+    $output.checkpoint = @{ progress=$saved.progress; checks=$saved.checks; error=$saved.error }
+}
 $publicPath = Join-Path $Root 'workspace-recovery-validation.json'
 if (Test-Path -LiteralPath $publicPath) { $output.public = Get-Content -LiteralPath $publicPath -Raw | ConvertFrom-Json }
 $output | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
@@ -204,15 +291,19 @@ $output | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Root 'r
 
 class WorkspaceRecoveryRunnerTests(unittest.TestCase):
     powershell = None
+    scenarios = 0
 
-    def run_case(self, case):
+    def run_case(self, case, scenario=None):
+        type(self).scenarios += 1
         with tempfile.TemporaryDirectory(prefix='athernex-workspace-evidence-') as temporary:
             root = Path(temporary)
             wrapper = root/'wrapper.ps1'
             wrapper.write_text(WRAPPER)
+            configuration = root/'scenario.json'
+            configuration.write_text(json.dumps(scenario or {}))
             result = subprocess.run(
                 [self.powershell, '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
-                 str(wrapper), str(SCRIPT), case, str(root)], capture_output=True, text=True,
+                 str(wrapper), str(SCRIPT), case, str(root), str(configuration)], capture_output=True, text=True,
                 timeout=20, env=dict(os.environ, POWERSHELL_TELEMETRY_OPTOUT='1', POWERSHELL_UPDATECHECK='Off'))
             self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
             self.assertNotIn('private_fixture_payload', result.stdout+result.stderr)
@@ -234,6 +325,8 @@ class WorkspaceRecoveryRunnerTests(unittest.TestCase):
     def test_manifest_and_every_staged_input_precede_fixture_execution(self):
         cases = ['input-wrong-suite', 'input-missing-suite', 'input-extra', 'input-missing',
                  'input-case', 'input-source', 'input-schema-string', 'input-schema-float', 'input-schema-bool',
+                 'input-suite-array', 'input-suite-object', 'input-source-array', 'input-source-object',
+                 'input-hash-array', 'input-hash-object', 'input-suite-unicode',
                  *['worker-change:'+name for name in INPUTS + ['inputs.json']]]
         for case in cases:
             with self.subTest(case=case):
@@ -247,7 +340,7 @@ class WorkspaceRecoveryRunnerTests(unittest.TestCase):
 
     def test_private_report_requires_identity_scope_and_all_three_exact_results(self):
         self.assertFalse(self.run_case('report-passed')['failed'])
-        cases = ['schema', 'hash', 'suite', 'missing-suite', 'scope', 'account', 'session',
+        cases = ['schema', 'hash', 'hash-array', 'hash-object', 'hash-unicode', 'suite', 'missing-suite', 'scope', 'account', 'session',
                  'native', 'production', 'version', 'error', 'extra-test',
                  'schema-string', 'schema-float', 'schema-bool',
                  'session-string', 'session-float', 'session-bool',
@@ -308,7 +401,8 @@ class WorkspaceRecoveryRunnerTests(unittest.TestCase):
                 self.assertEqual(value['task_calls'], 0 if case in ['publish-wrong-source', 'publish-wrong-digest'] else 1)
                 public = value['public']
                 self.assertEqual(set(public), {'schema', 'suite', 'proof_scope', 'production_readiness',
-                    'manifest_sha256', 'native_workspace_recovery_validation_passed', 'stages', 'checks', 'error'})
+                    'manifest_sha256', 'native_workspace_recovery_validation_passed', 'stages', 'checks', 'error',
+                    'runner_failure', 'diagnostics'})
                 self.assertEqual(public['schema'], 1)
                 self.assertEqual(public['suite'], 'WorkspaceRecovery')
                 self.assertEqual(public['proof_scope'], 'agent_cleanup_recovery')
@@ -319,6 +413,226 @@ class WorkspaceRecoveryRunnerTests(unittest.TestCase):
                 self.assertRegex(public['manifest_sha256'], r'\A[0-9a-f]{64}\Z')
                 if passed:
                     self.assertEqual(public['stages'], ['inputs_verified', 'task_completed_and_removed', 'report_verified'])
+                    self.assertIsNone(public['runner_failure'])
+                    self.assertEqual(public['diagnostics']['status'], 'available')
+                elif case in ['publish-wrong-source', 'publish-wrong-digest'] or case.startswith('publish-change:'):
+                    self.assertEqual(public['diagnostics'], {'status': 'unbound', 'checks': {}})
+
+    def test_private_progress_is_serial_consistent_and_never_authorizes_success(self):
+        for states, error in [(['not_attempted']*3, None), (['attempted', 'not_attempted', 'not_attempted'], None),
+                              (['completed', 'failed', 'not_attempted'], 'native_worker_failed'),
+                              (['completed', 'not_attempted', 'not_attempted'], 'native_worker_failed'),
+                              (['completed']*3, None)]:
+            with self.subTest(states=states):
+                report = {'progress': dict(zip(TESTS, states)), 'error': error,
+                          'checks': {name: 'passed' if state == 'completed' else 'not_verified'
+                                     for name, state in zip(TESTS, states)}}
+                self.assertFalse(self.run_case('partial-passed', {'report': report})['failed'])
+                if states != ['completed']*3:
+                    self.assertTrue(self.run_case('report-passed', {'report': report})['failed'])
+        cases = ['schema', 'hash', 'hash-array', 'hash-object', 'hash-unicode', 'suite', 'missing-suite', 'scope', 'account', 'session', 'native',
+                 'production', 'version', 'error', 'extra-test', 'schema-string', 'schema-float', 'schema-bool',
+                 'session-string', 'session-float', 'session-bool', 'native-string', 'native-number',
+                 'production-string', 'production-number', 'error-false', 'error-number', 'error-empty']
+        cases += [f'{kind}:{index}' for kind in ['no-test', 'skipped', 'case'] for index in range(3)]
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertTrue(self.run_case('partial-'+case)['failed'])
+        mutations = [
+            {'progress': dict(zip(TESTS, ['not_attempted', 'completed', 'completed']))},
+            {'progress': dict(zip(TESTS, ['attempted', 'attempted', 'not_attempted']))},
+            {'progress': dict(zip(TESTS, ['failed', 'not_attempted', 'not_attempted'])),
+             'checks': dict.fromkeys(TESTS, 'not_verified')},
+            {'progress': dict.fromkeys(TESTS, 'passed')},
+            {'progress': dict.fromkeys(TESTS, 1)},
+            {'progress': {**dict.fromkeys(TESTS, 'completed'), 'other': 'completed'}},
+            {'progress': dict.fromkeys([TESTS[0].upper(), *TESTS[1:]], 'completed')},
+            {'progress': dict.fromkeys(TESTS[:2], 'completed')},
+            {'checks': dict.fromkeys(TESTS, True)},
+            {'suite': ['WorkspaceRecovery']}, {'proof_scope': ['agent_cleanup_recovery']},
+            {'user_sid': ['S-1-5-18']}, {'windows_version': ['fixture']},
+            {'raw_output': 'private_fixture_payload'}, {'progress': None},
+            {'progress': dict.fromkeys(TESTS, 'comple\u00adted')},
+            {'error': 'native_worker_\u00adfailed'},
+        ]
+        for report in mutations:
+            with self.subTest(fields=list(report)):
+                self.assertTrue(self.run_case('partial-passed', {'report': report})['failed'])
+        self.assertTrue(self.run_case('partial-passed', {'remove_fields': ['progress']})['failed'])
+
+    def test_full_and_partial_identity_and_results_reject_collection_coercion(self):
+        fields = {'suite': 'WorkspaceRecovery', 'proof_scope': 'agent_cleanup_recovery',
+                  'user_sid': 'S-1-5-18', 'windows_version': 'fixture'}
+        for prefix in ['report-', 'partial-']:
+            for name, scalar in fields.items():
+                values = [[scalar], {'value': scalar}]
+                if name != 'windows_version':
+                    values.append(scalar[:1]+'\u00ad'+scalar[1:])
+                for value in values:
+                    with self.subTest(prefix=prefix, field=name, value_type=type(value).__name__):
+                        self.assertTrue(self.run_case(prefix+'passed', {'report': {name: value}})['failed'])
+            for index, name in enumerate(TESTS):
+                for value in [['passed'], {'value': 'passed'}, 'pass\u00aded']:
+                    with self.subTest(prefix=prefix, check=index, value_type=type(value).__name__):
+                        checks = {**dict.fromkeys(TESTS, 'passed'), name: value}
+                        self.assertTrue(self.run_case(prefix+'passed', {'report': {'checks': checks}})['failed'])
+
+    def test_failed_tasks_can_only_publish_bound_diagnostic_progress(self):
+        errors = [
+            ('Native service task failed: 1', 'task_failed_with_report'),
+            ('Native service task deadline elapsed without a completed, valid report', 'task_timeout'),
+            ('Fixture task ownership changed; retained for inspection', 'task_ownership_failed'),
+            ('Fixture task did not stop; retained for inspection', 'task_stop_failed'),
+        ]
+        for message, category in errors:
+            with self.subTest(category=category):
+                value = self.run_case('publish-passed', {'cleanup_error': message})
+                public = value['public']
+                self.assertTrue(value['failed'])
+                self.assertFalse(public['native_workspace_recovery_validation_passed'])
+                self.assertEqual(public['checks'], dict.fromkeys(TESTS, 'not_verified'))
+                self.assertEqual(public['runner_failure'], category)
+                self.assertEqual(public['diagnostics']['status'], 'available')
+                self.assertEqual([public['diagnostics']['checks'][name]['progress'] for name in TESTS], ['completed']*3)
+        report = {'progress': dict(zip(TESTS, ['completed', 'failed', 'not_attempted'])),
+                  'checks': dict(zip(TESTS, ['passed', 'not_verified', 'not_verified'])), 'error': 'native_worker_failed'}
+        value = self.run_case('publish-passed', {
+            'report': report, 'task_error': 'Native service task failed: 1',
+            'logs': [['ATHERNEX_WORKSPACE_STAGE=guard_verified'],
+                     ['ATHERNEX_WORKSPACE_STAGE=preview_prepared', 'ATHERNEX_WORKSPACE_EXIT=preview_recovery:-1',
+                      'ATHERNEX_WORKSPACE_FAILURE=invalid_scratch_request', 'private_fixture_payload'],
+                     ['ATHERNEX_WORKSPACE_STAGE=workspace_cleanup_verified']]})
+        public = value['public']
+        self.assertTrue(value['failed'])
+        self.assertEqual(public['checks'], dict.fromkeys(TESTS, 'not_verified'))
+        self.assertEqual(public['runner_failure'], 'task_failed_with_report')
+        self.assertEqual(public['diagnostics']['checks'][TESTS[1]], {
+            'progress': 'failed', 'stages': ['preview_prepared'], 'failures': ['invalid_scratch_request'],
+            'exits': [{'operation': 'preview_recovery', 'exit_code': -1}]})
+        self.assertEqual(public['diagnostics']['checks'][TESTS[2]], {
+            'progress': 'not_attempted', 'stages': [], 'failures': [], 'exits': []})
+        # A valid initialized or partial checkpoint can never satisfy the full validator.
+        for states in [['not_attempted']*3, ['completed', 'attempted', 'not_attempted']]:
+            report = {'progress': dict(zip(TESTS, states)),
+                      'checks': {name: 'passed' if state == 'completed' else 'not_verified'
+                                 for name, state in zip(TESTS, states)}}
+            value = self.run_case('publish-passed', {'report': report})
+            self.assertTrue(value['failed'])
+            self.assertEqual(value['public']['runner_failure'], 'report_check_failed')
+            self.assertEqual(value['public']['diagnostics']['status'], 'available')
+            self.assertEqual(value['public']['checks'], dict.fromkeys(TESTS, 'not_verified'))
+
+    def test_missing_corrupt_stale_and_unbound_diagnostics_are_not_projected(self):
+        value = self.run_case('publish-passed', {'task_error_before': 'Native service task failed before writing its report: 4294967295'})
+        self.assertEqual(value['public']['runner_failure'], 'task_failed_without_report')
+        self.assertEqual(value['public']['diagnostics'], {'status': 'missing', 'checks': {}})
+        cases = [{'report': {'suite': 'Isolation'}}, {'report': {'manifest_sha256': 'b'*64}},
+                 {'report': {'schema': '1'}}, {'report': {'session_id': '0'}},
+                 {'report': {'native_windows_executed': 'True'}}, {'report': {'production_readiness': 'False'}},
+                 {'report': {'error': 'private_fixture_payload'}}, {'report': {'error': False}},
+                 {'report': {'progress': dict.fromkeys(TESTS, 'private_fixture_payload')}},
+                 {'remove_fields': ['progress']}, {'corrupt_report': True},
+                 {'report': {key: 'private_fixture_payload' for key in ['raw_output', 'credential', 'nonce', 'state_path']}}]
+        for scenario in cases:
+            with self.subTest(fields=list(scenario)):
+                value = self.run_case('publish-passed', {**scenario, 'task_error': 'Native service task failed: 1'})
+                self.assertTrue(value['failed'])
+                self.assertEqual(value['public']['diagnostics'], {'status': 'invalid', 'checks': {}})
+                self.assertEqual(value['public']['checks'], dict.fromkeys(TESTS, 'not_verified'))
+        value = self.run_case('publish-passed', {'cleanup_error': 'Fixture task did not stop; retained for inspection',
+            'logs': [['ATHERNEX_WORKSPACE_STAGE=guard_verified']], 'log_io_failure': True, 'log_io_index': 0})
+        self.assertEqual(value['public']['diagnostics'], {'status': 'unavailable', 'checks': {}})
+        self.assertFalse(value['public']['native_workspace_recovery_validation_passed'])
+        for name in INPUTS + ['inputs.json']:
+            with self.subTest(missing_input=name):
+                value = self.run_case('publish-passed', {'remove_input': name})
+                self.assertTrue(value['failed'])
+                self.assertEqual(value['task_calls'], 0)
+                self.assertEqual(value['public']['runner_failure'],
+                                 'input_manifest_invalid' if name == 'inputs.json' else 'input_file_invalid')
+                self.assertEqual(value['public']['diagnostics'], {'status': 'unbound', 'checks': {}})
+
+    def test_marker_grammar_is_closed_bounded_and_bom_aware(self):
+        lines = ['ATHERNEX_WORKSPACE_STAGE='+tag for tag in STAGES]
+        lines += ['ATHERNEX_WORKSPACE_FAILURE='+tag for tag in FAILURES]
+        lines += ['ATHERNEX_WORKSPACE_EXIT=scratch_cleanup:-2147483648',
+                  'ATHERNEX_WORKSPACE_EXIT=preview_recovery:0', 'ATHERNEX_WORKSPACE_EXIT=workspace_cleanup:2147483647']
+        expected = {'stages': STAGES, 'failures': FAILURES,
+                    'exits': [{'operation': 'scratch_cleanup', 'exit_code': -2147483648},
+                              {'operation': 'preview_recovery', 'exit_code': 0},
+                              {'operation': 'workspace_cleanup', 'exit_code': 2147483647}]}
+        for encoding in ['utf8', 'utf8bom', 'utf16le']:
+            with self.subTest(encoding=encoding):
+                value = self.run_case('markers', {'logs': [lines], 'log_encoding': encoding})
+                self.assertFalse(value['failed'])
+                self.assertEqual(value['markers'], expected)
+        invalid = []
+        for line in lines:
+            invalid += [' '+line, line+' ', line+'private_fixture_payload', line.lower(), '\t'+line,
+                        line+'\x00', line+'\u200b', line.replace('ATHERNEX', 'ＡＴＨＥＲＮＥＸ')]
+        invalid += ['ATHERNEX_WORKSPACE_STAGE=unknown', 'ATHERNEX_WORKSPACE_FAILURE=unknown',
+                    'ATHERNEX_WORKSPACE_EXIT=private_fixture_payload:1']
+        invalid += ['ATHERNEX_WORKSPACE_EXIT=scratch_cleanup:'+value for value in
+                    ['-0', '+1', '01', '-01', '2147483648', '-2147483649', '99999999999',
+                     '1.0', '1e2', '١', '１', '', ' 1', '1 ', '--1']]
+        value = self.run_case('markers', {'logs': [invalid]})
+        self.assertEqual(value['markers'], {'stages': [], 'failures': [], 'exits': []})
+        value = self.run_case('markers', {'logs': [lines[:32]*4 + ['ATHERNEX_WORKSPACE_EXIT=scratch_cleanup:1']*40]})
+        self.assertEqual(value['markers']['stages'], STAGES)
+        self.assertEqual(value['markers']['failures'], FAILURES)
+        self.assertEqual(len(value['markers']['exits']), 32)
+
+    def test_checkpoint_and_log_io_failures_stop_work_and_restore_environment(self):
+        for checkpoint in range(1, 7):
+            with self.subTest(checkpoint=checkpoint):
+                value = self.run_case('worker-passed', {'checkpoint_failure': checkpoint})
+                self.assertTrue(value['failed'])
+                self.assertEqual(value['executed'], TESTS[:checkpoint//2])
+                failed_index = (checkpoint-1)//2
+                states = ['completed' if i < failed_index else 'failed' if i == failed_index else 'not_attempted' for i in range(3)]
+                self.assertEqual(value['worker']['progress'], dict(zip(TESTS, states)))
+                self.assertEqual(value['checkpoint']['progress'], dict(zip(TESTS, states)))
+                self.assertEqual(value['checkpoint']['error'], 'native_worker_failed')
+        value = self.run_case('worker-passed', {'checkpoint_failure': 2, 'checkpoint_persistent': True})
+        self.assertTrue(value['failed'])
+        self.assertEqual(value['executed'], TESTS[:1])
+        self.assertEqual(value['checkpoint']['progress'][TESTS[0]], 'attempted')
+        self.assertEqual(value['checkpoint']['checks'], dict.fromkeys(TESTS, 'not_verified'))
+        for index in range(3):
+            with self.subTest(log_index=index):
+                value = self.run_case('worker-passed', {'log_io_failure': True, 'log_io_index': index})
+                self.assertTrue(value['failed'])
+                self.assertEqual(value['executed'], TESTS[:index+1])
+                self.assertEqual(value['worker']['progress'][TESTS[index]], 'failed')
+                self.assertEqual(value['checkpoint']['error'], 'native_worker_failed')
+
+    def test_runner_failure_categories_never_contain_exception_text(self):
+        known = {
+            'Workspace-recovery input manifest changed': 'input_manifest_changed',
+            'Invalid workspace-recovery input manifest': 'input_manifest_invalid',
+            'Staged workspace-recovery input changed': 'input_file_changed',
+            'Staged workspace-recovery input invalid': 'input_file_invalid',
+            'Invalid workspace-recovery worker identity or result': 'report_identity_invalid',
+            'Incomplete workspace-recovery check set': 'report_check_set_invalid',
+            'Workspace-recovery native check did not pass': 'report_check_failed',
+            'Native service task deadline elapsed without a completed, valid report': 'task_timeout',
+            'Fixture task already exists': 'task_ownership_failed',
+            'Fixture task ownership changed; retained for inspection': 'task_ownership_failed',
+            'Fixture task did not stop; retained for inspection': 'task_stop_failed',
+            'Native service task failed: 1': 'task_failed_with_report',
+            'Native service task failed: 4294967295': 'task_failed_with_report',
+            'Native service task failed before writing its report: 1': 'task_failed_without_report',
+        }
+        invalid = [message+' private_fixture_payload' for message in known]
+        invalid += ['native service task failed: 1', 'Native service task failed: 01', 'Native service task failed: -1',
+                    'Native service task failed: +1', 'Native service task failed: 4294967296',
+                    'Native service task failed: ١', 'Native service task failed: 1\n', 'private_fixture_payload']
+        value = self.run_case('classify', {'messages': list(known)+invalid})
+        self.assertEqual(value['categories'], list(known.values())+['other']*len(invalid))
+
+    @classmethod
+    def tearDownClass(cls):
+        print(f'PowerShell scenarios: {cls.scenarios}')
 
     def test_workflow_stages_release_agent_and_only_uploads_public_projection(self):
         workflow = (SCRIPT.parent.parent/'.github/workflows/endpoint.yml').read_text()

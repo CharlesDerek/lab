@@ -118,7 +118,7 @@ pub fn worker_main(parent: u32) -> Result<Completion> {
         || request
             .state
             .to_str()
-            .is_none_or(|s| !evidence::drive_path(s))
+            .is_none_or(|s| !evidence::worker_state_path(s))
     {
         return Err("Invalid Windows workspace cleanup request".into());
     }
