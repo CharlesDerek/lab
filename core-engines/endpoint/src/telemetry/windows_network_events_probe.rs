@@ -40,7 +40,7 @@ fn api(operation: &'static str, code: u32) -> Result<()> {
         "query_trace" => "session_ownership",
         "stop_trace" => "session_cleanup",
         "tdh_information" => "tdh_schema",
-        "tdh_property_size" | "tdh_property" => "tdh_property",
+        "tdh_property_size" | "tdh_property" | "tdh_format_property" => "tdh_property",
         _ => return Err("guard"),
     };
     println!("\nATHERNEX_NETWORK_SOURCE_DIAGNOSTIC={operation}:{code}");
@@ -403,6 +403,7 @@ fn owned_network_source_reports_controlled_tcp_udp() {
     schema::property_names_and_scalar_metadata_are_bounded_and_typed();
     schema::failed_property_context_never_contains_private_values();
     schema::context_hypothesis_requires_exact_v2_template();
+    schema::formatter_values_and_bounds_are_checked();
     fixed_failure_categories_do_not_expose_values();
     diagnostics::exact_configuration_rejects_extra_modes_flags_files_and_clock_changes();
     let outcome = std::panic::catch_unwind(|| -> Result<()> {

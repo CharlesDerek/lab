@@ -816,11 +816,14 @@ The source fixture tests a specific version-two layout hypothesis: Microsoft's
 declares a 32-bit connection field. The fixture selects a four-byte
 [TDH property context](https://learn.microsoft.com/en-us/windows/win32/api/tdh/ne-tdh-tdh_context_type)
 only for matching provider, operation, version and complete ordered field layouts.
-It preserves the captured header flags and requires every TDH property to match
-the original bytes, with no missing or trailing payload. The reported
+It preserves the captured header flags and installed metadata. Sequential
+[TDH formatting](https://learn.microsoft.com/en-us/windows/win32/api/tdh/nf-tdh-tdhformatproperty)
+must consume exactly each field's expected bytes; every formatted scalar,
+address and port must agree with an independent decode of those original bytes.
+The complete payload must be consumed, without missing or trailing data. The reported
 `pointer_bits` describes the original header; the structural fingerprint also
 includes the separate property context width. An unflagged `connid` metadata
-length may match the original metadata-query context; the subsequent TDH reads
+length may match the original metadata-query context; the subsequent TDH formatting
 and complete payload comparison must establish the candidate wire width.
 Explicit fixed-length mismatches remain refusals. This experiment requires native
 verification of each controlled event kind and does not establish a general

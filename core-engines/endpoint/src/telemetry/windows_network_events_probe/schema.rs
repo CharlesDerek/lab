@@ -1,11 +1,13 @@
 //! Installed TDH metadata and bytes are checked independently against owned records.
 //! Microsoft TcpIp/UdpIp MOF pages define operation semantics, not an assumed layout.
+mod format;
 mod template;
 use super::{
     api,
     native::{same_guid, Original},
     require, Result,
 };
+pub(super) use format::formatter_values_and_bounds_are_checked;
 use std::{
     collections::BTreeMap,
     mem::{offset_of, size_of},
@@ -26,6 +28,9 @@ pub(super) struct Report {
     pub schema_hash: String,
 }
 struct Metadata {
+    // Retain the complete initialized, aligned installed metadata for TDH.
+    native_info: Vec<u64>,
+    native_info_bytes: usize,
     context: TDH_CONTEXT,
     properties: BTreeMap<String, EVENT_PROPERTY_INFO>,
     order: Vec<String>,
@@ -54,40 +59,6 @@ fn name(bytes: &[u8], offset: u32) -> Result<String> {
         units.push(unit);
     }
     Err("Schema property name unterminated")
-}
-fn property_raw(
-    record: &EVENT_RECORD,
-    context: &TDH_CONTEXT,
-    field: &str,
-    expected: usize,
-) -> Result<Vec<u8>> {
-    let wide: Vec<u16> = field.encode_utf16().chain([0]).collect();
-    let descriptor = PROPERTY_DATA_DESCRIPTOR {
-        PropertyName: wide.as_ptr() as u64,
-        ArrayIndex: u32::MAX,
-        Reserved: 0,
-    };
-    let mut bytes = 0;
-    api("tdh_property_size", unsafe {
-        TdhGetPropertySize(record, 1, context, 1, &descriptor, &mut bytes)
-    })?;
-    require(
-        bytes as usize == expected && expected <= 16,
-        "TDH scalar property size differs",
-    )?;
-    let mut value = vec![0; expected];
-    api("tdh_property", unsafe {
-        TdhGetProperty(
-            record,
-            1,
-            context,
-            1,
-            &descriptor,
-            bytes,
-            value.as_mut_ptr(),
-        )
-    })?;
-    Ok(value)
 }
 // Formatting has no side effects; only the failed native property path below
 // publishes it. This is an attempted schema, never accepted controlled evidence.
@@ -138,19 +109,14 @@ fn attempt_line(
         record.UserDataLength
     ))
 }
-fn property(
-    record: &EVENT_RECORD,
-    metadata: &Metadata,
+fn property<'a>(
+    values: &'a BTreeMap<String, Vec<u8>>,
     field: &str,
     expected: usize,
-) -> Result<Vec<u8>> {
-    let result = property_raw(record, &metadata.context, field, expected);
-    if result.is_err() {
-        if let Some(line) = attempt_line(record, metadata, field, expected) {
-            println!("\n{line}");
-        }
-    }
-    result
+) -> Result<&'a [u8]> {
+    let value = values.get(field).ok_or("tdh_property")?;
+    require(value.len() == expected, "tdh_property")?;
+    Ok(value)
 }
 fn scalar_type(
     properties: &BTreeMap<String, EVENT_PROPERTY_INFO>,
@@ -172,13 +138,13 @@ fn scalar_type(
     )
 }
 fn scalar32(
-    record: &EVENT_RECORD,
+    values: &BTreeMap<String, Vec<u8>>,
     metadata: &Metadata,
     field: &str,
     expected: &[i32],
 ) -> Result<u32> {
     scalar_type(&metadata.properties, field, expected)?;
-    let value = property(record, metadata, field, 4)?;
+    let value = property(values, field, 4)?;
     Ok(u32::from_le_bytes(
         value.try_into().map_err(|_| "Invalid scalar bytes")?,
     ))
@@ -289,19 +255,22 @@ fn metadata(record: &EVENT_RECORD) -> Result<Metadata> {
         ));
     }
     let descriptor = record.EventHeader.EventDescriptor;
+    let decoding_source = info.DecodingSource;
     let fingerprint = |context_bytes| -> Result<String> {
         let canonical = serde_json::to_vec(&(
             ("event_header_pointer_bits", pointer_bits),
             ("tdh_property_context_bytes", context_bytes),
             descriptor.Version,
             descriptor.Opcode,
-            info.DecodingSource,
+            decoding_source,
             &layout,
         ))
         .map_err(|_| "Schema fingerprint failed")?;
         Ok(athernex_endpoint_protocol::hash(&canonical))
     };
     let mut metadata = Metadata {
+        native_info: buffer,
+        native_info_bytes: required as usize,
         context,
         properties,
         order,
@@ -346,7 +315,7 @@ fn typed(
     )
 }
 fn socket(
-    record: &EVENT_RECORD,
+    values: &BTreeMap<String, Vec<u8>>,
     metadata: &Metadata,
     ipv6: bool,
     address: &str,
@@ -369,7 +338,7 @@ fn socket(
         TDH_INTYPE_UINT16,
         TDH_OUTTYPE_PORT,
     )?;
-    let bytes = property(record, metadata, address, if ipv6 { 16 } else { 4 })?;
+    let bytes = property(values, address, if ipv6 { 16 } else { 4 })?;
     let ip = if ipv6 {
         IpAddr::V6(Ipv6Addr::from(
             <[u8; 16]>::try_from(bytes).map_err(|_| "tdh_property")?,
@@ -379,52 +348,19 @@ fn socket(
             <[u8; 4]>::try_from(bytes).map_err(|_| "tdh_property")?,
         ))
     };
-    let bytes = property(record, metadata, port, 2)?;
+    let bytes = property(values, port, 2)?;
     let port = u16::from_be_bytes(bytes.try_into().map_err(|_| "tdh_property")?);
     Ok(SocketAddr::new(ip, port))
-}
-
-// Check every field, not just the controlled tuple: TDH values must match a
-// complete sequential partition of the original packed MOF payload. Metadata
-// supplies types; the exact-template hypothesis supplies connid's context width.
-fn layout(record: &EVENT_RECORD, original: &Original, metadata: &Metadata) -> Result<()> {
-    let mut offset = 0usize;
-    for field in &metadata.order {
-        let info = metadata.properties.get(field).ok_or("tdh_schema")?;
-        let input = unsafe { info.Anonymous1.nonStructType.InType } as i32;
-        scalar_type(&metadata.properties, field, &[input])?;
-        let size = match input {
-            TDH_INTYPE_UINT8 | TDH_INTYPE_INT8 => 1,
-            TDH_INTYPE_UINT16 | TDH_INTYPE_INT16 => 2,
-            TDH_INTYPE_UINT32 | TDH_INTYPE_INT32 | TDH_INTYPE_HEXINT32 => 4,
-            TDH_INTYPE_UINT64 | TDH_INTYPE_INT64 | TDH_INTYPE_HEXINT64 => 8,
-            TDH_INTYPE_POINTER => metadata.context.ParameterValue as usize,
-            TDH_INTYPE_BINARY
-                if unsafe { info.Anonymous1.nonStructType.OutType } as i32 == TDH_OUTTYPE_IPV6 =>
-            {
-                16
-            }
-            _ => return Err("tdh_schema"),
-        };
-        let value = property(record, metadata, field, size)?;
-        let end = offset.checked_add(size).ok_or("tdh_schema")?;
-        require(
-            original.data().get(offset..end) == Some(value.as_slice()),
-            "tdh_schema",
-        )?;
-        offset = end;
-    }
-    require(offset == original.data().len(), "tdh_schema")
 }
 
 pub(super) fn decode(original: &Original, ipv6: bool) -> Result<Report> {
     original.with_record(|record| {
         let metadata = metadata(record)?;
-        layout(record, original, &metadata)?;
-        let pid = scalar32(record, &metadata, "PID", &[TDH_INTYPE_UINT32])?;
-        let size = scalar32(record, &metadata, "size", &[TDH_INTYPE_UINT32])?;
-        let source = socket(record, &metadata, ipv6, "saddr", "sport")?;
-        let destination = socket(record, &metadata, ipv6, "daddr", "dport")?;
+        let values = format::layout(record, original, &metadata)?;
+        let pid = scalar32(&values, &metadata, "PID", &[TDH_INTYPE_UINT32])?;
+        let size = scalar32(&values, &metadata, "size", &[TDH_INTYPE_UINT32])?;
+        let source = socket(&values, &metadata, ipv6, "saddr", "sport")?;
+        let destination = socket(&values, &metadata, ipv6, "daddr", "dport")?;
         // Pointer-qualified connid is retained as an original field only. It
         // never becomes a process incarnation or globally stable connection ID.
         scalar_type(&metadata.properties, "connid", &[TDH_INTYPE_POINTER])?;
@@ -485,6 +421,8 @@ pub(super) fn failed_property_context_never_contains_private_values() {
     // Deliberately private-looking metadata names are never projected.
     let field = "private_field_name";
     let mut metadata = Metadata {
+        native_info: Vec::new(),
+        native_info_bytes: 0,
         context: TDH_CONTEXT::default(),
         properties: BTreeMap::from([(field.into(), info)]),
         order: vec![field.into()],

@@ -24,7 +24,7 @@ KINDS = ['tcp4_connect', 'tcp4_accept', 'tcp4_send', 'tcp4_receive', 'tcp4_disco
          'tcp6_connect', 'tcp6_accept', 'tcp6_send', 'tcp6_receive', 'tcp6_disconnect',
          'udp4_send', 'udp4_receive', 'udp6_send', 'udp6_receive']
 OPERATIONS = ['start_trace', 'open_trace', 'process_trace', 'query_trace', 'stop_trace', 'close_trace',
-              'tdh_information', 'tdh_property_size', 'tdh_property']
+              'tdh_information', 'tdh_property_size', 'tdh_property', 'tdh_format_property']
 OWNERSHIP = ['process_intent', 'process_identity', 'process_configuration', 'process_controller',
              'network_identity', 'network_configuration', 'network_controller']
 WRAPPER = r'''
@@ -417,10 +417,14 @@ class NetworkSourceRunnerTests(unittest.TestCase):
                     self.assertTrue(worker['failed'])
                     self.assertEqual(worker['worker']['checks'], dict.fromkeys(TESTS, 'not_verified'))
                     self.assert_public_failed(self.run_case('publish-passed', {field: missing}))
-        for scenario in [{'source_failure': 'callback_overflow'}, {'source_api': 'tdh_property'}]:
+        for scenario in [{'source_failure': 'callback_overflow'}, {'source_api': 'tdh_property'},
+                         {'source_api': 'tdh_format_property'}]:
             self.assertTrue(self.run_case('worker-passed', scenario)['failed'])
             public = self.assert_public_failed(self.run_case('publish-passed', scenario))
             self.assertEqual(public['runner_failure'], 'source_proof_failed')
+            if 'source_api' in scenario:
+                self.assertEqual(public['diagnostics']['checks'][TESTS[0]]['api_errors'],
+                                 [{'operation': scenario['source_api'], 'win32_error': 5}])
 
     def test_post_execution_hash_and_io_failures_stop_success_and_restore_environment(self):
         for name in INPUTS+['inputs.json']:

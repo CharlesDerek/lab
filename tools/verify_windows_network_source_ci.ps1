@@ -140,7 +140,7 @@ function Get-NetworkSourceSchemaKinds {
 
 function Get-NetworkSourceApiOperations {
     @('start_trace','open_trace','process_trace','query_trace','stop_trace','close_trace',
-      'tdh_information','tdh_property_size','tdh_property')
+      'tdh_information','tdh_property_size','tdh_property','tdh_format_property')
 }
 
 function Get-NetworkSourceOwnershipNames {
