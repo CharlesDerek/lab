@@ -557,6 +557,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        id: endpoint_source
       - uses: dtolnay/rust-toolchain@1.91.1
         with:
           components: clippy,rustfmt
@@ -607,8 +608,9 @@ jobs:
               exit 1
               ;;
           esac
+      # This SDK check does not depend on Rust binaries or packaging test outputs.
       - name: Compile unsigned macOS network components and run bounded source controls
-        if: runner.os == 'macOS'
+        if: ${{ !cancelled() && runner.os == 'macOS' && steps.endpoint_source.outcome == 'success' }}
         run: python3 tools/build_macos_network.py --output "$RUNNER_TEMP/macos-network" --development
       - uses: actions/upload-artifact@v4
         if: runner.os == 'macOS'

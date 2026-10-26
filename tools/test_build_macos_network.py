@@ -78,19 +78,41 @@ class NetworkBuildTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX replacement and ownership control")
     def test_writable_parent_and_foreign_leaf_refuse_without_chmodding_parent(self):
         with tempfile.TemporaryDirectory() as t:
-            parent = Path(t) / "shared"; parent.mkdir(); parent.chmod(0o770)
+            parent = Path(t).resolve() / "shared"; parent.mkdir(); parent.chmod(0o770)
             with self.assertRaisesRegex(b.BuildFailure, "^output_parent$"):
                 b.prepare_output(parent / "private")
             self.assertEqual(parent.stat().st_mode & 0o777, 0o770)
             parent.chmod(0o700); out = parent / "private"; out.mkdir()
-            native = Path.lstat
+            native = Path.lstat; injected = []
             def metadata(path):
                 if path == out:
+                    injected.append(True)
                     result = native(path)
                     return types.SimpleNamespace(st_mode=result.st_mode, st_uid=os.geteuid() + 1)
                 return native(path)
             with mock.patch.object(Path, "lstat", metadata), self.assertRaisesRegex(b.BuildFailure, "^output_owner$"):
                 b.prepare_output(out)
+            self.assertTrue(injected, "Foreign-owner metadata was not exercised")
+
+    @unittest.skipIf(os.name == "nt", "POSIX canonical-parent alias control")
+    def test_symlink_ancestor_keeps_foreign_owner_check_on_canonical_leaf(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t).resolve(); real = root / "real"; real.mkdir(mode=0o700)
+            alias = root / "alias"; alias.symlink_to(real, target_is_directory=True)
+            requested = alias / "private"; canonical = real / "private"
+            self.assertNotEqual(requested, canonical)
+            self.assertEqual(b.prepare_output(requested), canonical)
+            native = Path.lstat; injected = []
+            def metadata(path):
+                if path == canonical:
+                    injected.append(True)
+                    result = native(path)
+                    return types.SimpleNamespace(st_mode=result.st_mode, st_uid=os.geteuid() + 1)
+                return native(path)
+            with mock.patch.object(Path, "lstat", metadata), self.assertRaisesRegex(b.BuildFailure, "^output_owner$"):
+                b.prepare_output(requested)
+            self.assertTrue(injected, "Canonical foreign-owner metadata was not exercised")
+            self.assertEqual(canonical.stat().st_mode & 0o777, 0o700)
 
     def test_mocked_command_plan_compiles_actual_sources_without_signing_or_activation(self):
         with tempfile.TemporaryDirectory() as t:
