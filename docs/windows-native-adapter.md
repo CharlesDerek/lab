@@ -799,6 +799,10 @@ IPv4 and IPv6. The fixture validates native fields through TDH and binds selecte
 observations to its controlled traffic and pre-operation QPC boundaries. It also
 requires an unchanged process-collection session, zero source loss during the
 controlled phase, unchanged token context and bounded removal of its owned logger.
+The network logger explicitly selects stop-on-hybrid-shutdown. The existing
+process collector remains unchanged: the fixture accepts one documented hybrid
+mode and pins the complete queried mode for subsequent ownership checks, while
+requiring real-time delivery without file logging.
 
 Microsoft documents the [TCP/IP event family](https://learn.microsoft.com/en-us/windows/win32/etw/tcpip)
 and [UDP/IP event family](https://learn.microsoft.com/en-us/windows/win32/etw/udpip)
@@ -815,6 +819,13 @@ private. The report retains `proof_scope: "source_only"` and
 `production_readiness: false`. Native acceptance is pending. This fixture does
 not implement the production Windows network collector, durable delivery,
 authenticated original export or rollout coverage gates.
+
+Failure diagnostics identify fixed ownership-check branches. Only after the
+private session name and GUID match may they expose numeric mode/enable/clock
+configuration and boolean logfile-presence/offset checks. Names, GUIDs, handles
+and logfile text remain private. These diagnostics cannot authorize success.
+The hybrid-mode handling follows Microsoft's
+[ETW logging-mode contract](https://learn.microsoft.com/en-us/windows/win32/etw/logging-mode-constants).
 
 ## Reproduce the development build
 

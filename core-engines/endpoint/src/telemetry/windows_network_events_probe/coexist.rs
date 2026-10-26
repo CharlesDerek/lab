@@ -1,6 +1,6 @@
 //! Actual production collector coexistence; no second mock process logger.
 use super::super::windows_process_events::{health, Collector};
-use super::{native, qpc, require, Result};
+use super::{diagnostics::Ownership, native, qpc, require, Result};
 use crate::Store;
 use athernex_endpoint_protocol::{
     telemetry::Telemetry, windows_process_events::WindowsProcessChange, EndpointEvent,
@@ -24,8 +24,8 @@ struct Identity {
 impl Identity {
     fn read(store: &Store) -> Result<Self> {
         super::super::metadata(store, "windows_process_events_session")
-            .map_err(|_| "session_ownership")?
-            .ok_or("session_ownership")
+            .map_err(|_| Ownership::ProcessIntent.error("session_ownership"))?
+            .ok_or_else(|| Ownership::ProcessIntent.error("session_ownership"))
     }
     fn same(&self, other: &Self) -> bool {
         self.stream_id == other.stream_id
@@ -41,6 +41,7 @@ pub(super) struct Coexist<'a> {
     collector: Option<Collector<'a>>,
     identity: Identity,
     handle: u64,
+    log_file_mode: u32,
     child: Option<Child>,
     child_bound: i64,
 }
@@ -48,17 +49,19 @@ impl<'a> Coexist<'a> {
     pub fn start(store: &'a Store) -> Result<Self> {
         let collector = Collector::start(store).map_err(|_| "session_start")?;
         let identity = Identity::read(store)?;
-        require(
+        Ownership::ProcessIntent.require(
             identity.phase == "active" && identity.owner_pid == std::process::id(),
             "session_ownership",
         )?;
-        let handle = native::process_session(&identity.stream_id, &identity.session_name)?
-            .ok_or("session_ownership")?;
+        let (handle, log_file_mode) =
+            native::process_session(&identity.stream_id, &identity.session_name, None)?
+                .ok_or_else(|| Ownership::ProcessIdentity.error("session_ownership"))?;
         let result = Self {
             store,
             collector: Some(collector),
             identity,
             handle,
+            log_file_mode,
             child: None,
             child_bound: 0,
         };
@@ -68,17 +71,20 @@ impl<'a> Coexist<'a> {
     pub fn check(&self) -> Result<()> {
         self.collector
             .as_ref()
-            .ok_or("session_ownership")?
+            .ok_or_else(|| Ownership::ProcessIntent.error("session_ownership"))?
             .check()
             .map_err(|_| "consumer_start")?;
         let identity = Identity::read(self.store)?;
-        require(
+        Ownership::ProcessIntent.require(
             self.identity.same(&identity) && identity.phase == "active",
             "session_ownership",
         )?;
-        require(
-            native::process_session(&identity.stream_id, &identity.session_name)?
-                == Some(self.handle),
+        Ownership::ProcessController.require(
+            native::process_session(
+                &identity.stream_id,
+                &identity.session_name,
+                Some(self.log_file_mode),
+            )? == Some((self.handle, self.log_file_mode)),
             "session_ownership",
         )?;
         require(
@@ -196,12 +202,17 @@ impl<'a> Coexist<'a> {
         let before = self.check();
         self.collector.take();
         let identity = Identity::read(self.store)?;
-        require(
+        Ownership::ProcessIntent.require(
             self.identity.same(&identity) && identity.phase == "stopped",
             "session_cleanup",
         )?;
         require(
-            native::process_session(&identity.stream_id, &identity.session_name)?.is_none(),
+            native::process_session(
+                &identity.stream_id,
+                &identity.session_name,
+                Some(self.log_file_mode),
+            )?
+            .is_none(),
             "session_cleanup",
         )?;
         before

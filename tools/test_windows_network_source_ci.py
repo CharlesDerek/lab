@@ -25,6 +25,8 @@ KINDS = ['tcp4_connect', 'tcp4_accept', 'tcp4_send', 'tcp4_receive', 'tcp4_disco
          'udp4_send', 'udp4_receive', 'udp6_send', 'udp6_receive']
 OPERATIONS = ['start_trace', 'open_trace', 'process_trace', 'query_trace', 'stop_trace', 'close_trace',
               'tdh_information', 'tdh_property_size', 'tdh_property']
+OWNERSHIP = ['process_intent', 'process_identity', 'process_configuration', 'process_controller',
+             'network_identity', 'network_configuration', 'network_controller']
 WRAPPER = r'''
 param([string]$Script, [string]$Case, [string]$Root, [string]$Configuration)
 $ErrorActionPreference = 'Stop'
@@ -131,6 +133,7 @@ function Get-FixtureSourceLines {
     if ($scenario.omit_kind) { $values = @($values | Where-Object { -not $_.StartsWith(('ATHERNEX_NETWORK_SOURCE_SCHEMA=' + $scenario.omit_kind + ':'), [StringComparison]::Ordinal) }) }
     if ($scenario.source_failure) { $values += 'ATHERNEX_NETWORK_SOURCE_FAILURE=' + $scenario.source_failure }
     if ($scenario.source_api) { $values += 'ATHERNEX_NETWORK_SOURCE_DIAGNOSTIC=' + $scenario.source_api + ':5' }
+    if ($scenario.source_markers) { $values += @($scenario.source_markers) }
     $values
 }
 function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [string]$Log) {
@@ -181,6 +184,7 @@ function Invoke-ServiceFixtureTask($TaskName, $Action, $ResultFile, $Hash, $Time
     if ($scenario.task_error) { throw $scenario.task_error }
     & $Validator $report $Hash
     if ($scenario.post_task_failure) { Add-Content -LiteralPath (Join-Path $Root 'check-0.log') -Value 'ATHERNEX_NETWORK_SOURCE_FAILURE=callback_overflow' }
+    if ($scenario.post_task_markers) { Add-Content -LiteralPath (Join-Path $Root 'check-0.log') -Value @($scenario.post_task_markers) }
     if ($scenario.post_task_missing_log) { Remove-Item -LiteralPath (Join-Path $Root 'check-0.log') }
     if ($scenario.cleanup_error) { throw $scenario.cleanup_error }
     if ($Case -ceq 'publish-cleanup-failure') { throw 'private_fixture_payload' }
@@ -207,6 +211,7 @@ try {
         $output.tests = $testNames; $output.inputs = $inputNames
         $output.stages = @(Get-NetworkSourceStageNames); $output.failures = @(Get-NetworkSourceFailureNames)
         $output.kinds = @(Get-NetworkSourceSchemaKinds); $output.operations = @(Get-NetworkSourceApiOperations)
+        $output.ownership = @(Get-NetworkSourceOwnershipNames)
     } elseif ($Case.StartsWith('worker-') -or $Case.StartsWith('input-')) {
         if ($Case.StartsWith('worker-change:')) { Mutate-Input $Case.Substring(14) }
         $workerReport = @{ manifest_sha256=$digest; checks=[ordered]@{}; progress=[ordered]@{}; error=$null }
@@ -220,6 +225,11 @@ try {
         Invoke-NetworkSourceWorker $Root $false
     } elseif ($Case -ceq 'markers') {
         $output.markers = Get-NetworkSourceLogMarkers (Join-Path $Root 'check-0.log') -RequireLog
+    } elseif ($Case -ceq 'markers-assert') {
+        @(Get-FixtureSourceLines) | Set-Content -LiteralPath (Join-Path $Root 'check-0.log')
+        $markers = Get-NetworkSourceLogMarkers (Join-Path $Root 'check-0.log') -RequireLog
+        foreach ($property in $scenario.marker_overrides.PSObject.Properties) { $markers[$property.Name] = $property.Value }
+        Assert-NetworkSourceMarkers $markers
     } elseif ($Case -ceq 'classify') {
         $output.categories = @($scenario.messages | ForEach-Object { Get-NetworkSourceRunnerFailure $_ })
     } else {
@@ -324,7 +334,8 @@ class NetworkSourceRunnerTests(unittest.TestCase):
         value = self.run_case('contract')
         self.assertFalse(value['failed'])
         for field, expected in [('tests', TESTS), ('inputs', INPUTS), ('stages', STAGES),
-                                ('failures', FAILURES), ('kinds', KINDS), ('operations', OPERATIONS)]:
+                                ('failures', FAILURES), ('kinds', KINDS), ('operations', OPERATIONS),
+                                ('ownership', OWNERSHIP)]:
             self.assertEqual(value[field], expected)
         value = self.run_case('guard')
         self.assertTrue(value['failed'])
@@ -447,11 +458,14 @@ class NetworkSourceRunnerTests(unittest.TestCase):
         self.assertIsNone(public['runner_failure'])
         self.assertEqual(public['diagnostics']['status'], 'available')
         diagnostic = public['diagnostics']['checks'][TESTS[0]]
-        self.assertEqual(set(diagnostic), {'progress', 'stages', 'failures', 'api_errors', 'schemas'})
+        self.assertEqual(set(diagnostic), {'progress', 'stages', 'failures', 'api_errors', 'schemas',
+                                          'ownership', 'configuration'})
         self.assertEqual(diagnostic['stages'], STAGES)
         self.assertEqual([row['kind'] for row in diagnostic['schemas']], KINDS)
         self.assertEqual(diagnostic['failures'], [])
         self.assertEqual(diagnostic['api_errors'], [])
+        self.assertEqual(diagnostic['ownership'], [])
+        self.assertEqual(diagnostic['configuration'], [])
         cases = ['publish-task-failure', 'publish-cleanup-failure', 'publish-report-failure', 'publish-report-error',
                  'publish-report-change', 'publish-missing-report', 'publish-wrong-source', 'publish-wrong-digest',
                  *['publish-change:'+name for name in INPUTS+['inputs.json']]]
@@ -522,7 +536,8 @@ class NetworkSourceRunnerTests(unittest.TestCase):
             'tcp4_send:0:64:65:'+('a'*64), 'tcp4_send:0:64:01:'+('a'*64), 'tcp4_send:0:64:1:'+('A'*64),
             'tcp4_send:0:64:1:'+('a'*63), 'tcp4_send:0:64:1:'+('a'*65), 'tcp4_send:0:64:1:private_fixture_payload']]
         self.assertEqual(self.run_case('markers', {'logs': [invalid]})['markers'],
-                         {'stages': [], 'failures': [], 'api_errors': [], 'schemas': []})
+                         {'stages': [], 'failures': [], 'api_errors': [], 'schemas': [],
+                          'ownership': [], 'configuration': []})
         bounds = ['ATHERNEX_NETWORK_SOURCE_DIAGNOSTIC=query_trace:0']*40
         bounds += [f'ATHERNEX_NETWORK_SOURCE_SCHEMA=tcp4_send:{version}:64:1:'+('a'*64) for version in range(40)]
         markers = self.run_case('markers', {'logs': [bounds]})['markers']
@@ -532,6 +547,80 @@ class NetworkSourceRunnerTests(unittest.TestCase):
         self.assertEqual(markers['schemas'][-1]['version'], 31)
         duplicates = ['ATHERNEX_NETWORK_SOURCE_SCHEMA=tcp4_send:0:64:1:'+('a'*64)]*40
         self.assertEqual(len(self.run_case('markers', {'logs': [duplicates]})['markers']['schemas']), 1)
+
+    def test_ownership_and_configuration_are_closed_bounded_scalar_diagnostics(self):
+        ownership = ['ATHERNEX_NETWORK_SOURCE_OWNERSHIP='+tag for tag in OWNERSHIP]
+        configuration = [
+            'ATHERNEX_NETWORK_SOURCE_CONFIGURATION=process:0:4294967295:0:0:1',
+            'ATHERNEX_NETWORK_SOURCE_CONFIGURATION=network:4294967295:0:4294967295:1:0',
+        ]
+        expected = [
+            {'scope': 'process', 'log_file_mode': 0, 'enable_flags': 4294967295, 'client_context': 0,
+             'logfile_present': 0, 'logfile_offset_valid': 1},
+            {'scope': 'network', 'log_file_mode': 4294967295, 'enable_flags': 0, 'client_context': 4294967295,
+             'logfile_present': 1, 'logfile_offset_valid': 0},
+        ]
+        for encoding in ['utf8', 'utf8bom', 'utf16le']:
+            markers = self.run_case('markers', {'logs': [ownership*2+configuration], 'log_encoding': encoding})['markers']
+            self.assertEqual(markers['ownership'], OWNERSHIP)
+            self.assertEqual(markers['configuration'], expected)
+            for record in markers['configuration']:
+                for name, value in record.items():
+                    self.assertIs(type(value), str if name == 'scope' else int)
+        invalid = []
+        for line in ownership+configuration:
+            invalid += [' '+line, line+' ', '\t'+line, line+'private_fixture_payload', line.lower(),
+                        line+'\x00', line+'\u200b', line.replace('ATHERNEX', 'ＡＴＨＥＲＮＥＸ'),
+                        json.dumps([line]), line+'\\rextra']
+        invalid += ['ATHERNEX_NETWORK_SOURCE_OWNERSHIP='+tag for tag in
+                    ['unknown', 'process_\u00adidentity', 'PROCESS_IDENTITY', '["process_identity"]',
+                     '{"branch":"process_identity"}', 'process_identity:private_fixture_payload']]
+        fields = ['network', '1', '2', '3', '0', '1']
+        bad_values = ['-0', '-1', '+1', '01', '4294967296', '99999999999', '١', '１', '1.0', '1e2', '',
+                      '[1]', '{"value":1}', 'true', 'null', '1\u00ad']
+        for index in range(1, 6):
+            for value in bad_values + (['2', '4294967295'] if index >= 4 else []):
+                altered = fields.copy()
+                altered[index] = value
+                invalid.append('ATHERNEX_NETWORK_SOURCE_CONFIGURATION='+':'.join(altered))
+        for scope in ['unknown', 'Network', 'net\u00adwork', '["network"]', '{"scope":"network"}']:
+            invalid.append('ATHERNEX_NETWORK_SOURCE_CONFIGURATION='+scope+':1:2:3:0:1')
+        invalid += ['ATHERNEX_NETWORK_SOURCE_CONFIGURATION=network:1:2:3:0',
+                    'ATHERNEX_NETWORK_SOURCE_CONFIGURATION=network:1:2:3:0:1:0']
+        markers = self.run_case('markers', {'logs': [invalid]})['markers']
+        self.assertEqual(markers['ownership'], [])
+        self.assertEqual(markers['configuration'], [])
+        bounds = ownership*8 + [f'ATHERNEX_NETWORK_SOURCE_CONFIGURATION=process:{value}:0:0:0:1' for value in range(40)]
+        markers = self.run_case('markers', {'logs': [bounds]})['markers']
+        self.assertEqual(markers['ownership'], OWNERSHIP)
+        self.assertEqual([row['log_file_mode'] for row in markers['configuration']], list(range(16)))
+
+    def test_ownership_failure_diagnostics_cannot_promote_a_passing_native_check(self):
+        lines = ['ATHERNEX_NETWORK_SOURCE_OWNERSHIP='+tag for tag in OWNERSHIP]
+        lines += ['ATHERNEX_NETWORK_SOURCE_CONFIGURATION='+scope+':1:2:3:0:1' for scope in ['process', 'network']]
+        for line in lines:
+            with self.subTest(line=line):
+                worker = self.run_case('worker-passed', {'source_markers': [line]})
+                self.assertTrue(worker['failed'])
+                self.assertEqual(worker['executed'], TESTS)
+                self.assertEqual(worker['checkpoint']['checks'], dict.fromkeys(TESTS, 'not_verified'))
+                self.assertEqual(worker['checkpoint']['progress'], dict.fromkeys(TESTS, 'failed'))
+                public = self.assert_public_failed(self.run_case('publish-passed', {'source_markers': [line]}))
+                self.assertEqual(public['runner_failure'], 'source_proof_failed')
+                diagnostic = public['diagnostics']['checks'][TESTS[0]]
+                self.assertEqual(diagnostic['progress'], 'completed')
+                self.assertEqual(len(diagnostic['ownership'])+len(diagnostic['configuration']), 1)
+        for line in [lines[0], lines[-1]]:
+            public = self.assert_public_failed(self.run_case('publish-passed', {'post_task_markers': [line]}))
+            self.assertEqual(public['runner_failure'], 'source_proof_failed')
+        for field in ['ownership', 'configuration']:
+            for value in [None, '', {}, 0, False, ['process_identity'], {'scope': 'network'}]:
+                with self.subTest(field=field, value=value):
+                    self.assertTrue(self.run_case('markers-assert', {'marker_overrides': {field: value}})['failed'])
+            self.assertFalse(self.run_case('markers-assert', {'marker_overrides': {field: []}})['failed'])
+            public = self.assert_public_failed(self.run_case('publish-passed', {
+                'report': {field: ['private_fixture_payload']}, 'task_error': 'Native service task failed: 1'}))
+            self.assertEqual(public['diagnostics'], {'status': 'invalid', 'checks': {}})
 
     def test_runner_failure_categories_never_publish_exception_text(self):
         known = {

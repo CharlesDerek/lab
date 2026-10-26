@@ -143,12 +143,18 @@ function Get-NetworkSourceApiOperations {
       'tdh_information','tdh_property_size','tdh_property')
 }
 
+function Get-NetworkSourceOwnershipNames {
+    @('process_intent','process_identity','process_configuration','process_controller',
+      'network_identity','network_configuration','network_controller')
+}
+
 function Get-NetworkSourceLogMarkers([string]$Log, [switch]$RequireLog) {
     $stages = @(Get-NetworkSourceStageNames)
     $failures = @(Get-NetworkSourceFailureNames)
     $operations = @(Get-NetworkSourceApiOperations)
     $kinds = @(Get-NetworkSourceSchemaKinds)
-    $result = @{ stages=@(); failures=@(); api_errors=@(); schemas=@() }
+    $ownership = @(Get-NetworkSourceOwnershipNames)
+    $result = @{ stages=@(); failures=@(); api_errors=@(); schemas=@(); ownership=@(); configuration=@() }
     $schemaSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     try {
         if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) {
@@ -165,6 +171,26 @@ function Get-NetworkSourceLogMarkers([string]$Log, [switch]$RequireLog) {
             foreach ($tag in $failures) {
                 if ([StringComparer]::Ordinal.Equals($line, ('ATHERNEX_NETWORK_SOURCE_FAILURE=' + $tag)) -and $result.failures -cnotcontains $tag) {
                     $result.failures += $tag
+                }
+            }
+            foreach ($tag in $ownership) {
+                if ([StringComparer]::Ordinal.Equals($line, ('ATHERNEX_NETWORK_SOURCE_OWNERSHIP=' + $tag)) -and
+                    [Array]::IndexOf([string[]]$result.ownership, $tag) -lt 0) {
+                    $result.ownership += $tag
+                }
+            }
+            if ($result.configuration.Count -lt 16 -and $line -cmatch '\AATHERNEX_NETWORK_SOURCE_CONFIGURATION=(process|network):(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,9}):(0|[1-9][0-9]{0,9}):(0|1):(0|1)\z') {
+                $mode = [uint32]0
+                $flags = [uint32]0
+                $context = [uint32]0
+                if ([uint32]::TryParse($Matches[2], [Globalization.NumberStyles]::None,
+                        [Globalization.CultureInfo]::InvariantCulture, [ref]$mode) -and
+                    [uint32]::TryParse($Matches[3], [Globalization.NumberStyles]::None,
+                        [Globalization.CultureInfo]::InvariantCulture, [ref]$flags) -and
+                    [uint32]::TryParse($Matches[4], [Globalization.NumberStyles]::None,
+                        [Globalization.CultureInfo]::InvariantCulture, [ref]$context)) {
+                    $result.configuration += @{ scope=$Matches[1]; log_file_mode=$mode; enable_flags=$flags;
+                        client_context=$context; logfile_present=[int]$Matches[5]; logfile_offset_valid=[int]$Matches[6] }
                 }
             }
             if ($result.api_errors.Count -lt 32 -and $line -cmatch '\AATHERNEX_NETWORK_SOURCE_DIAGNOSTIC=([a-z_]+):(0|[1-9][0-9]{0,9})\z') {
@@ -194,7 +220,9 @@ function Get-NetworkSourceLogMarkers([string]$Log, [switch]$RequireLog) {
 
 function Assert-NetworkSourceMarkers($Markers) {
     if ($null -eq $Markers.failures -or $null -eq $Markers.api_errors -or
-        @($Markers.failures).Count -ne 0 -or @($Markers.api_errors).Count -ne 0) {
+        @($Markers.failures).Count -ne 0 -or @($Markers.api_errors).Count -ne 0 -or
+        $Markers.ownership -isnot [array] -or $Markers.configuration -isnot [array] -or
+        $Markers.ownership.Count -ne 0 -or $Markers.configuration.Count -ne 0) {
         throw 'Network-source proof has contradictory failure evidence'
     }
     $expected = @(Get-NetworkSourceStageNames)
@@ -256,11 +284,12 @@ function Get-NetworkSourceDiagnostics([string]$ProofDirectory, [string]$Manifest
         $projected = [ordered]@{}
         $position = 0
         foreach ($name in Get-NetworkSourceTests) {
-            $markers = @{ stages=@(); failures=@(); api_errors=@(); schemas=@() }
+            $markers = @{ stages=@(); failures=@(); api_errors=@(); schemas=@(); ownership=@(); configuration=@() }
             if ($report.progress.$name -cne 'not_attempted') {
                 $markers = Get-NetworkSourceLogMarkers (Join-Path $ProofDirectory ('check-' + $position + '.log'))
             }
-            $projected[$name] = @{ progress=$report.progress.$name; stages=$markers.stages; failures=$markers.failures; api_errors=$markers.api_errors; schemas=$markers.schemas }
+            $projected[$name] = @{ progress=$report.progress.$name; stages=$markers.stages; failures=$markers.failures;
+                api_errors=$markers.api_errors; schemas=$markers.schemas; ownership=$markers.ownership; configuration=$markers.configuration }
             $position += 1
         }
         # Recheck after reading diagnostic files as well as before projecting them.
@@ -362,7 +391,8 @@ function Invoke-NetworkSourceEvidence([string]$ProofDirectory, [string]$ProofTas
         # replace it with a later diagnostic read after authorizing success.
         $public.diagnostics = @{ status='available'; checks=[ordered]@{} }
         $public.diagnostics.checks[@(Get-NetworkSourceTests)[0]] = @{ progress='completed';
-            stages=$markers.stages; failures=$markers.failures; api_errors=$markers.api_errors; schemas=$markers.schemas }
+            stages=$markers.stages; failures=$markers.failures; api_errors=$markers.api_errors; schemas=$markers.schemas;
+            ownership=$markers.ownership; configuration=$markers.configuration }
         $public.stages += 'report_verified'
         foreach ($name in Get-NetworkSourceTests) { $public.checks[$name] = 'passed' }
         $public.native_network_source_validation_passed = $true

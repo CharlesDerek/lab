@@ -1,5 +1,6 @@
 //! Disposable source proof only. No production network collector or wire schema.
 mod coexist;
+mod diagnostics;
 mod native;
 mod schema;
 mod token;
@@ -398,6 +399,7 @@ fn owned_network_source_reports_controlled_tcp_udp() {
     native::callback_copies_relocatable_owned_payload_and_rejects_invalid_bounds();
     schema::property_names_and_scalar_metadata_are_bounded_and_typed();
     fixed_failure_categories_do_not_expose_values();
+    diagnostics::exact_configuration_rejects_extra_modes_flags_files_and_clock_changes();
     let outcome = std::panic::catch_unwind(|| -> Result<()> {
         let executable = std::env::current_exe().map_err(|_| "guard")?;
         let parent = executable.parent().ok_or("guard")?;

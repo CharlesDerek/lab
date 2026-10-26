@@ -1,5 +1,9 @@
 //! Test-only ownership and bounded copies for the actual Windows ETW source.
-use super::{api, require, Result};
+use super::{
+    api,
+    diagnostics::{Configuration, Ownership, Scope, NETWORK_MODE},
+    require, Result,
+};
 use athernex_endpoint_protocol::windows_process_events::QpcClock;
 use std::{
     mem::{offset_of, size_of},
@@ -169,6 +173,16 @@ struct Properties {
     file: [u16; 1024],
 }
 impl Properties {
+    fn configuration(&self) -> Configuration {
+        Configuration {
+            log_file_mode: self.value.LogFileMode,
+            enable_flags: self.value.EnableFlags,
+            client_context: self.value.Wnode.ClientContext,
+            logfile_present: self.file[0] != 0,
+            logfile_offset_valid: self.value.LogFileNameOffset == 0
+                || self.value.LogFileNameOffset == offset_of!(Properties, file) as u32,
+        }
+    }
     fn new(guid: GUID) -> Self {
         let mut value = EVENT_TRACE_PROPERTIES::default();
         value.Wnode.BufferSize = size_of::<Self>() as u32;
@@ -177,7 +191,7 @@ impl Properties {
         value.Wnode.ClientContext = 1; // QPC; retained without ProcessTrace conversion.
         value.LoggerNameOffset = offset_of!(Self, name) as u32;
         value.LogFileNameOffset = offset_of!(Self, file) as u32;
-        value.LogFileMode = EVENT_TRACE_SYSTEM_LOGGER_MODE | EVENT_TRACE_REAL_TIME_MODE;
+        value.LogFileMode = NETWORK_MODE;
         Self {
             value,
             name: [0; 128],
@@ -194,9 +208,10 @@ struct Session {
 impl Session {
     fn start() -> Result<Self> {
         let mut random = [0u8; 16];
-        getrandom::fill(&mut random).map_err(|_| "Session identity unavailable")?;
+        getrandom::fill(&mut random)
+            .map_err(|_| Ownership::NetworkIdentity.error("Session identity unavailable"))?;
         let guid = GUID::from_u128(u128::from_be_bytes(random));
-        require(
+        Ownership::NetworkIdentity.require(
             !same_guid(guid, SystemTraceControlGuid) && random != [0; 16],
             "session_ownership",
         )?;
@@ -235,8 +250,9 @@ impl Session {
                 &mut properties.value,
                 EVENT_TRACE_CONTROL_QUERY,
             )
-        })?;
-        require(
+        })
+        .map_err(|error| Ownership::NetworkIdentity.error(error))?;
+        Ownership::NetworkIdentity.require(
             same_guid(properties.value.Wnode.Guid, self.guid),
             "Session GUID ownership differs",
         )?;
@@ -244,22 +260,17 @@ impl Session {
             .name
             .iter()
             .position(|unit| *unit == 0)
-            .ok_or("Session name is unterminated")?;
-        require(
+            .ok_or_else(|| Ownership::NetworkIdentity.error("Session name is unterminated"))?;
+        Ownership::NetworkIdentity.require(
             properties.name[..length] == self.name[..self.name.len() - 1],
             "Session name ownership differs",
         )?;
-        require(
-            properties.value.LogFileMode
-                == EVENT_TRACE_SYSTEM_LOGGER_MODE | EVENT_TRACE_REAL_TIME_MODE
-                && properties.file[0] == 0
-                && (properties.value.LogFileNameOffset == 0
-                    || properties.value.LogFileNameOffset == offset_of!(Properties, file) as u32)
-                && properties.value.EnableFlags == EVENT_TRACE_FLAG_NETWORK_TCPIP
-                && properties.value.Wnode.ClientContext == 1,
+        properties.configuration().require(
+            Scope::Network,
+            None,
             "Session source configuration differs",
         )?;
-        require(
+        Ownership::NetworkController.require(
             unsafe { properties.value.Wnode.Anonymous1.HistoricalContext } == self.handle.Value
                 && self.handle.Value != 0,
             "session_ownership",
@@ -498,8 +509,12 @@ pub(super) fn callback_copies_relocatable_owned_payload_and_rejects_invalid_boun
 
 // Query-only view of the existing production process collector. Never adopt,
 // update or stop that session from the network probe.
-pub(super) fn process_session(stream: &str, label: &str) -> Result<Option<u64>> {
-    require(
+pub(super) fn process_session(
+    stream: &str,
+    label: &str,
+    pinned_mode: Option<u32>,
+) -> Result<Option<(u64, u32)>> {
+    Ownership::ProcessIntent.require(
         stream.len() == 64
             && stream
                 .bytes()
@@ -508,9 +523,10 @@ pub(super) fn process_session(stream: &str, label: &str) -> Result<Option<u64>> 
             && label.len() < 128,
         "session_ownership",
     )?;
-    let id = u128::from_str_radix(&stream[..32], 16).map_err(|_| "session_ownership")?;
+    let id = u128::from_str_radix(&stream[..32], 16)
+        .map_err(|_| Ownership::ProcessIntent.error("session_ownership"))?;
     let guid = GUID::from_u128(id);
-    require(
+    Ownership::ProcessIdentity.require(
         !same_guid(guid, SystemTraceControlGuid),
         "session_ownership",
     )?;
@@ -527,24 +543,20 @@ pub(super) fn process_session(stream: &str, label: &str) -> Result<Option<u64>> 
     if code == ERROR_WMI_INSTANCE_NOT_FOUND {
         return Ok(None);
     }
-    api("query_trace", code)?;
+    api("query_trace", code).map_err(|error| Ownership::ProcessIdentity.error(error))?;
     let length = properties
         .name
         .iter()
         .position(|unit| *unit == 0)
-        .ok_or("session_ownership")?;
-    require(
+        .ok_or_else(|| Ownership::ProcessIdentity.error("session_ownership"))?;
+    Ownership::ProcessIdentity.require(
         same_guid(properties.value.Wnode.Guid, guid)
-            && properties.name[..length] == name[..name.len() - 1]
-            && properties.value.EnableFlags == EVENT_TRACE_FLAG_PROCESS
-            && properties.value.LogFileMode
-                == EVENT_TRACE_SYSTEM_LOGGER_MODE | EVENT_TRACE_REAL_TIME_MODE
-            && properties.file[0] == 0
-            && (properties.value.LogFileNameOffset == 0
-                || properties.value.LogFileNameOffset == offset_of!(Properties, file) as u32)
-            && properties.value.Wnode.ClientContext == 1,
+            && properties.name[..length] == name[..name.len() - 1],
         "session_ownership",
     )?;
+    properties
+        .configuration()
+        .require(Scope::Process, pinned_mode, "session_ownership")?;
     require(
         properties.value.EventsLost == 0
             && properties.value.LogBuffersLost == 0
@@ -552,8 +564,8 @@ pub(super) fn process_session(stream: &str, label: &str) -> Result<Option<u64>> 
         "source_loss",
     )?;
     let handle = unsafe { properties.value.Wnode.Anonymous1.HistoricalContext };
-    require(handle != 0, "session_ownership")?;
-    Ok(Some(handle))
+    Ownership::ProcessController.require(handle != 0, "session_ownership")?;
+    Ok(Some((handle, properties.value.LogFileMode)))
 }
 
 fn clock() -> Result<QpcClock> {
