@@ -64,11 +64,18 @@ On Linux/macOS, bounded commands have an independent process watcher before the
 external executable starts. It closes inherited descriptors and registers exit
 notifications for the agent and command leader. Either exit requests termination
 of the command's process group, including ordinary background children. Timeout
-and output budgets still apply. Cleanup waits at most 100 ms synchronously;
-remaining groups retain their capacity slot until the reaper confirms they are
-gone. A completed leader with unresolved group cleanup does not produce a
-successful action result. Each command adds one watcher process. Containers need
-an init/reaper; the Docker fixtures now use `--init`.
+and output budgets still apply. Initial cleanup waits at most 100 ms synchronously.
+After a normal leader exit, cleanup handed to the asynchronous reaper may wait
+for that command's completion notification within the remaining original command
+deadline; it does not start a new execution budget. Failure, timeout, drop and
+service-stop paths retain their short cleanup policy. Unreaped leaders and
+remaining groups retain their capacity slot until both leader reaping and group
+absence are confirmed. A completed leader with unresolved group cleanup does not
+produce a successful action result. Each command adds one watcher process.
+Containers need an init/reaper; the Docker fixtures use `--init`.
+
+The controlled delayed-reaping fixture covers Linux only. It does not identify
+the member or cause of the earlier hosted group-cleanup delay.
 
 Linux requires permitted `pidfd_open` and `close_range` syscalls (mainline Linux
 5.9 or later, or suitable backports). The installer checks support before stopping

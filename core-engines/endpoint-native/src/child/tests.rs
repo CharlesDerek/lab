@@ -106,6 +106,7 @@ fn unreaped_children_hold_capacity_until_the_cleanup_worker_confirms_exit() {
         entries.push(Pending {
             child,
             group: None,
+            completed: Arc::new(AtomicBool::new(false)),
             _slot: slot,
         });
     }
@@ -268,6 +269,7 @@ fn reaped_leader_keeps_capacity_while_its_group_still_exists() {
     reaper.pending.lock().unwrap().push(Pending {
         child,
         group: Some(group),
+        completed: Arc::new(AtomicBool::new(false)),
         _slot: slot,
     });
     thread::sleep(Duration::from_millis(50));
@@ -293,4 +295,33 @@ fn reusing_a_command_installs_only_one_watcher_per_spawn() {
         assert_eq!(code, 0);
         assert_eq!(output, b"1");
     }
+}
+
+#[test]
+fn completed_cleanup_cannot_override_failed_ownership_or_the_original_deadline() {
+    // A completed receipt alone cannot authorize a normal return after either
+    // an ownership-query failure or expiry of the original execution budget.
+    let reaper = Arc::new(Reaper {
+        pending: Mutex::new(Vec::new()),
+        healthy: AtomicBool::new(false),
+    });
+    let mut owned = Owned {
+        child: None,
+        slot: None,
+        reaper: reaper.clone(),
+        cleanup_pending: true,
+        cleanup_completed: Arc::new(AtomicBool::new(true)),
+    };
+    let error = owned
+        .await_cleanup(Instant::now(), Duration::from_secs(1))
+        .unwrap_err();
+    assert!(error.to_string().contains("could not confirm ownership"));
+    assert!(owned.cleanup_pending);
+    // This is an isolated test reaper, not the process-wide sticky health flag.
+    reaper.healthy.store(true, Ordering::SeqCst);
+    let error = owned
+        .await_cleanup(Instant::now(), Duration::ZERO)
+        .unwrap_err();
+    assert!(error.to_string().contains("time budget"));
+    assert!(owned.cleanup_pending);
 }

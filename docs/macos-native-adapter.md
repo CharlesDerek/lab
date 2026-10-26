@@ -170,12 +170,17 @@ committing evidence atomically. Failed, interrupted or timed-out workers cannot
 commit partial detections. The helper also handles broker hash requests.
 
 On Linux and macOS, the process runner uses bounded nonblocking pipes and requests
-process-group termination at the action deadline. It waits at most another 100 ms
-for cleanup, then retains the child in a bounded background reaper. Unreaped
-children and remaining process groups keep their capacity slot; at most 16 managed
-commands/services can be outstanding in one calling process. Each bounded command
-adds one independent watcher process. A leader exit with unresolved group cleanup
-fails the action instead of reporting success.
+process-group termination at the action deadline. Initial cleanup waits at most
+100 ms before handing unresolved work to a bounded background reaper. Following
+a normal leader exit, the caller may wait for its own reaper completion
+notification within the remaining original command deadline. Failure, timeout,
+drop and service-stop paths retain the short cleanup policy. The reaper confirms
+both leader reaping and group absence before releasing capacity and publishing
+completion. At most 16 managed commands/services can be outstanding in one calling
+process. Each bounded command adds one independent watcher process. Unresolved
+group cleanup cannot produce a successful action result. Controlled delayed-reaping
+coverage is Linux-only and does not identify the member or cause of the earlier
+hosted cleanup delay.
 A kernel-uninterruptible operation may outlive a kill request, so pending cleanup
 is reported rather than claimed complete. The leader remains waitable until the
 group is signalled, preventing signals to a recycled leader PID. Internal workers

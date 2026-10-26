@@ -71,6 +71,7 @@ impl Drop for Slot {
 struct Pending {
     child: Child,
     group: Option<u32>,
+    completed: Arc<AtomicBool>,
     _slot: Slot,
 }
 struct Reaper {
@@ -95,7 +96,11 @@ fn reaper() -> Result<Arc<Reaper>> {
                         match pending[i].child.try_wait() {
                             Ok(Some(_)) => match pending[i].group.map(group_exists).transpose() {
                                 Ok(None | Some(false)) => {
-                                    pending.swap_remove(i);
+                                    let entry = pending.swap_remove(i);
+                                    let completed = entry.completed.clone();
+                                    // Capacity is released before anyone can accept completion.
+                                    drop(entry);
+                                    completed.store(true, Ordering::Release);
                                 }
                                 Ok(Some(true)) => {
                                     i += 1;
@@ -172,6 +177,7 @@ impl Service {
             slot: Some(slot),
             reaper,
             cleanup_pending: false,
+            cleanup_completed: Arc::new(AtomicBool::new(false)),
         };
         let child = owned.child.as_mut().expect("owned service child");
         let stdout: OwnedFd = child.stdout.take().ok_or("Missing service output")?.into();
@@ -272,6 +278,7 @@ struct Owned {
     slot: Option<Slot>,
     reaper: Arc<Reaper>,
     cleanup_pending: bool,
+    cleanup_completed: Arc<AtomicBool>,
 }
 fn group_exists(pid: u32) -> std::io::Result<bool> {
     if unsafe { libc::kill(-(pid as i32), 0) } == 0 {
@@ -284,6 +291,34 @@ fn group_exists(pid: u32) -> std::io::Result<bool> {
     }
 }
 impl Owned {
+    // Only the normal-return path waits. Failure, Drop and service stop keep
+    // their existing short cleanup policy; ownership remains with the reaper.
+    fn await_cleanup(&mut self, start: Instant, timeout: Duration) -> Result<()> {
+        while self.cleanup_pending {
+            // Observe the receipt before checking health/time, so a waiter
+            // descheduled here cannot accept it against an earlier allowance.
+            let completed = self.cleanup_completed.load(Ordering::Acquire);
+            if !self.reaper.healthy.load(Ordering::SeqCst) {
+                return Err(
+                    "Child cleanup could not confirm ownership; restart requires review".into(),
+                );
+            }
+            let remaining = timeout.saturating_sub(start.elapsed());
+            // A completion first observed after the original deadline cannot
+            // turn a timed-out operation into success.
+            if remaining.is_zero() {
+                return Err(
+                    "Action exceeded its time budget while awaiting child group cleanup".into(),
+                );
+            }
+            if completed {
+                self.cleanup_pending = false;
+                break;
+            }
+            thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+        Ok(())
+    }
     fn finish(&mut self) -> Option<ExitStatus> {
         let mut child = self.child.take()?;
         // A successful non-reaping wait confirms this is still our child. Do
@@ -304,6 +339,7 @@ impl Owned {
                     match group_exists(group) {
                         Ok(false) => {
                             drop(self.slot.take());
+                            self.cleanup_completed.store(true, Ordering::Release);
                             return observed;
                         }
                         Ok(true) => {}
@@ -331,6 +367,7 @@ impl Owned {
             .push(Pending {
                 child,
                 group: Some(group),
+                completed: self.cleanup_completed.clone(),
                 _slot: self
                     .slot
                     .take()
@@ -430,6 +467,7 @@ pub fn run_with_input(
         slot: Some(slot),
         reaper,
         cleanup_pending: false,
+        cleanup_completed: Arc::new(AtomicBool::new(false)),
     };
     let child = owned.child.as_mut().expect("spawned child is owned");
     let stdout: OwnedFd = child
@@ -484,9 +522,7 @@ pub fn run_with_input(
                     .expect("child remains owned until finish"),
             )? {
                 let status = owned.finish().ok_or("Child cleanup is still pending")?;
-                if owned.cleanup_pending {
-                    return Err("Child group cleanup is still pending".into());
-                }
+                owned.await_cleanup(start, timeout)?;
                 drain(&mut pipes, &mut output, output_limit)?;
                 return Ok(status.code().unwrap_or(-1));
             }
