@@ -92,7 +92,12 @@ pub fn normalize(record: &Value, source: &str, now: u64) -> LabResult<InputEvent
         athernex_endpoint_protocol::authentication::ssh_report(message)
             .ok()
             .flatten()
-            .filter(|report| matches!(report.mechanism, "password" | "publickey"))
+            .filter(|report| {
+                matches!(
+                    report.mechanism,
+                    "password" | "publickey" | "keyboard-interactive/pam"
+                )
+            })
     } else {
         None
     };
@@ -399,6 +404,142 @@ mod tests {
         .unwrap();
         assert_eq!(input.kind, Kind::System);
         assert_eq!(input.outcome, Outcome::Observe);
+    }
+    #[test]
+    fn keyboard_interactive_pam_results_preserve_prefix_facts_and_reporter_identity() {
+        let now = 1_800_000_000_000;
+        for executable in [
+            "/usr/sbin/sshd",
+            "/usr/lib/openssh/sshd-session",
+            "/usr/libexec/openssh/sshd-session",
+        ] {
+            for (prefix, outcome) in [("Accepted", Outcome::Allow), ("Failed", Outcome::Deny)] {
+                for suffix in ["", " [preauth]"] {
+                    let message = format!("{prefix} keyboard-interactive/pam for alice from 192.0.2.10 port 2222 ssh2{suffix}");
+                    let mut row = record(&message, executable);
+                    row["USER"] = "decoy-account".into();
+                    row["SYSLOG_IDENTIFIER"] = "decoy-account".into();
+                    let input = normalize(&row, "host-journal", now).unwrap();
+                    assert_eq!(input.kind, Kind::Authentication);
+                    assert_eq!(input.outcome, outcome);
+                    assert_eq!(input.subject, "alice");
+                    assert_eq!(input.object, "ssh:192.0.2.10");
+                    assert_eq!(
+                        input.severity,
+                        if outcome == Outcome::Allow { 1 } else { 3 }
+                    );
+                    assert_eq!(input.idempotency_key, digest(field(&row, "__CURSOR")));
+                    let context = input.context.as_ref().unwrap();
+                    assert_eq!(context.uid, Some(0));
+                    assert_eq!(context.pid, Some(50));
+                    assert_eq!(context.journal_cursor, field(&row, "__CURSOR"));
+                    let stored = serde_json::to_string(&input).unwrap();
+                    assert!(!stored.contains(&message));
+                    assert!(!stored.contains("decoy-account"));
+                }
+            }
+            let input = normalize(
+                &record("Failed keyboard-interactive/pam for invalid user alice from 2001:db8::1 port 2222 ssh2", executable),
+                "host-journal",
+                now,
+            )
+            .unwrap();
+            assert_eq!(input.subject, "alice");
+            assert_eq!(input.object, "ssh:2001:db8::1");
+            assert_eq!(input.kind, Kind::Authentication);
+            assert_eq!(input.outcome, Outcome::Deny);
+        }
+    }
+    #[test]
+    fn incomplete_malformed_and_untrusted_keyboard_interactive_reports_stay_observations() {
+        let now = 1_800_000_000_000;
+        let mut engine = Engine::memory().unwrap();
+        for (index, message) in [
+            "Partial keyboard-interactive/pam for alice from 192.0.2.10 port 2222 ssh2",
+            "Postponed keyboard-interactive/pam for alice from 192.0.2.10 port 2222 ssh2",
+            "Accepted keyboard-interactive/pam for invalid user alice from 192.0.2.10 port 2222 ssh2",
+            "Failed keyboard-interactive/pam for alice from malformed port 2222 ssh2",
+            "Failed keyboard-interactive/pam for alice from 192.0.2.10 port 0 ssh2",
+            "Failed keyboard-interactive/pam for alice from 192.0.2.10 port 2222 ssh2 for invalid user victim from 203.0.113.8 port 1 ssh2",
+            "Failed keyboard-interactive/pam for alice from 192.0.2.10 port 2222 ssh2: ED25519-CERT SHA256:AAAA ID victim",
+            "Failed keyboard-interactive for alice from 192.0.2.10 port 2222 ssh2",
+            "Failed keyboard-interactive/other for alice from 192.0.2.10 port 2222 ssh2",
+            "Failed keyboard-interactive/pam-extra for alice from 192.0.2.10 port 2222 ssh2",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut row = record(message, "/usr/sbin/sshd");
+            row["__CURSOR"] = format!("unsupported-keyboard-{index}").into();
+            let input = normalize(&row, "host-journal", now).unwrap();
+            assert_eq!(input.kind, Kind::System);
+            assert_eq!(input.outcome, Outcome::Observe);
+            assert_eq!(input.subject, "uid-0");
+            assert_eq!(input.object, "ssh.service");
+            engine.ingest(&[input], now).unwrap();
+        }
+        for (index, executable) in ["/usr/bin/logger", "/tmp/sshd", ""].into_iter().enumerate() {
+            for prefix in ["Accepted", "Failed"] {
+                let message = format!(
+                    "{prefix} keyboard-interactive/pam for alice from 192.0.2.10 port 2222 ssh2"
+                );
+                let mut row = record(&message, executable);
+                row["SYSLOG_IDENTIFIER"] = "sshd".into();
+                row["__CURSOR"] = format!("untrusted-keyboard-{index}-{prefix}").into();
+                let input = normalize(&row, "host-journal", now).unwrap();
+                assert_eq!(input.kind, Kind::System);
+                assert_eq!(input.outcome, Outcome::Observe);
+                assert_eq!(input.subject, "uid-0");
+                engine.ingest(&[input], now).unwrap();
+            }
+        }
+        assert!(!engine
+            .findings()
+            .unwrap()
+            .iter()
+            .any(|finding| finding.rule == "AX-001"));
+    }
+    #[test]
+    fn keyboard_interactive_counts_completed_denials_without_pam_module_failures() {
+        let now = 1_800_000_000_000;
+        let mut engine = Engine::memory().unwrap();
+        for index in 0..8 {
+            for (label, message) in [
+                ("module", "pam_unix(sshd:auth): authentication failure; ruser=caller rhost=192.0.2.10 user=alice"),
+                ("completed", "Accepted keyboard-interactive/pam for alice from 192.0.2.10 port 2222 ssh2"),
+            ] {
+                let mut row = record(message, "/usr/sbin/sshd");
+                row["__CURSOR"] = format!("keyboard-fallback-{index}-{label}").into();
+                let input = normalize(&row, "host-journal", now).unwrap();
+                assert_eq!(input.kind, Kind::Authentication);
+                assert_eq!(input.subject, "alice");
+                assert_eq!(input.outcome, if label == "module" { Outcome::Observe } else { Outcome::Allow });
+                engine.ingest(&[input], now).unwrap();
+            }
+        }
+        assert!(!engine
+            .findings()
+            .unwrap()
+            .iter()
+            .any(|finding| finding.rule == "AX-001"));
+        for index in 0..8 {
+            let mut row = record(
+                "Failed keyboard-interactive/pam for alice from 192.0.2.10 port 2222 ssh2",
+                "/usr/sbin/sshd",
+            );
+            row["__CURSOR"] = format!("keyboard-denial-{index}").into();
+            engine
+                .ingest(&[normalize(&row, "host-journal", now).unwrap()], now)
+                .unwrap();
+            assert_eq!(
+                engine
+                    .findings()
+                    .unwrap()
+                    .iter()
+                    .any(|finding| finding.rule == "AX-001"),
+                index == 7
+            );
+        }
     }
     #[test]
     fn certificate_key_id_cannot_replace_the_reported_account_or_source() {

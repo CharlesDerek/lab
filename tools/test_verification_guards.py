@@ -97,7 +97,7 @@ class VerificationGuardTests(unittest.TestCase):
             ('network', module('verify_network_events').fixture_script('fixture-test', 1)),
             ('process', module('verify_process_events').fixture_script()),
         ])
-        self.assertEqual(len(sources), 8)
+        self.assertEqual(len(sources), 9)
         for name, source in sources:
             for arguments, environment in [(['-O', '-c', CHILD], None), (['-c', CHILD], '2')]:
                 with self.subTest(helper=name, flags=arguments[:1], environment=environment):

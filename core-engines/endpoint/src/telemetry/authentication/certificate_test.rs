@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-fn guard() {
+pub(super) fn guard() {
     assert!(
         std::env::var("ATHERNEX_AUTH_FIXTURE").as_deref() == Ok("private-container"),
         "Private fixture required"
@@ -70,7 +70,7 @@ fn attempt(mode: &str, allowed: bool) -> u16 {
     result.port
 }
 
-fn for_port(events: &[EndpointEvent], port: u16) -> Vec<&Authentication> {
+pub(super) fn for_port(events: &[EndpointEvent], port: u16) -> Vec<&Authentication> {
     events
         .iter()
         .filter_map(|row| match &row.telemetry {
@@ -139,7 +139,7 @@ fn check_port(events: &[EndpointEvent], port: u16, outcomes: &[AuthenticationOut
     }
 }
 
-fn exact_contains(actual: &[EndpointEvent], expected: &[EndpointEvent]) {
+pub(super) fn exact_contains(actual: &[EndpointEvent], expected: &[EndpointEvent]) {
     for row in expected {
         assert!(
             actual
@@ -171,7 +171,9 @@ fn trusted(row: &serde_json::Value) -> bool {
     row["_EXE"].as_str().is_some_and(supported_producer) && row["_UID"].as_str() == Some("0")
 }
 
-fn native_row(predicate: impl Fn(&serde_json::Value, &str) -> bool) -> serde_json::Value {
+pub(super) fn native_row(
+    predicate: impl Fn(&serde_json::Value, &str) -> bool,
+) -> serde_json::Value {
     let mut selected = None;
     until(|| {
         selected = raw_journal().into_iter().find(|row| {
@@ -185,7 +187,7 @@ fn native_row(predicate: impl Fn(&serde_json::Value, &str) -> bool) -> serde_jso
     selected.unwrap()
 }
 
-fn consumed(store: &Store, row: &serde_json::Value) {
+pub(super) fn consumed(store: &Store, row: &serde_json::Value) {
     let cursor = row["__CURSOR"]
         .as_str()
         .expect("Native control cursor missing");
@@ -218,7 +220,7 @@ fn consumed(store: &Store, row: &serde_json::Value) {
     });
 }
 
-fn noncompletion(store: &Store, row: &serde_json::Value) {
+pub(super) fn noncompletion(store: &Store, row: &serde_json::Value) {
     consumed(store, row);
     assert!(
         ssh_report(row["MESSAGE"].as_str().unwrap())
@@ -350,6 +352,39 @@ fn native_ssh_certificates_preserve_terminal_account_source_and_originals() {
 }
 
 fn verify_server(root: &std::path::Path, selected: &[EndpointEvent]) {
+    let mut changed = selected
+        .iter()
+        .find(|row| {
+            matches!(&row.telemetry,
+        Some(Telemetry::Authentication { event }) if event.outcome == AuthenticationOutcome::Allowed
+            && event.journal.message.contains(" ID fixture certificate (serial "))
+        })
+        .expect("Controlled certificate original missing")
+        .clone();
+    let Some(Telemetry::Authentication { event }) = &mut changed.telemetry else {
+        panic!("Certificate original missing");
+    };
+    event.journal.message = event.journal.message.replacen(
+        " ID fixture certificate (serial ",
+        " ID changed certificate (serial ",
+        1,
+    );
+    assert!(
+        event
+            .journal
+            .message
+            .contains(" ID changed certificate (serial "),
+        "Certificate conflict fixture unchanged"
+    );
+    changed.validate(now_ms()).unwrap();
+    verify_server_with_conflict(root, selected, changed);
+}
+
+pub(super) fn verify_server_with_conflict(
+    root: &std::path::Path,
+    selected: &[EndpointEvent],
+    changed: EndpointEvent,
+) {
     let database = root.join("server.db");
     let endpoint_id = "a".repeat(64);
     let credential = "b".repeat(64);
@@ -386,31 +421,6 @@ fn verify_server(root: &std::path::Path, selected: &[EndpointEvent]) {
             == 0,
         "Certificate replay duplicated evidence"
     );
-    let mut changed = selected
-        .iter()
-        .find(|row| {
-            matches!(&row.telemetry,
-        Some(Telemetry::Authentication { event }) if event.outcome == AuthenticationOutcome::Allowed
-            && event.journal.message.contains(" ID fixture certificate (serial "))
-        })
-        .expect("Controlled certificate original missing")
-        .clone();
-    let Some(Telemetry::Authentication { event }) = &mut changed.telemetry else {
-        panic!("Certificate original missing");
-    };
-    event.journal.message = event.journal.message.replacen(
-        " ID fixture certificate (serial ",
-        " ID changed certificate (serial ",
-        1,
-    );
-    assert!(
-        event
-            .journal
-            .message
-            .contains(" ID changed certificate (serial "),
-        "Certificate conflict fixture unchanged"
-    );
-    changed.validate(now_ms()).unwrap();
     assert!(
         engine
             .endpoint_events(&endpoint_id, &[changed], now_ms())

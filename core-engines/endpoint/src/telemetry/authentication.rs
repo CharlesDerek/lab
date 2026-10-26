@@ -3,6 +3,8 @@
 mod certificate_test;
 #[cfg(target_os = "linux")]
 mod journal_service;
+#[cfg(all(test, target_os = "linux"))]
+mod keyboard_interactive_test;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(all(test, target_os = "linux"))]

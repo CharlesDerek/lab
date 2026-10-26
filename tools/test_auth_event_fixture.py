@@ -183,7 +183,7 @@ class AuthenticationFixtureTests(unittest.TestCase):
             self.assertEqual(set(rows[0]), {'validation_inputs','verifier_sha256'})
             self.assertEqual(set(rows[0]['validation_inputs']), {'agent','unit','process'})
             self.assertEqual(rows[1], {'native_authentication_checks': {name:'passed' for _,name in FIXTURE.TESTS}})
-            self.assertEqual(len(FIXTURE.TESTS), 5)
+            self.assertEqual(len(FIXTURE.TESTS), 6)
             self.assertNotIn(str(root), output.getvalue())
             failed_output = io.StringIO()
             with patch('sys.argv', ['verify','--manifest',str(manifest),'--agent',str(executables['agent'])]), \

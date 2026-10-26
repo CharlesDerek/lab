@@ -26,6 +26,7 @@ TESTS = [('unit', 'telemetry::authentication::native_test::native_authentication
          ('unit', 'telemetry::authentication::pam_test::native_pam_preserves_module_scope_and_resumes_after_full_queue_restart'),
          ('unit', 'telemetry::authentication::sudo_test::native_sudo_denials_preserve_module_scope_identity_and_replay')]
 TESTS.append(('unit', 'telemetry::authentication::certificate_test::native_ssh_certificates_preserve_terminal_account_source_and_originals'))
+TESTS.append(('unit', 'telemetry::authentication::keyboard_interactive_test::native_keyboard_interactive_preserves_method_results_and_partial_scope'))
 MISSING_PROVENANCE = [('unit', 'telemetry::authentication::sudo_test::missing_sudo_executable_provenance_is_visible_without_inventing_authentication')]
 
 
@@ -72,13 +73,14 @@ def certificate_setup(root):
         configure_fixture_burst(configuration)
     # Bind the observed source port independently of the journal text. The
     # proxy and its private metadata exist only inside the isolated fixture.
-    (root/'certificate-proxy.py').write_text('''if not __debug__:
+    (root/'authentication-proxy.py').write_text('''if not __debug__:
     raise SystemExit('Validation requires Python assertions; do not use -O or PYTHONOPTIMIZE')
 import json, os, selectors, socket, sys
 from pathlib import Path
-port=int(sys.argv[1]); assert port in (2224,2225)
+port=int(sys.argv[1]); assert port in (2224,2225,2226,2227)
+family='certificate' if port in (2224,2225) else 'keyboard-interactive'
 connection=socket.socket(); connection.bind(('127.0.0.1',0)); connection.connect(('127.0.0.1',port))
-fd=os.open('/fixture/certificate-source.json',os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+fd=os.open('/fixture/'+family+'-source.json',os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
 with os.fdopen(fd,'w') as output: json.dump({'port':connection.getsockname()[1]},output)
 selector=selectors.DefaultSelector(); selector.register(0,selectors.EVENT_READ); selector.register(connection,selectors.EVENT_READ)
 while True:
@@ -106,7 +108,7 @@ command=['/usr/bin/ssh','-F','/dev/null','-o','BatchMode=yes','-o','IdentitiesOn
     '-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-o','GlobalKnownHostsFile=/dev/null',
     '-o','ConnectTimeout=3','-o','ConnectionAttempts=1','-o','PreferredAuthentications=publickey',
     '-o','PubkeyAcceptedAlgorithms=ssh-ed25519-cert-v01@openssh.com',
-    '-o',f'ProxyCommand=/usr/bin/python3 /fixture/certificate-proxy.py {port}']
+    '-o',f'ProxyCommand=/usr/bin/python3 /fixture/authentication-proxy.py {port}']
 for key in keys:
     # Automatic adjacent -cert.pub discovery preserves the private-key filename
     # after certificate-only algorithm filtering removes the plain-key entry.
@@ -122,6 +124,52 @@ finally:
     except ProcessLookupError: pass
     process.wait(timeout=5)
 report=json.loads(Path('/fixture/certificate-source.json').read_text())
+report['success']=succeeded
+print(json.dumps(report))
+''')
+
+
+def keyboard_interactive_setup(root):
+    for name, port, partial in [('keyboard-interactive-sshd', 2226, False),
+                                ('keyboard-interactive-mfa-sshd', 2227, True)]:
+        configuration = root/(name+'.conf')
+        configuration.write_text(f'Port {port}\nListenAddress 127.0.0.1\nHostKey /fixture/host\n'
+            f'PidFile /fixture/{name}.pid\nAuthorizedKeysFile .ssh/authorized_keys\n'
+            'UsePAM yes\nPasswordAuthentication no\nKbdInteractiveAuthentication yes\n'
+            'PermitRootLogin no\nAllowUsers fixture\nLogLevel VERBOSE\n'
+            + ('PubkeyAuthentication yes\nAuthenticationMethods keyboard-interactive:pam,publickey\n' if partial
+               else 'PubkeyAuthentication no\nAuthenticationMethods keyboard-interactive:pam\n'))
+        configure_fixture_burst(configuration)
+    (root/'keyboard-interactive-attempt.py').write_text('''if not __debug__:
+    raise SystemExit('Validation requires Python assertions; do not use -O or PYTHONOPTIMIZE')
+import json, os, signal, subprocess, sys
+from pathlib import Path
+assert os.environ.get('ATHERNEX_AUTH_FIXTURE')=='private-container'
+mode=sys.argv[1]
+assert mode in ('deny','fallback','partial')
+port=2227 if mode=='partial' else 2226
+Path('/fixture/keyboard-interactive-source.json').unlink(missing_ok=True)
+command=['/usr/bin/ssh','-F','/dev/null','-o','NumberOfPasswordPrompts=1',
+    '-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-o','GlobalKnownHostsFile=/dev/null',
+    '-o','ConnectTimeout=3','-o','ConnectionAttempts=1','-o','PreferredAuthentications=keyboard-interactive',
+    '-o','KbdInteractiveAuthentication=yes','-o','PasswordAuthentication=no','-o','PubkeyAuthentication=no',
+    '-o',f'ProxyCommand=/usr/bin/python3 /fixture/authentication-proxy.py {port}',
+    'fixture@127.0.0.1','true']
+environment=dict(os.environ,SSH_ASKPASS='/fixture/askpass',SSH_ASKPASS_REQUIRE='force',DISPLAY='private-fixture')
+process=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+    start_new_session=True,env=environment)
+try:
+    stdout,stderr=process.communicate(timeout=15)
+    if len(stdout)+len(stderr)>65536:
+        raise RuntimeError('Private keyboard-interactive client output exceeded its bound')
+    fd=os.open('/fixture/keyboard-interactive-client.log',os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+    with os.fdopen(fd,'wb') as output: output.write(stdout+stderr)
+    succeeded=process.returncode==0
+finally:
+    try: os.killpg(process.pid,signal.SIGKILL)
+    except ProcessLookupError: pass
+    process.wait(timeout=5)
+report=json.loads(Path('/fixture/keyboard-interactive-source.json').read_text())
 report['success']=succeeded
 print(json.dumps(report))
 ''')
@@ -173,6 +221,7 @@ def inside():
     for configuration in (root/'sshd.conf', root/'pam-sshd.conf'):
         configure_fixture_burst(configuration)
     certificate_setup(root)
+    keyboard_interactive_setup(root)
     # Both PAM stacks exist only in this network-isolated fixture's tmpfs.
     # pam_permit deliberately models fallback success after pam_unix fails;
     # it must never become host policy or production provisioning.
@@ -255,7 +304,8 @@ os.kill(pid, {'pause':signal.SIGSTOP,'resume':signal.SIGCONT}[sys.argv[1]])
             if processes[0].poll() is not None or time.monotonic() >= deadline:
                 raise RuntimeError('Private journald did not start')
             time.sleep(.05)
-        for name,port in [('sshd',2222),('pam-sshd',2223),('certificate-sshd',2224),('certificate-mfa-sshd',2225)]:
+        for name,port in [('sshd',2222),('pam-sshd',2223),('certificate-sshd',2224),('certificate-mfa-sshd',2225),
+                          ('keyboard-interactive-sshd',2226),('keyboard-interactive-mfa-sshd',2227)]:
             with (root/(name+'.log')).open('w') as log:
                 processes.append(subprocess.Popen(['/usr/sbin/sshd','-D','-f',str(root/(name+'.conf'))],stdout=log,stderr=log,start_new_session=True))
             deadline = time.monotonic()+10
@@ -272,7 +322,8 @@ os.kill(pid, {'pause':signal.SIGSTOP,'resume':signal.SIGCONT}[sys.argv[1]])
             execute_native_check('/test/'+key, name)
     except BaseException:
         subprocess.run(['journalctl','--no-pager','--lines=40','--output=json','--output-fields=MESSAGE,_EXE,_UID,_PID,_COMM,__CURSOR'],check=False,timeout=10)
-        for name in ('journal.log','sshd.log','pam-sshd.log','certificate-sshd.log','certificate-mfa-sshd.log','certificate-client.log'):
+        for name in ('journal.log','sshd.log','pam-sshd.log','certificate-sshd.log','certificate-mfa-sshd.log','certificate-client.log',
+                     'keyboard-interactive-sshd.log','keyboard-interactive-mfa-sshd.log','keyboard-interactive-client.log'):
             if (root/name).exists():
                 print(name, (root/name).read_text()[-8192:], flush=True)
         raise

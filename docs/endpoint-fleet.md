@@ -673,6 +673,32 @@ local log, accepts an explicit `--private-evidence` directory with mode 0700, an
 publishes only input hashes and fixed check outcomes. Never upload that private
 directory, generated keys, or raw journal output.
 
+A separate keyboard-interactive/PAM check passed on both Ubuntu 24.04 and Debian
+13, alongside the five existing main authentication checks. Password-disabled
+listeners exercise a real denial, nine completed successful fallback methods
+(including one while collection is stopped), and a partial first factor whose
+required public-key factor is never completed. The local SIEM collector now
+recognizes the exact `keyboard-interactive/pam` method through the shared bounded
+parser and existing producer checks, preserving the endpoint's claimed account,
+source and reported outcome.
+
+Each serialized attempt is bounded by opaque journal cursors. The fixture
+requires exactly one trusted PAM failure before its terminal or partial report
+and verifies the module's own reporter identity and exact queued original. [OpenSSH runs the PAM conversation in a separate process](https://github.com/openssh/openssh-portable/blob/V_9_6_P1/auth-pam.c#L178-L201),
+so its reporter PID can differ from the terminal report. This controlled interval
+is not a production process or connection correlation rule. Module failures
+remain observations, partial methods produce no terminal outcome, and successful
+fallbacks do not create a false AX-001 denial burst. All 21 admitted originals
+remain exact across journal replay, collector and server restarts, conflicting
+replay refusal and operator-authenticated HTTP export; anonymous and endpoint
+credentials cannot export them.
+
+This proof covers the native collector and durable store, direct committed SIEM
+ingestion and real HTTP export. It does not establish actual-agent
+keyboard-interactive delivery, additional PAM providers, localized formats or
+production detection quality. The permissive fallback stack is confined to the
+private fixture and is not a production PAM configuration.
+
 ### Optional Windows kernel network observations
 
 Set `"windows_network_events": true` in the enabled private telemetry
