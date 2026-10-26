@@ -42,7 +42,7 @@ static NSXPCInterface *AXUpgradeInterface(void){
     NSXPCConnection *c=_connection;_connection=nil;dispatch_semaphore_signal(_signal);[_condition unlock];[c invalidate];
 }
 - (BOOL)listener:(NSXPCListener *)listener shouldAcceptNewConnection:(NSXPCConnection *)c {
-    if(@available(macOS 13.0,*)){}else{return NO;}
+    if(@available(macOS 13.0,*)){
     [_condition lock];BOOL ok=NO;
     @try {
         if(listener==_listener&&!_closed&&!_accepted&&c.effectiveUserIdentifier==_uid){
@@ -57,6 +57,7 @@ static NSXPCInterface *AXUpgradeInterface(void){
         }
     } @catch(__unused NSException *e){_disconnected=YES;_connection=nil;}
     [_condition unlock];if(!ok)[c invalidate];return ok;
+    }else{return NO;}
 }
 - (void)request:(NSData *)body reply:(void (^)(NSData *))reply {
     [self receive:body sender:NSXPCConnection.currentConnection reply:reply];

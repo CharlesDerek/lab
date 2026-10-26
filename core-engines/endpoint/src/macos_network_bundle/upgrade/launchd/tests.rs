@@ -331,14 +331,20 @@ fn durable_record_refuses_unknown_duplicate_and_wrongly_typed_fields() {
 #[test]
 fn management_snapshot_is_exact_standard_installer_output_and_pinned() {
     let installer = include_str!("../../../../../../infrastructure/endpoint/install-macos.sh");
-    let emitted = installer
-        .split("<<'PLIST'\n")
-        .nth(1)
-        .unwrap()
-        .split("\nPLIST\n")
-        .next()
-        .unwrap();
-    assert_eq!(management_plist_bytes(), format!("{emitted}\n").as_bytes());
+    // Git can convert this source fixture to CRLF on Windows. Exercise both
+    // checkout forms; the production macOS plist byte check remains exact.
+    let lf = installer.replace("\r\n", "\n");
+    for checkout in [lf.clone(), lf.replace('\n', "\r\n")] {
+        let normalized = checkout.replace("\r\n", "\n");
+        let emitted = normalized
+            .split("<<'PLIST'\n")
+            .nth(1)
+            .unwrap()
+            .split("\nPLIST\n")
+            .next()
+            .unwrap();
+        assert_eq!(management_plist_bytes(), format!("{emitted}\n").as_bytes());
+    }
     let bytes = management_plist_bytes();
     verify_management_snapshot(bytes, &sha256(bytes)).unwrap();
     assert!(verify_management_snapshot(bytes, &"0".repeat(64)).is_err());

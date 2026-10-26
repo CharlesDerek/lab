@@ -1,5 +1,5 @@
 #import "bridge.h"
-#import "UpgradeIPC.h"
+#import "../../../../infrastructure/endpoint/macos-network/Shared/UpgradeIPC.h"
 
 typedef struct {
     uint8_t *data;
