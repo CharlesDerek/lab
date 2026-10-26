@@ -1,5 +1,6 @@
 //! Installed TDH metadata and bytes are checked independently against owned records.
 //! Microsoft TcpIp/UdpIp MOF pages define operation semantics, not an assumed layout.
+mod template;
 use super::{
     api,
     native::{same_guid, Original},
@@ -11,6 +12,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     ptr::null_mut,
 };
+pub(super) use template::context_hypothesis_requires_exact_v2_template;
 use windows_sys::Win32::{Foundation::ERROR_INSUFFICIENT_BUFFER, System::Diagnostics::Etw::*};
 
 pub(super) struct Report {
@@ -18,6 +20,7 @@ pub(super) struct Report {
     pub source: SocketAddr,
     pub destination: SocketAddr,
     pub size: u32,
+    // Original EVENT_HEADER architecture, not the selected property context.
     pub pointer_bits: u8,
     pub property_count: u32,
     pub schema_hash: String,
@@ -286,23 +289,42 @@ fn metadata(record: &EVENT_RECORD) -> Result<Metadata> {
         ));
     }
     let descriptor = record.EventHeader.EventDescriptor;
-    let canonical = serde_json::to_vec(&(
-        pointer_bits,
-        descriptor.Version,
-        descriptor.Opcode,
-        info.DecodingSource,
-        &layout,
-    ))
-    .map_err(|_| "Schema fingerprint failed")?;
-    let schema_hash = athernex_endpoint_protocol::hash(&canonical);
-
-    Ok(Metadata {
+    let fingerprint = |context_bytes| -> Result<String> {
+        let canonical = serde_json::to_vec(&(
+            ("event_header_pointer_bits", pointer_bits),
+            ("tdh_property_context_bytes", context_bytes),
+            descriptor.Version,
+            descriptor.Opcode,
+            info.DecodingSource,
+            &layout,
+        ))
+        .map_err(|_| "Schema fingerprint failed")?;
+        Ok(athernex_endpoint_protocol::hash(&canonical))
+    };
+    let mut metadata = Metadata {
         context,
         properties,
         order,
         pointer_bits,
-        schema_hash,
-    })
+        schema_hash: fingerprint(context.ParameterValue)?,
+    };
+    // Select the source-only hypothesis only after exact v2 template metadata
+    // and length validation, before any property call. The header is untouched.
+    match template::property_context_bytes(record, &metadata.properties, &metadata.order) {
+        Ok(bytes) => {
+            metadata.context.ParameterValue = bytes;
+            metadata.schema_hash = fingerprint(bytes)?;
+        }
+        Err(refusal) => {
+            if let Some((field, expected)) = refusal.field {
+                if let Some(line) = attempt_line(record, &metadata, field, expected) {
+                    println!("\n{line}");
+                }
+            }
+            return Err("tdh_schema");
+        }
+    }
+    Ok(metadata)
 }
 
 fn typed(
@@ -359,7 +381,7 @@ fn socket(
 
 // Check every field, not just the controlled tuple: TDH values must match a
 // complete sequential partition of the original packed MOF payload. Metadata
-// supplies sizes; no version-specific offsets are guessed by this source proof.
+// supplies types; the exact-template hypothesis supplies connid's context width.
 fn layout(record: &EVENT_RECORD, original: &Original, metadata: &Metadata) -> Result<()> {
     let mut offset = 0usize;
     for field in &metadata.order {
@@ -371,7 +393,7 @@ fn layout(record: &EVENT_RECORD, original: &Original, metadata: &Metadata) -> Re
             TDH_INTYPE_UINT16 | TDH_INTYPE_INT16 => 2,
             TDH_INTYPE_UINT32 | TDH_INTYPE_INT32 | TDH_INTYPE_HEXINT32 => 4,
             TDH_INTYPE_UINT64 | TDH_INTYPE_INT64 | TDH_INTYPE_HEXINT64 => 8,
-            TDH_INTYPE_POINTER => metadata.pointer_bits as usize / 8,
+            TDH_INTYPE_POINTER => metadata.context.ParameterValue as usize,
             TDH_INTYPE_BINARY
                 if unsafe { info.Anonymous1.nonStructType.OutType } as i32 == TDH_OUTTYPE_IPV6 =>
             {

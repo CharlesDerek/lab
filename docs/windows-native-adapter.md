@@ -811,6 +811,18 @@ the event-header PID can belong to a different reporting thread. Provider report
 do not establish packet delivery, complete socket lifetimes or firewall decisions.
 Native schema verification is required before accepting a production decoder.
 
+The source fixture tests a specific version-two layout hypothesis: Microsoft's
+[pinned network manifest](https://github.com/microsoft/perfview/blob/4ae8d85b25043a21e6cb65bda340a620d691ac62/src/TraceEvent/Parsers/kerneltraceeventparser.man.xml)
+declares a 32-bit connection field. The fixture selects a four-byte
+[TDH property context](https://learn.microsoft.com/en-us/windows/win32/api/tdh/ne-tdh-tdh_context_type)
+only for matching provider, operation, version and complete ordered field layouts.
+It preserves the captured header flags and requires every TDH property to match
+the original bytes, with no missing or trailing payload. The reported
+`pointer_bits` describes the original header; the structural fingerprint also
+includes the separate property context width. This experiment requires native
+verification of each controlled event kind and does not establish a general
+network layout or production decoder.
+
 The test executable and three scripts are staged in a protected directory and
 bound to the exact source revision. Only `inputs.json` and the fixed
 `network-source-validation.json` projection are uploaded. Raw network records,
