@@ -124,7 +124,7 @@ function Save-AuthenticationAgentCheckpoint([string]$ProofDirectory, $Report) {
 
 function Get-AuthenticationAgentStageNames {
     @('guard_verified','policy_ready','account_ready','agent_config_verified','source_ready',
-      'stalled_http_verified','originals_verified','backpressure_verified','crash_replay_verified',
+      'stalled_http_verified','originals_verified','queues_filled','backpressure_observed','backpressure_verified','crash_replay_verified',
       'policy_gap_verified','bookmark_anchor_verified','http_delivery_verified','server_replay_verified',
       'export_authorization_verified','original_export_verified','original_link_verified',
       'device_separation_verified','detection_verified','portal_coverage_verified','server_restart_verified',

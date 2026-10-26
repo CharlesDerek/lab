@@ -117,6 +117,26 @@ fn queued(state: &Path, account: &str) -> Vec<EndpointEvent> {
 fn same_event(a: &EndpointEvent, b: &EndpointEvent) -> bool {
     safe(serde_json::to_vec(a), "original") == safe(serde_json::to_vec(b), "original")
 }
+fn full_queues(state: &Path) -> bool {
+    let db = connection(state, false);
+    let counts: (usize, usize) = safe(
+        db.query_row(
+            "SELECT (SELECT count(*) FROM outbox), (SELECT count(*) FROM telemetry_pending)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ),
+        "backpressure",
+    );
+    counts == (3072, 8192)
+}
+fn exact_queued(state: &Path, account: &str, expected: &[EndpointEvent]) -> bool {
+    let actual = queued(state, account);
+    actual.len() == expected.len()
+        && expected
+            .iter()
+            .all(|event| actual.iter().any(|stored| same_event(event, stored)))
+}
+
 fn verify_originals(events: &[EndpointEvent]) {
     for envelope in events {
         let Some(Telemetry::WindowsAuthentication { event }) = &envelope.telemetry else {
@@ -435,10 +455,10 @@ fn release_agent_logon_delivery_replays_and_reports_policy_gaps() {
         removed && restored && token_restored && cleanup_ok.load(Ordering::SeqCst),
         "cleanup",
     );
+    println!("\nATHERNEX_AUTH_AGENT_STAGE=cleanup_verified");
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);
     }
-    println!("\nATHERNEX_AUTH_AGENT_STAGE=cleanup_verified");
     println!("\nATHERNEX_AUTH_AGENT_STAGE=passed");
 }
 
@@ -515,10 +535,8 @@ fn run(
     drop(held);
     discard_stalled(&listener);
     let fillers = Fillers::insert(&state);
-    let blocked_checkpoint = checkpoint(&state);
-    let received = status(&state)
-        .unwrap_or_else(|| fail("source"))
-        .received_records;
+    ensure(full_queues(&state), "backpressure");
+    println!("\nATHERNEX_AUTH_AGENT_STAGE=queues_filled");
     account.attempt(false);
     agent.restart();
     let held = stalled(&listener, &mut agent, &config);
@@ -529,13 +547,32 @@ fn run(
         },
         "backpressure",
     );
-    thread::sleep(Duration::from_millis(500));
     ensure(
-        checkpoint(&state) == blocked_checkpoint
-            && status(&state).is_some_and(|h| h.backpressure && h.received_records == received),
+        full_queues(&state) && exact_queued(&state, &account.name, &preserved),
         "backpressure",
     );
-    ensure(queued(&state, &account.name).len() == 9, "backpressure");
+    println!("\nATHERNEX_AUTH_AGENT_STAGE=backpressure_observed");
+    // Unrelated Security records may advance the cursor while requiring no
+    // outbox admission. Pin only the first observed nonempty-batch refusal.
+    let blocked_checkpoint = checkpoint(&state);
+    let received = status(&state)
+        .unwrap_or_else(|| fail("source"))
+        .received_records;
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        agent.alive();
+        ensure(
+            full_queues(&state)
+                && checkpoint(&state) == blocked_checkpoint
+                && status(&state).is_some_and(|h| h.backpressure && h.received_records == received)
+                && exact_queued(&state, &account.name, &preserved),
+            "backpressure",
+        );
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
     println!("\nATHERNEX_AUTH_AGENT_STAGE=backpressure_verified");
     agent.kill();
     drop(held);

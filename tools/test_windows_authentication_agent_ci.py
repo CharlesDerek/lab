@@ -14,7 +14,7 @@ SCRIPT = Path(__file__).resolve().with_name('verify_windows_authentication_agent
 TESTS = ['telemetry::windows_authentication::native_test::agent_test::release_agent_logon_delivery_replays_and_reports_policy_gaps']
 INPUTS = ['agent.exe', 'endpoint-tests.exe', 'verify_windows_authentication_agent_ci.ps1',
           'verify_windows_isolation_ci.ps1', 'verify_windows_service_ci.ps1']
-STAGES = ['guard_verified', 'policy_ready', 'account_ready', 'agent_config_verified', 'source_ready', 'stalled_http_verified', 'originals_verified', 'backpressure_verified', 'crash_replay_verified', 'policy_gap_verified', 'bookmark_anchor_verified', 'http_delivery_verified', 'server_replay_verified', 'export_authorization_verified', 'original_export_verified', 'original_link_verified', 'device_separation_verified', 'detection_verified', 'portal_coverage_verified', 'server_restart_verified', 'cleanup_verified', 'passed']
+STAGES = ['guard_verified', 'policy_ready', 'account_ready', 'agent_config_verified', 'source_ready', 'stalled_http_verified', 'originals_verified', 'queues_filled', 'backpressure_observed', 'backpressure_verified', 'crash_replay_verified', 'policy_gap_verified', 'bookmark_anchor_verified', 'http_delivery_verified', 'server_replay_verified', 'export_authorization_verified', 'original_export_verified', 'original_link_verified', 'device_separation_verified', 'detection_verified', 'portal_coverage_verified', 'server_restart_verified', 'cleanup_verified', 'passed']
 FAILURES = ['configuration', 'token', 'policy', 'account', 'source', 'transport', 'original', 'backpressure', 'replay', 'policy_gap', 'authorization', 'device_separation', 'detection', 'portal', 'cleanup', 'timeout', 'other']
 WRAPPER = r'''
 param([string]$Script, [string]$Case, [string]$Root, [string]$Configuration)
@@ -557,6 +557,22 @@ class AuthenticationAgentRunnerTests(unittest.TestCase):
                 'post_task_markers': ['ATHERNEX_AUTH_AGENT_FAILURE='+failure]}))
             self.assertEqual(public['runner_failure'], 'source_proof_failed')
             self.assertEqual(public['diagnostics']['checks'][TESTS[0]]['failures'], [failure])
+
+    def test_failed_backpressure_with_verified_cleanup_never_promotes_acceptance(self):
+        stages = STAGES[:STAGES.index('backpressure_verified')] + ['cleanup_verified']
+        logs = ['ATHERNEX_AUTH_AGENT_STAGE='+stage for stage in stages]
+        logs += ['ATHERNEX_AUTH_AGENT_FAILURE=backpressure']
+        scenario = {'report': {'checks': dict.fromkeys(TESTS, 'not_verified'),
+            'progress': dict.fromkeys(TESTS, 'failed'), 'error': 'native_worker_failed'},
+            'logs': [logs], 'task_error': 'Native service task failed: 1'}
+        public = self.assert_public_failed(self.run_case('publish-passed', scenario))
+        diagnostic = public['diagnostics']['checks'][TESTS[0]]
+        self.assertEqual(diagnostic, {'progress': 'failed', 'stages': stages, 'failures': ['backpressure']})
+        self.assertNotIn('passed', diagnostic['stages'])
+        self.assertNotIn('http_delivery_verified', diagnostic['stages'])
+        # Even a contradictory complete worker report cannot use cleanup to
+        # replace a missing body proof or erase its fixed failure category.
+        self.assert_public_failed(self.run_case('publish-passed', {'logs': [logs]}))
 
     @classmethod
     def tearDownClass(cls):

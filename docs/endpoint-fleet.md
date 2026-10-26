@@ -662,14 +662,19 @@ and executable hashes; account details and event XML stay on the disposable host
 The separate `windows-authentication-agent` job stages the release agent and one
 exact ignored fixture under a protected LocalSystem/session-zero directory. The
 agent runs its normal capture and delivery loop while the fixture holds HTTP,
-fills both durable queues with owned records, verifies a stable bookmark under
-backpressure, and kills and restarts the held agent process. Logons written during
+fills both durable queues with owned records, observes a candidate batch refused
+for lack of admission capacity, and then verifies a stable bookmark and received
+counter while both queues remain full. Unrelated Security records can legitimately
+advance the cursor before that refusal. The fixture also kills and restarts the
+held agent process. Logons written during
 downtime must replay from the retained Security log, with identical queued
 envelopes. A deliberate audit-policy gap must remain visible after restoration.
 Real HTTP delivery must acknowledge the originals before removing queued rows;
 authenticated export, duplicate/conflicting replay, device separation, AX-001,
 escaped portal evidence and server restart are also required. Account deletion,
 policy restoration, unchanged token context and child-process cleanup are checked.
+The fixed cleanup milestone can also accompany a failed body; it never promotes
+a failed native check to acceptance.
 
 The agent fixture has a separate explicit opt-in and keeps the component gate.
 Its public artifact contains exactly `inputs.json` and
