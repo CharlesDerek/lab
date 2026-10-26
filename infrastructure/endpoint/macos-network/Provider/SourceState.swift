@@ -153,9 +153,12 @@ final class SourceState {
             inflight = Batch(id: acknowledged + 1, count: count, bytes: body, digest: hex(Data(SHA256.hash(data: body))))
         }
         let b = pull ? inflight : nil
+        let batchID: UInt64 = b?.id ?? 0
+        let batchDigest: String = b?.digest ?? ""
+        let recordCount: Int = b?.count ?? 0
         let control = try json(["version": 1, "nonce": hex(nonce), "epoch": epoch, "request_id": request,
             "status": ["health": health(), "last_acked_batch_id": acknowledged],
-            "batch_id": b?.id ?? 0, "batch_sha256": b?.digest ?? "", "record_count": b?.count ?? 0])
+            "batch_id": batchID, "batch_sha256": batchDigest, "record_count": recordCount])
         let body = b?.bytes ?? Data()
         guard control.count <= controlLimit, body.count <= frameLimit - control.count else { throw SourceError.refused }
         return (control, body)

@@ -59,5 +59,5 @@ func project(_ flow: NEFilterFlow, stream: String, receipt: UInt64) throws -> Da
     return try selectedProjection(stream: stream, receipt: receipt, flowID: flow.identifier.uuidString,
         direction: direction, family: family, type: type, proto: proto,
         local: endpoint(socket.localEndpoint, family: family), remote: endpoint(socket.remoteEndpoint, family: family),
-        application: token(flow.sourceAppAuditToken), process: token(flow.sourceProcessAuditToken), time: clock())
+        application: token(flow.sourceAppAuditToken), process: token(flow.sourceProcessAuditToken), time: sourceReceiptClock())
 }

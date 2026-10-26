@@ -16,14 +16,14 @@ func randomBytes() throws -> Data {
     guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else { throw SourceError.refused }
     return Data(bytes)
 }
-func clock() throws -> (Int64, Int64) {
+func sourceReceiptClock() throws -> (Int64, Int64) {
     var time = timespec()
     guard clock_gettime(CLOCK_REALTIME, &time) == 0, time.tv_sec > 0,
           time.tv_nsec >= 0, time.tv_nsec < 1_000_000_000 else { throw SourceError.refused }
     return (Int64(time.tv_sec), Int64(time.tv_nsec))
 }
 func milliseconds() -> UInt64 {
-    guard let t = try? clock(), let s = UInt64(exactly: t.0), s <= (UInt64.max - 999) / 1000 else { return 0 }
+    guard let t = try? sourceReceiptClock(), let s = UInt64(exactly: t.0), s <= (UInt64.max - 999) / 1000 else { return 0 }
     return s * 1000 + UInt64(t.1 / 1_000_000)
 }
 func json(_ object: Any) throws -> Data {
