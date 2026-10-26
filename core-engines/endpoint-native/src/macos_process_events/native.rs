@@ -7,18 +7,16 @@ use super::{
 use athernex_endpoint_protocol::macos_process_events::*;
 use endpoint_sec::{sys, Action, ActionResult, Event, Message, Process};
 use std::{
-    marker::PhantomData,
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{ffi::OsStrExt, net::UnixStream},
     },
     ptr::NonNull,
-    rc::Rc,
-    sync::{atomic::Ordering, Arc},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-mod scope;
+use crate::macos_notify::native::scope;
 #[cfg(test)]
 mod tests;
 const EVENTS: [sys::es_event_type_t; 3] = [
@@ -26,176 +24,47 @@ const EVENTS: [sys::es_event_type_t; 3] = [
     sys::es_event_type_t::ES_EVENT_TYPE_NOTIFY_FORK,
     sys::es_event_type_t::ES_EVENT_TYPE_NOTIFY_EXIT,
 ];
-type Handler = block2::RcBlock<dyn Fn(NonNull<sys::es_client_t>, NonNull<sys::es_message_t>)>;
-
-#[derive(Clone, Copy)]
-struct LifetimeApi {
-    create: fn(&mut *mut sys::es_client_t, &Handler) -> sys::es_new_client_result_t,
-    unsubscribe: fn(*mut sys::es_client_t) -> sys::es_return_t,
-    delete: fn(*mut sys::es_client_t) -> sys::es_return_t,
-}
-impl LifetimeApi {
-    fn native() -> Self {
-        Self {
-            create: |out, block| unsafe { sys::es_new_client(out, block) },
-            unsubscribe: |client| unsafe { sys::es_unsubscribe_all(client) },
-            delete: |client| unsafe { sys::es_delete_client(client) },
-        }
-    }
-}
-
-struct Owner {
-    client: Option<NonNull<sys::es_client_t>>,
-    block: Option<Handler>,
+type Owner = crate::macos_notify::native::Owner<MacosProcessEvent, 3>;
+#[cfg(test)]
+use crate::macos_notify::native::{Handler, LifetimeApi};
+fn callback(
     shared: Arc<Shared>,
-    api: LifetimeApi,
-    failed: bool,
-    _thread: PhantomData<Rc<()>>,
-}
-impl Owner {
-    fn new(
-        shared: Arc<Shared>,
-        stream: String,
-        timebase: MacosMachTimebase,
-    ) -> crate::Result<Self> {
-        Self::new_with_api(shared, stream, timebase, LifetimeApi::native())
-    }
-    fn new_with_api(
-        shared: Arc<Shared>,
-        stream: String,
-        timebase: MacosMachTimebase,
-        api: LifetimeApi,
-    ) -> crate::Result<Self> {
-        let callback = shared.clone();
-        let block: Handler = block2::RcBlock::new(
-            move |_client: NonNull<sys::es_client_t>, raw: NonNull<sys::es_message_t>| {
-                callback.callback(|| {
-                    let Some(receipt) = callback.counters.receive() else {
-                        return;
-                    };
-                    // Balanced retain/release remains inside the caught callback.
-                    // No native pointer or Message is placed in the application queue.
-                    let message = unsafe { Message::from_raw(raw) };
-                    if message.version() < MIN_MESSAGE_VERSION {
-                        callback.counters.add(&callback.counters.rejected, 1);
-                        return;
-                    }
-                    let (Some(seq), Some(global)) = (message.seq_num(), message.global_seq_num())
-                    else {
-                        callback.counters.add(&callback.counters.rejected, 1);
-                        return;
-                    };
-                    let kind = match message.event_type().0 {
-                        9 => 0,
-                        11 => 1,
-                        15 => 2,
-                        _ => {
-                            callback.counters.unknown_event_sequence(global);
-                            callback.counters.add(&callback.counters.rejected, 1);
-                            return;
-                        }
-                    };
-                    callback.counters.sequences(kind, seq, global);
-                    match projection(&message, &stream, receipt, &timebase) {
-                        Ok(event) => callback.enqueue(event),
-                        Err(_) => callback.counters.add(&callback.counters.rejected, 1),
-                    }
-                });
-            },
-        );
-        let mut raw = std::ptr::null_mut();
-        let code = (api.create)(&mut raw, &block);
-        if code != sys::es_new_client_result_t::ES_NEW_CLIENT_RESULT_SUCCESS || raw.is_null() {
-            // A contradictory pointer/result is uncertain native ownership. Keep
-            // callback capture alive until this helper exits; never retry creation.
-            if !raw.is_null() || code == sys::es_new_client_result_t::ES_NEW_CLIENT_RESULT_SUCCESS {
-                shared.closing.store(true, Ordering::SeqCst);
-                std::mem::forget(block);
-            }
-            return Err("Endpoint Security process client creation failed".into());
-        }
-        Ok(Self {
-            client: NonNull::new(raw),
-            block: Some(block),
-            shared,
-            api,
-            failed: false,
-            _thread: PhantomData,
-        })
-    }
-    fn raw(&self) -> crate::Result<*mut sys::es_client_t> {
-        self.client
-            .map(NonNull::as_ptr)
-            .ok_or_else(|| "Process source client is closed".into())
-    }
-    fn subscriptions(&self) -> crate::Result<()> {
-        let (mut count, mut events) = (0_usize, std::ptr::null_mut());
-        let code = unsafe { sys::es_subscriptions(self.raw()?, &mut count, &mut events) };
-        struct List(*mut sys::es_event_type_t);
-        impl Drop for List {
-            fn drop(&mut self) {
-                unsafe { libc::free(self.0.cast()) };
-            }
-        }
-        let _list = List(events);
-        if code != sys::es_return_t::ES_RETURN_SUCCESS || count != 3 || events.is_null() {
-            return Err("Process source subscriptions could not be verified".into());
-        }
-        let mut actual = unsafe { std::slice::from_raw_parts(events, count) }
-            .iter()
-            .map(|e| e.0)
-            .collect::<Vec<_>>();
-        actual.sort_unstable();
-        if actual != [9, 11, 15] {
-            return Err("Process source subscriptions changed".into());
-        }
-        Ok(())
-    }
-    fn stop(&mut self) -> crate::Result<()> {
-        if self.failed {
-            return Err("Process source shutdown is unconfirmed".into());
-        }
-        let Some(client) = self.client.take() else {
-            return Ok(());
+    stream: String,
+    timebase: MacosMachTimebase,
+) -> impl Fn(NonNull<sys::es_message_t>) + std::panic::RefUnwindSafe {
+    move |raw| {
+        let callback = &shared;
+        let Some(receipt) = callback.counters.receive() else {
+            return;
         };
-        let unsubscribe = (self.api.unsubscribe)(client.as_ptr());
-        let deleted = (self.api.delete)(client.as_ptr());
-        self.shared.closing.store(true, Ordering::SeqCst);
-        if deleted != sys::es_return_t::ES_RETURN_SUCCESS {
-            self.failed = true;
-            self.shared.counters.failed.store(true, Ordering::SeqCst);
-            // SDK documents leaked resources on failure. Keep the exact block
-            // capture owned until process exit; do not retry or start a new client.
-            if let Some(block) = self.block.take() {
-                std::mem::forget(block);
+        // Balanced retain/release remains inside the caught callback.
+        // No native pointer or Message is placed in the application queue.
+        let message = unsafe { Message::from_raw(raw) };
+        if message.version() < MIN_MESSAGE_VERSION {
+            callback.counters.add(&callback.counters.rejected, 1);
+            return;
+        }
+        let (Some(seq), Some(global)) = (message.seq_num(), message.global_seq_num()) else {
+            callback.counters.add(&callback.counters.rejected, 1);
+            return;
+        };
+        let kind = match message.event_type().0 {
+            9 => 0,
+            11 => 1,
+            15 => 2,
+            _ => {
+                callback.counters.unknown_event_sequence(global);
+                callback.counters.add(&callback.counters.rejected, 1);
+                return;
             }
-            return Err("Endpoint Security process client shutdown failed".into());
+        };
+        callback.counters.sequences(kind, seq, global);
+        match projection(&message, &stream, receipt, &timebase) {
+            Ok(event) => callback.enqueue(event),
+            Err(_) => callback.counters.add(&callback.counters.rejected, 1),
         }
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while self.shared.callbacks.load(Ordering::SeqCst) != 0 {
-            if Instant::now() >= deadline {
-                self.failed = true;
-                if let Some(block) = self.block.take() {
-                    std::mem::forget(block);
-                }
-                return Err("Process callback shutdown did not complete".into());
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        self.block.take();
-        if unsubscribe != sys::es_return_t::ES_RETURN_SUCCESS {
-            self.failed = true;
-            return Err("Process source unsubscribe failed".into());
-        }
-        Ok(())
     }
 }
-impl Drop for Owner {
-    fn drop(&mut self) {
-        let _ = self.stop();
-    }
-}
-
 fn process(value: Process<'_>) -> crate::Result<MacosProcessProjection> {
     let executable = value.executable();
     let path = executable.path().as_bytes();
@@ -370,14 +239,17 @@ fn run(parent: u32, fd: i32) -> crate::Result<()> {
     }
     let shared = Arc::new(Shared::default());
     let started = now_ms();
-    let mut owner = Owner::new(shared.clone(), initial.stream_id.clone(), runtime()?)?;
-    let inventory = scope::prepare(owner.raw()?)?;
+    let mut owner = Owner::new(
+        shared.clone(),
+        callback(shared.clone(), initial.stream_id.clone(), runtime()?),
+    )?;
+    let inventory = scope::prepare(owner.raw()?, &[9, 11, 15])?;
     if unsafe { sys::es_subscribe(owner.raw()?, EVENTS.as_ptr(), EVENTS.len() as u32) }
         != sys::es_return_t::ES_RETURN_SUCCESS
     {
         return Err("Process source subscription failed".into());
     }
-    owner.subscriptions()?;
+    owner.subscriptions(&[9, 11, 15])?;
     let checked = now_ms();
     let mut status = Status {
         health: MacosProcessEventHealth {
@@ -425,8 +297,8 @@ fn run(parent: u32, fd: i32) -> crate::Result<()> {
         }
         if owner.client.is_some() {
             let verified: crate::Result<()> = (|| {
-                owner.subscriptions()?;
-                let current = scope::inspect(owner.raw()?)?;
+                owner.subscriptions(&[9, 11, 15])?;
+                let current = scope::inspect(owner.raw()?, &[9, 11, 15])?;
                 status.health.mute_snapshot_sha256 = current.digest()?;
                 status.health.muted_process_count = current.processes;
                 status.health.muted_path_count = current.paths;

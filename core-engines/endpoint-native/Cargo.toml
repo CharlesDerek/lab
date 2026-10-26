@@ -19,7 +19,7 @@ socket2 = "0.6"
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "=0.6.2"
 mach2 = "=0.7.0"
-endpoint-sec = { version = "=0.6.2", default-features = false, features = ["macos_12_0_0", "audit_token_from_pid"] }
+endpoint-sec = { version = "=0.6.2", default-features = false, features = ["macos_13_0_0", "audit_token_from_pid"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_System_SystemServices", "Wdk_Storage_FileSystem", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_Storage_InstallableFileSystems", "Win32_Storage_Vhd", "Win32_Security", "Win32_Security_Authorization", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Rpc", "Win32_NetworkManagement_WindowsFilteringPlatform", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }

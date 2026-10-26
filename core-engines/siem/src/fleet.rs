@@ -10,6 +10,18 @@ use protocol::{Action, Command, EndpointEvent, Enrollment, Heartbeat, Platform, 
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
+pub(crate) fn macos_authentication_mechanism(
+    mechanism: &protocol::macos_authentication::MacosAuthenticationMechanism,
+) -> &'static str {
+    use protocol::macos_authentication::MacosAuthenticationMechanism;
+    match mechanism {
+        MacosAuthenticationMechanism::OpenDirectory => "Open Directory",
+        MacosAuthenticationMechanism::TouchId => "Touch ID",
+        MacosAuthenticationMechanism::Token => "CryptoTokenKit",
+        MacosAuthenticationMechanism::AutoUnlock => "Auto Unlock",
+    }
+}
+
 pub(crate) fn macos_process_change(
     change: &protocol::macos_process_events::MacosProcessChange,
 ) -> &'static str {
@@ -365,6 +377,10 @@ impl Engine {
                 Some(Telemetry::WindowsAuthentication { event }) => Some(event),
                 _ => None,
             };
+            let macos_authentication = match &event.telemetry {
+                Some(Telemetry::MacosAuthentication { event }) => Some(event),
+                _ => None,
+            };
             let macos_process = match &event.telemetry {
                 Some(Telemetry::MacosProcessEvent { event }) => Some(event),
                 _ => None,
@@ -444,6 +460,11 @@ impl Engine {
                     windows_process_change(&process.change)
                 );
             }
+            if let Some(authentication) = macos_authentication {
+                context.program = "macOS Endpoint Security authentication".into();
+                context.pid = Some(authentication.original.event_process.pid());
+                context.summary = format!("ES {} authentication report; the reported result does not establish login/session completion or a prevention verdict. Event process and optional instigator remain separate; retained projection only", macos_authentication_mechanism(&authentication.mechanism));
+            }
             if let Some(process) = macos_process {
                 context.program = "macOS Endpoint Security".into();
                 context.pid = Some(process.pid);
@@ -472,6 +493,9 @@ impl Engine {
                     .source_ip
                     .map(|ip| ip.to_string())
                     .unwrap_or_else(|| "local-authentication".into()),
+                Some(Telemetry::MacosAuthentication { event }) => protocol::hash(
+                    format!("{id}:macos-authentication-object:{}", event.event_id()).as_bytes(),
+                ),
                 Some(Telemetry::MacosProcessEvent { event }) => protocol::hash(
                     format!("{id}:macos-process-observation:{}", event.event_id()).as_bytes(),
                 ),
@@ -537,6 +561,14 @@ impl Engine {
                                     )
                                 })
                                 .unwrap_or_else(|| event.id.clone())
+                        })
+                    })
+                    .or_else(|| {
+                        macos_authentication.map(|a| {
+                            protocol::hash(
+                                format!("{id}:macos-authentication-subject:{}", a.event_id())
+                                    .as_bytes(),
+                            )
                         })
                     })
                     .unwrap_or_else(|| {

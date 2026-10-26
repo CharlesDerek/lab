@@ -19,13 +19,10 @@ pub use client::{verify_helper, Client};
 #[cfg(target_os = "macos")]
 pub use native::run_owned;
 
-pub const MAX_RECORDS: usize = 2048;
-pub const MAX_QUEUE_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_BATCH_RECORDS: usize = 64;
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
-// Leave room for status, framing and JSON punctuation without splitting events.
-#[cfg(any(target_os = "macos", test))]
-const MAX_BATCH_BYTES: usize = MAX_FRAME_BYTES - 16 * 1024;
+pub const MAX_RECORDS: usize = crate::macos_notify::MAX_RECORDS;
+pub const MAX_QUEUE_BYTES: usize = crate::macos_notify::MAX_QUEUE_BYTES;
+pub const MAX_BATCH_RECORDS: usize = crate::macos_notify::MAX_BATCH_RECORDS;
+pub const MAX_FRAME_BYTES: usize = crate::macos_notify::MAX_FRAME_BYTES;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +96,7 @@ impl Delivery {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn hex_id(value: &str) -> bool {
     value.len() == 64
         && value

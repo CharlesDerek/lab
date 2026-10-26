@@ -1,6 +1,6 @@
 //! Actual owner transitions with stubbed ES create/delete, not an entitled run.
 use super::*;
-use std::cell::RefCell;
+use std::{cell::RefCell, sync::atomic::Ordering};
 
 #[derive(Default)]
 struct Effects {
@@ -61,12 +61,15 @@ fn api() -> LifetimeApi {
 }
 fn owner(shared: Arc<Shared>) -> crate::Result<Owner> {
     Owner::new_with_api(
-        shared,
-        "a".repeat(64),
-        MacosMachTimebase {
-            numerator: 1,
-            denominator: 1,
-        },
+        shared.clone(),
+        callback(
+            shared,
+            "a".repeat(64),
+            MacosMachTimebase {
+                numerator: 1,
+                denominator: 1,
+            },
+        ),
         api(),
     )
 }

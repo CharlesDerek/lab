@@ -1,10 +1,13 @@
 //! Bounded native OS snapshots, committed atomically with their durable outbox deltas.
 mod authentication;
+mod macos_authentication;
 mod macos_process_events;
 #[cfg(target_os = "macos")]
 mod macos_process_setup;
 #[cfg(target_os = "macos")]
 pub use macos_process_setup::configure as configure_macos_process_adapter;
+#[cfg(target_os = "macos")]
+pub use macos_process_setup::configure_authentication as configure_macos_authentication_adapter;
 mod network_events;
 mod process_events;
 mod windows_authentication;
@@ -33,16 +36,20 @@ const CAPTURE_HEALTH_MS: u64 = 30_000; // 15-second worker plus bounded database
 /// A locally approved helper pin. Installing this pin does not enable collection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct MacosProcessAdapter {
+pub struct MacosNativeAdapter {
     pub path: PathBuf,
     pub sha256: String,
 }
-impl MacosProcessAdapter {
+/// Existing process adapter name retains the same configuration representation.
+pub type MacosProcessAdapter = MacosNativeAdapter;
+pub type MacosAuthenticationAdapter = MacosNativeAdapter;
+
+impl MacosNativeAdapter {
     fn validate(&self) -> Result<()> {
         let raw = self
             .path
             .to_str()
-            .ok_or("Mac process adapter path must be UTF-8")?;
+            .ok_or("Mac native adapter path must be UTF-8")?;
         if !self.path.is_absolute()
             || self.path == Path::new("/")
             || raw.len() > 1024
@@ -59,7 +66,7 @@ impl MacosProcessAdapter {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
-            return Err("Invalid approved Mac process adapter".into());
+            return Err("Invalid approved Mac native adapter".into());
         }
         Ok(())
     }
@@ -83,6 +90,10 @@ pub struct TelemetryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macos_process_adapter: Option<MacosProcessAdapter>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub macos_authentication: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macos_authentication_adapter: Option<MacosAuthenticationAdapter>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub windows_network_events: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linux_network_events: bool,
@@ -98,6 +109,8 @@ impl Default for TelemetryConfig {
             windows_process_events: false,
             macos_process_events: false,
             macos_process_adapter: None,
+            macos_authentication: false,
+            macos_authentication_adapter: None,
             windows_network_events: false,
             linux_network_events: false,
         }
@@ -112,6 +125,16 @@ impl TelemetryConfig {
             && (!self.enabled || !cfg!(target_os = "macos") || self.macos_process_adapter.is_none())
         {
             return Err("Mac process collection requires enabled telemetry on macOS and an approved adapter".into());
+        }
+        if let Some(adapter) = &self.macos_authentication_adapter {
+            adapter.validate()?;
+        }
+        if self.macos_authentication
+            && (!self.enabled
+                || !cfg!(target_os = "macos")
+                || self.macos_authentication_adapter.is_none())
+        {
+            return Err("Mac authentication collection requires enabled telemetry on macOS and an approved adapter".into());
         }
         if self.windows_network_events && (!self.enabled || !cfg!(windows)) {
             return Err("Windows network collection requires enabled telemetry on Windows".into());
@@ -444,6 +467,27 @@ pub fn health(store: &Store, config: &TelemetryConfig) -> Result<CollectorHealth
                 "Mac process collection is unavailable, stale or has a coverage gap".into()
             });
     }
+    status.macos_authentication = if config.macos_authentication {
+        macos_authentication::health(store)?
+    } else {
+        None
+    };
+    if config.macos_authentication
+        && !status
+            .macos_authentication
+            .as_ref()
+            .is_some_and(|h| h.healthy(now_ms()))
+    {
+        status.incomplete = true;
+        status.error = status
+            .macos_authentication
+            .as_ref()
+            .map(|h| h.error.clone())
+            .filter(|e| !e.is_empty())
+            .unwrap_or_else(|| {
+                "Mac authentication collection is unavailable, stale or has a coverage gap".into()
+            });
+    }
     status.windows_network_events = if config.windows_network_events {
         windows_network_events::health(store)?
     } else {
@@ -496,6 +540,7 @@ fn item_key(item: &Telemetry) -> Result<String> {
         | Telemetry::WindowsAuthentication { .. }
         | Telemetry::WindowsProcessEvent { .. }
         | Telemetry::MacosProcessEvent { .. }
+        | Telemetry::MacosAuthentication { .. }
         | Telemetry::WindowsNetworkEvent { .. }
         | Telemetry::Authentication { .. } => {
             return Err("Kernel events must not enter the snapshot comparison cache".into())
@@ -631,6 +676,7 @@ pub fn commit_snapshot(store: &Store, snapshot: &Snapshot) -> Result<CollectorHe
         windows_authentication: None,
         windows_process_events: None,
         macos_process_events: None,
+        macos_authentication: None,
         windows_network_events: None,
         mode: "snapshot".into(),
         last_attempt_ms: now,
@@ -789,6 +835,7 @@ pub struct ContinuousCollector<'a> {
     windows_authentication: Option<windows_authentication::Collector<'a>>,
     windows_process_events: Option<windows_process_events::Collector<'a>>,
     macos_process_events: Option<macos_process_events::Collector<'a>>,
+    macos_authentication: Option<macos_authentication::Collector<'a>>,
     windows_network_events: Option<windows_network_events::Collector<'a>>,
     network: Option<network_events::Collector<'a>>,
     owner: PhantomData<&'a Store>,
@@ -835,6 +882,17 @@ impl<'a> ContinuousCollector<'a> {
         } else {
             None
         };
+        let macos_authentication = if policy.macos_authentication {
+            Some(macos_authentication::Collector::start(
+                store,
+                policy
+                    .macos_authentication_adapter
+                    .as_ref()
+                    .ok_or("Missing approved Mac authentication adapter")?,
+            )?)
+        } else {
+            None
+        };
         let windows_network_events = if policy.windows_network_events {
             Some(windows_network_events::Collector::start(store)?)
         } else {
@@ -867,6 +925,7 @@ impl<'a> ContinuousCollector<'a> {
             windows_authentication,
             windows_process_events,
             macos_process_events,
+            macos_authentication,
             windows_network_events,
             network,
             owner: PhantomData,
@@ -891,6 +950,9 @@ impl<'a> ContinuousCollector<'a> {
         }
         if let Some(events) = &self.macos_process_events {
             events.check()?;
+        }
+        if let Some(authentication) = &self.macos_authentication {
+            authentication.check()?;
         }
         if let Some(events) = &self.windows_network_events {
             events.check()?;

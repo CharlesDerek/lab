@@ -18,6 +18,34 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{fmt::Write as _, io::Write, path::Path as FsPath};
 
+fn macos_authentication_token(value: &str) -> String {
+    if value.is_empty() {
+        return "Empty token".into();
+    }
+    let bytes = value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|s| u8::from_str_radix(s, 16).ok())
+        })
+        .collect::<Option<Vec<_>>>();
+    if let Some(bytes) = bytes.filter(|_| value.len().is_multiple_of(2)) {
+        if let Ok(text) = std::str::from_utf8(&bytes) {
+            if !text.chars().any(char::is_control) {
+                return text.into();
+            }
+        }
+    }
+    format!("Bytes (hex): {value}")
+}
+fn optional_macos_authentication_token(value: Option<&str>) -> String {
+    value
+        .map(macos_authentication_token)
+        .unwrap_or_else(|| "Not reported".into())
+}
+
 fn checked<T>(r: LabResult<T>) -> Result<T, WebError> {
     r.map_err(|e| WebError(e.to_string()))
 }
@@ -257,6 +285,104 @@ async fn observations_page(
                         serde_json::to_string(&event.change).unwrap_or_default(),
                     ),
                 ]);
+            }
+            if let protocol::telemetry::Telemetry::MacosAuthentication { event } = telemetry {
+                use protocol::macos_authentication::MacosAuthenticationPayload;
+                let process = &event.original.event_process;
+                facts.extend([
+                    ("macOS authentication mechanism", crate::fleet::macos_authentication_mechanism(&event.mechanism).into()),
+                    ("Reported authentication result", if event.reported_success { "Successful" } else { "Failed" }.into()),
+                    ("Outcome qualification", "This is a mechanism/factor report, not a completed login, session or prevention verdict. Multiple factors and fallbacks are not counted as separate failed logins".into()),
+                    ("Reported event process PID / version", format!("{} / {}", process.pid(), process.pid_version())),
+                    ("Reported instigator PID / version", event.original.authentication.instigator().map(|p| format!("{} / {}", p.pid(), p.pid_version())).unwrap_or_else(|| "Not reported".into())),
+                    ("Source stream", event.original.stream_id.clone()),
+                    ("Collector receipt sequence", event.original.receipt_sequence.to_string()),
+                    ("ES per-type / global sequence", format!("{} / {}", event.original.seq_num, event.original.global_seq_num)),
+                    ("Time qualification", "Endpoint Security event timespec; no login/session start time or cross-host precision guarantee. Mach timebase is separate collector metadata".into()),
+                    ("Retained authentication projection", "Selected native fields are retained in the original observation JSON, not the full native message. No password, private key material, biometric template, arguments or environment is captured".into()),
+                    ("Identity qualification", "Event process and optional instigator are distinct source-reported roles. Record names, UID and token identifiers do not establish a current process or shared account across devices or mechanisms".into()),
+                ]);
+                match &event.original.authentication {
+                    MacosAuthenticationPayload::OpenDirectory {
+                        record_type_hex,
+                        record_name_hex,
+                        node_name_hex,
+                        db_path_hex,
+                        ..
+                    } => {
+                        facts.extend([
+                            ("Reported OD record type", macos_authentication_token(record_type_hex)),
+                            ("Reported OD record name", macos_authentication_token(record_name_hex)),
+                            ("Reported OD node", macos_authentication_token(node_name_hex)),
+                            ("Reported OD database path", optional_macos_authentication_token(db_path_hex.as_deref())),
+                            ("OD record qualification", "The record name is scoped by its record type and node; it is not necessarily a username".into()),
+                        ]);
+                    }
+                    MacosAuthenticationPayload::TouchId {
+                        mode, has_uid, uid, ..
+                    } => {
+                        facts.extend([
+                            (
+                                "Reported Touch ID mode",
+                                if *mode == 0 {
+                                    "Verification"
+                                } else {
+                                    "Identification"
+                                }
+                                .into(),
+                            ),
+                            ("Source UID present", has_uid.to_string()),
+                            (
+                                "Reported factor UID",
+                                uid.map(|v| v.to_string())
+                                    .unwrap_or_else(|| "Not reported".into()),
+                            ),
+                        ]);
+                    }
+                    MacosAuthenticationPayload::Token {
+                        pubkey_hash_hex,
+                        token_id_hex,
+                        kerberos_principal_hex,
+                        ..
+                    } => {
+                        facts.extend([
+                            (
+                                "Reported public-key hash",
+                                macos_authentication_token(pubkey_hash_hex),
+                            ),
+                            (
+                                "Reported token identifier",
+                                macos_authentication_token(token_id_hex),
+                            ),
+                            (
+                                "Reported Kerberos principal",
+                                optional_macos_authentication_token(
+                                    kerberos_principal_hex.as_deref(),
+                                ),
+                            ),
+                        ]);
+                    }
+                    MacosAuthenticationPayload::AutoUnlock {
+                        username_hex,
+                        purpose,
+                    } => {
+                        facts.extend([
+                            (
+                                "Reported Auto Unlock username",
+                                macos_authentication_token(username_hex),
+                            ),
+                            (
+                                "Reported Auto Unlock purpose",
+                                if *purpose == 1 {
+                                    "Machine unlock"
+                                } else {
+                                    "Authorization prompt"
+                                }
+                                .into(),
+                            ),
+                        ]);
+                    }
+                }
             }
             if let protocol::telemetry::Telemetry::MacosProcessEvent { event } = telemetry {
                 let subject = event.subject();
@@ -561,6 +687,9 @@ async fn portal(State(app): State<App>) -> Result<Html<String>, WebError> {
             }
             if let Some(events) = &c.process_events {
                 write!(content,"<p>Kernel process events: {} · {} received · {} dropped · {} loss notifications · {} subscriptions</p><p>Current subscription began {} UTC. Activity outside subscription windows is not observed.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_events,events.dropped_events,events.loss_signals,events.subscriptions,crate::render::time(events.started_ms),escape(&events.error)).unwrap();
+            }
+            if let Some(events) = &c.macos_authentication {
+                write!(content,"<p>macOS Endpoint Security authentication reports: {} · {} received · {} admitted · {} rejected · {} loss notifications</p><p>One authentication notification source with Open Directory, Touch ID, token and Auto Unlock report variants. Reported success is not login/session completion; factors and fallbacks do not feed failed-login bursts. Subscription gaps have no source replay. Source policy: <code>{}</code>. Observed mute scope: <code>{}</code>; {} path entries, {} process entries, {} subscribed-event intersections.</p><p>Global and per-type gaps overlap and are not summed. Other authentication sources and macOS process notifications cannot replace this coverage.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_records,events.admitted_records,events.rejected_records,events.loss_signals,escape(&events.source_policy_sha256),escape(&events.mute_snapshot_sha256),events.muted_path_count,events.muted_process_count,events.subscribed_mute_count,escape(&events.error)).unwrap();
             }
             if let Some(events) = &c.macos_process_events {
                 write!(content,"<p>macOS Endpoint Security process events: {} · {} received · {} admitted · {} rejected · {} loss notifications</p><p>Live exec/fork/exit notifications only; subscription gaps have no source replay. Exact retained projections can replay after durable admission. Source policy: <code>{}</code>. Observed mute scope: <code>{}</code>; {} path entries, {} process entries, {} subscribed-event intersections.</p><p>Global and per-type gap counters describe overlapping evidence and are not summed. Audit tokens and paths are historical reports, not current process or ancestry assertions. Arguments and environment are excluded.</p><p>{}</p>",if stale || !events.healthy(now_ms()) {"coverage incomplete"} else {"active"},events.received_records,events.admitted_records,events.rejected_records,events.loss_signals,escape(&events.source_policy_sha256),escape(&events.mute_snapshot_sha256),events.muted_path_count,events.muted_process_count,events.subscribed_mute_count,escape(&events.error)).unwrap();

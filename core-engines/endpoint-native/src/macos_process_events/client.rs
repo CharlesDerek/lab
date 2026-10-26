@@ -1,87 +1,18 @@
 use super::{
-    hex_id,
     transport::{self, Command, Reply, Request, Response},
     Delivery, Status, MAX_FRAME_BYTES,
 };
 use crate::{child, Result};
-use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::Read,
+    fs::File,
     net::Shutdown,
-    os::unix::{
-        fs::{MetadataExt, OpenOptionsExt},
-        net::UnixStream,
-    },
+    os::unix::net::UnixStream,
     path::Path,
     time::{Duration, Instant},
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
-const HELPER_LIMIT: u64 = 256 * 1024 * 1024;
-
-fn pin_helper(path: &Path, expected: &str) -> Result<File> {
-    if !hex_id(expected) || !path.is_absolute() || path.canonicalize()? != path {
-        return Err("Invalid process helper identity".into());
-    }
-    for (index, ancestor) in path.ancestors().enumerate() {
-        let m = fs::symlink_metadata(ancestor)?;
-        if m.uid() != 0
-            || m.file_type().is_symlink()
-            || m.mode() & 0o022 != 0
-            || (index > 0 && !m.is_dir())
-        {
-            return Err("Process helper requires a trusted root-owned path".into());
-        }
-    }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
-    let before = file.metadata()?;
-    if !before.is_file()
-        || before.uid() != 0
-        || before.nlink() != 1
-        || before.mode() & 0o022 != 0
-        || before.mode() & 0o111 == 0
-        || before.len() == 0
-        || before.len() > HELPER_LIMIT
-    {
-        return Err("Invalid process helper file".into());
-    }
-    let mut hash = Sha256::new();
-    let mut bytes = [0; 65536];
-    let mut total = 0_u64;
-    loop {
-        let n = file.read(&mut bytes)?;
-        if n == 0 {
-            break;
-        }
-        total = total
-            .checked_add(n as u64)
-            .ok_or("Process helper size overflow")?;
-        if total > HELPER_LIMIT {
-            return Err("Process helper exceeds its size bound".into());
-        }
-        hash.update(&bytes[..n]);
-    }
-    let after = file.metadata()?;
-    let named = fs::symlink_metadata(path)?;
-    if total != before.len()
-        || after.len() != before.len()
-        || after.mtime() != before.mtime()
-        || after.mtime_nsec() != before.mtime_nsec()
-        || after.ctime() != before.ctime()
-        || after.ctime_nsec() != before.ctime_nsec()
-        || named.dev() != before.dev()
-        || named.ino() != before.ino()
-        || named.file_type().is_symlink()
-        || format!("{:x}", hash.finalize()) != expected
-    {
-        return Err("Process helper hash or file identity changed".into());
-    }
-    Ok(file)
-}
+use crate::macos_notify::owned::pin_helper;
 
 /// Verify the configured installed helper without launching it or creating ES state.
 pub fn verify_helper(path: &Path, expected_sha256: &str) -> Result<()> {
@@ -119,47 +50,12 @@ impl Client {
         }
         #[cfg(target_os = "macos")]
         {
-            use std::{
-                os::{
-                    fd::{AsRawFd, FromRawFd},
-                    unix::process::CommandExt,
-                },
-                process::Command as ProcessCommand,
-            };
-            if unsafe { libc::geteuid() } != 0 || !hex_id(stream_id) {
-                return Err("Process collection requires root and a valid stream".into());
-            }
-            let image = pin_helper(path, expected_sha256)?;
-            let (stream, child_stream) = UnixStream::pair()?;
-            // Duplicate an independently owned descriptor; only the child copy
-            // loses CLOEXEC, and Command drops the parent's duplicate after spawn.
-            let raw = unsafe { libc::fcntl(child_stream.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
-            if raw < 0 {
-                return Err("Process helper socket duplication failed".into());
-            }
-            let inherited = unsafe { File::from_raw_fd(raw) };
-            let mut command = ProcessCommand::new(path);
-            command.env_clear();
-            command
-                .arg("process-events-owned")
-                .arg(std::process::id().to_string())
-                .arg(raw.to_string());
-            unsafe {
-                command.pre_exec(move || {
-                    let fd = inherited.as_raw_fd();
-                    let flags = libc::fcntl(fd, libc::F_GETFD);
-                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-            let service = child::Service::start(&mut command, 4096)?;
-            drop(command);
-            drop(child_stream);
-            let mut random = [0; 32];
-            getrandom::fill(&mut random).map_err(|_| "Process source nonce failed")?;
-            let nonce = random.iter().map(|b| format!("{b:02x}")).collect();
+            let (service, stream, image, nonce) = crate::macos_notify::owned::launch(
+                path,
+                expected_sha256,
+                stream_id,
+                "process-events-owned",
+            )?;
             let mut client = Self {
                 service,
                 stream,
@@ -400,6 +296,7 @@ impl Drop for Client {
 mod tests {
     use super::*;
     use crate::macos_process_events::tests::{event, status};
+    use std::io::Read;
 
     #[test]
     fn semantic_frame_refusals_close_transport_and_make_the_client_terminal() {

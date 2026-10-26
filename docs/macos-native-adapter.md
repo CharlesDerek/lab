@@ -364,6 +364,78 @@ authorization. Actual signed-helper collection, coexistence with AUTH, runtime
 loss/stop behavior, installation and recovery on authorized Intel and Apple
 silicon Macs remain native acceptance work.
 
+## Opt-in authentication method observations
+
+The management agent can independently collect macOS 13 or newer Endpoint
+Security authentication notifications for OpenDirectory, Touch ID, token and
+Auto Unlock methods. These are source-reported method results. A successful
+method report does not establish that a login or session completed; a failed
+report may be followed by another method or factor. The SIEM retains
+`reported_success` and normalizes every report as an authentication observation.
+These reports do not contribute to failed-login bursts or successful-login to
+process correlations. Apple's [Endpoint Security event overview](https://developer.apple.com/videos/play/wwdc2022/110345/)
+distinguishes authentication notifications from login/session events; the
+[authentication payload](https://developer.apple.com/documentation/endpointsecurity/es_event_authentication_t)
+reports a method and result.
+
+Collection is disabled by default. With management stopped, record the approved
+helper pin:
+
+```sh
+sudo /Library/AthernexEndpoint/athernex-endpoint configure-macos-authentication-adapter \
+  /Library/AthernexEndpoint/state \
+  /Library/AthernexEndpoint/athernex-endpoint-native APPROVED_RELEASE_SHA256
+```
+
+The same private-state, maintenance and root-owned helper checks apply as for
+process collection. The installer records this pin from its signature-verified
+component. Recording the pin enables neither telemetry nor protection and does
+not require macOS 13 or ClamAV. To request collection on a supported Mac, enable
+`telemetry.enabled` and `telemetry.macos_authentication`, preserve
+`macos_authentication_adapter`, then restart management. Existing process
+collection retains its macOS 12 runtime profile. Each enabled source owns its
+own helper, ES client, stream, bounded queue and durable health. Creating an ES
+client can clear the framework's shared authorization caches.
+
+The authentication projection retains the event process and optional instigator
+as distinct roles, source time and sequences, native NOTIFY result, method,
+reported success and selected method fields. OpenDirectory record names remain
+qualified by record type and node; they are not always usernames. Touch ID mode,
+`has_uid` and UID remain separate source facts; UID is retained exactly when
+`has_uid` is true. Token identifiers, public-key hash bytes, optional Kerberos
+principal, and Auto Unlock username and purpose remain source-scoped. Missing
+instigators are not replaced by the event process. Newer explicit instigator
+tokens are omitted. No account lookup, final-login identity or cross-device
+principal join is inferred.
+
+This is a selected semantic projection, not a native memory dump. Strings retain
+their exact bytes as hexadecimal; optional database paths and principals
+distinguish absence from an empty value. General tokens are bounded to 4 KiB and
+paths to 16 KiB. The serialized original is bounded to 48 KiB and the envelope
+to 128 KiB. Oversize, unsupported and malformed records cause visible rejection
+or loss rather than truncation. Passwords, private keys, biometric templates,
+arguments and environment are excluded. Names, token identifiers and paths can
+still be sensitive: they remain in private endpoint storage and authenticated
+operator exports, with escaped presentation. Public CI evidence does not contain
+live authentication records.
+
+All four methods share one authentication event-type sequence. Health requires
+exactly one active subscription and its independent source-policy hash. Process,
+Linux or Windows source health cannot satisfy this gate. The process collector's
+commit-before-ACK, bounded framing, queue-pressure, stop/drain and sticky loss
+rules apply independently. Each helper can retain 2,048 records and 8 MiB of
+encoded data including its in-flight batch; enabling both permits 16 MiB across
+their queues, in addition to bounded copies and native framework allocations.
+Only committed originals can replay. Message versions below the supported
+version-5 common-field profile are refused before those fields are read.
+
+Portable tests and hosted builds do not establish entitled collection. Native
+acceptance still requires signed and authorized Intel and Apple silicon Macs,
+configured authentication services and hardware for each method, and observed
+scope, loss, queue pressure, crash/restart, cleanup and coexistence behavior.
+Untested mechanisms and OS versions remain unvalidated. This source does not
+claim universal login coverage, prevention or production readiness.
+
 ## Antivirus account and signature setup
 
 Native protection setup creates a hidden, disabled `_athernexav` account and dedicated group using

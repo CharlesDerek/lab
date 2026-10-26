@@ -83,6 +83,9 @@ pub enum Telemetry {
     WindowsAuthentication {
         event: crate::windows_authentication::WindowsAuthentication,
     },
+    MacosAuthentication {
+        event: crate::macos_authentication::MacosAuthentication,
+    },
     MacosProcessEvent {
         event: crate::macos_process_events::MacosProcessEvent,
     },
@@ -110,7 +113,9 @@ impl Telemetry {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::NetworkEvent { .. } => "network_event",
-            Self::Authentication { .. } | Self::WindowsAuthentication { .. } => "authentication",
+            Self::Authentication { .. }
+            | Self::WindowsAuthentication { .. }
+            | Self::MacosAuthentication { .. } => "authentication",
             Self::MacosProcessEvent { .. } => "macos_process_event",
             Self::WindowsProcessEvent { .. } => "windows_process_event",
             Self::WindowsNetworkEvent { .. } => "windows_network_event",
@@ -141,6 +146,7 @@ impl Telemetry {
             }
             Self::Authentication { event } => event.validate(now),
             Self::WindowsAuthentication { event } => event.validate(now),
+            Self::MacosAuthentication { event } => event.validate(now),
             Self::MacosProcessEvent { event } => event.validate(now),
             Self::WindowsProcessEvent { event } => event.validate(now),
             Self::WindowsNetworkEvent { event } => event.validate(now),
@@ -175,7 +181,8 @@ impl Telemetry {
         match self {
             Self::NetworkEvent { .. }
             | Self::Authentication { .. }
-            | Self::WindowsAuthentication { .. } => None,
+            | Self::WindowsAuthentication { .. }
+            | Self::MacosAuthentication { .. } => None,
             Self::MacosProcessEvent { .. } => None,
             Self::WindowsProcessEvent { .. } => None,
             Self::WindowsNetworkEvent { .. } => None,
@@ -197,6 +204,8 @@ pub struct CollectorHealth {
     pub windows_authentication: Option<crate::authentication::AuthenticationHealth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub windows_process_events: Option<crate::windows_process_events::WindowsProcessEventHealth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macos_authentication: Option<crate::macos_authentication::MacosAuthenticationHealth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macos_process_events: Option<crate::macos_process_events::MacosProcessEventHealth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,6 +230,9 @@ impl CollectorHealth {
             authentication.validate()?;
         }
         if let Some(authentication) = &self.windows_authentication {
+            authentication.validate()?;
+        }
+        if let Some(authentication) = &self.macos_authentication {
             authentication.validate()?;
         }
         if let Some(events) = &self.macos_process_events {

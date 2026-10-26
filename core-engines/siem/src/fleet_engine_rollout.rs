@@ -215,6 +215,15 @@ impl Engine {
                     .as_ref()
                     .and_then(|c| c.macos_process_events.as_ref())
                     .map(|h| h.source_policy_sha256.clone()),
+                macos_authentication: health
+                    .collector
+                    .as_ref()
+                    .is_some_and(|c| c.macos_authentication.is_some()),
+                macos_authentication_policy_sha256: health
+                    .collector
+                    .as_ref()
+                    .and_then(|c| c.macos_authentication.as_ref())
+                    .map(|h| h.source_policy_sha256.clone()),
                 windows_process_events: health
                     .collector
                     .as_ref()

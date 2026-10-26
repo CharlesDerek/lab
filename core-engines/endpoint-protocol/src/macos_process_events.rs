@@ -27,7 +27,7 @@ pub struct MacosEventTime {
     pub nanoseconds: i64,
 }
 impl MacosEventTime {
-    fn milliseconds(&self) -> Result<u64, String> {
+    pub(crate) fn milliseconds(&self) -> Result<u64, String> {
         if self.seconds <= 0 || !(0..1_000_000_000).contains(&self.nanoseconds) {
             return Err("Invalid macOS event timestamp".into());
         }
@@ -72,7 +72,7 @@ impl MacosProcessProjection {
     pub fn pid_version(&self) -> u32 {
         self.audit_token[7]
     }
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         let path = &self.executable.path_bytes_hex;
         if self.pid() == 0
             || self.pid() > i32::MAX as u32

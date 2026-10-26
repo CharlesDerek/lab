@@ -5,6 +5,7 @@ pub mod authentication;
 pub mod engine;
 pub mod engine_fleet;
 pub mod installer;
+pub mod macos_authentication;
 pub mod macos_process_events;
 pub mod network_events;
 pub mod process_events;
@@ -359,6 +360,21 @@ impl EndpointEvent {
                     return Err(
                         "Windows authentication envelope does not match XML identity/time".into(),
                     );
+                }
+            }
+            if let telemetry::Telemetry::MacosAuthentication { event } = telemetry {
+                if self.id != event.event_id() || self.time_ms != event.time_ms {
+                    return Err(
+                        "macOS authentication envelope does not match projection identity/time"
+                            .into(),
+                    );
+                }
+                if serde_json::to_vec(self)
+                    .map_err(|_| "macOS authentication envelope serialization failed")?
+                    .len()
+                    > macos_authentication::MAX_SERIALIZED_EVENT_BYTES
+                {
+                    return Err("macOS authentication envelope exceeds transport budget".into());
                 }
             }
             if let telemetry::Telemetry::MacosProcessEvent { event } = telemetry {

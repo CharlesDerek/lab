@@ -19,12 +19,10 @@ impl Tuple {
         }
     }
 }
-fn targeted(event: u32) -> bool {
-    [9, 11, 15].contains(&event)
-}
 
-pub(super) struct Inventory {
+pub(crate) struct Inventory {
     tuples: BTreeSet<Tuple>,
+    events: &'static [u32],
     pub paths: u64,
     pub processes: u64,
 }
@@ -36,12 +34,15 @@ impl Inventory {
         ))
     }
     pub fn intersections(&self) -> u64 {
-        self.tuples.iter().filter(|t| targeted(t.event())).count() as u64
+        self.tuples
+            .iter()
+            .filter(|t| self.events.contains(&t.event()))
+            .count() as u64
     }
     fn other(&self) -> BTreeSet<Tuple> {
         self.tuples
             .iter()
-            .filter(|t| !targeted(t.event()))
+            .filter(|t| !self.events.contains(&t.event()))
             .cloned()
             .collect()
     }
@@ -63,9 +64,13 @@ impl Drop for Processes {
     }
 }
 
-pub(super) fn inspect(client: *mut sys::es_client_t) -> crate::Result<Inventory> {
+pub(crate) fn inspect(
+    client: *mut sys::es_client_t,
+    events: &'static [u32],
+) -> crate::Result<Inventory> {
     let mut result = Inventory {
         tuples: BTreeSet::new(),
+        events,
         paths: 0,
         processes: 0,
     };
@@ -151,10 +156,13 @@ pub(super) fn inspect(client: *mut sys::es_client_t) -> crate::Result<Inventory>
     Ok(result)
 }
 
-pub(super) fn prepare(client: *mut sys::es_client_t) -> crate::Result<Inventory> {
-    let before = inspect(client)?;
+pub(crate) fn prepare(
+    client: *mut sys::es_client_t,
+    events: &'static [u32],
+) -> crate::Result<Inventory> {
+    let before = inspect(client, events)?;
     for tuple in &before.tuples {
-        if !targeted(tuple.event()) {
+        if !events.contains(&tuple.event()) {
             continue;
         }
         let event = sys::es_event_type_t(tuple.event());
@@ -180,7 +188,7 @@ pub(super) fn prepare(client: *mut sys::es_client_t) -> crate::Result<Inventory>
             return Err("Scoped process event unmute failed".into());
         }
     }
-    let after = inspect(client)?;
+    let after = inspect(client, events)?;
     if after.intersections() != 0 || after.other() != before.other() {
         return Err("Process source mute scope did not match its profile".into());
     }

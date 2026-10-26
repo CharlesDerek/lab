@@ -20,6 +20,10 @@ fn run() -> Result<()> {
                 args[2].parse()?,
             )
         }
+        #[cfg(target_os = "macos")]
+        Some("authentication-events-owned") if args.len() == 3 => {
+            athernex_endpoint_native::macos_authentication::run_owned(args[1].parse()?,args[2].parse()?)
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Some("health-status") if args.len() == 2 => {
             let plan=athernex_endpoint_native::service::read_plan(std::path::Path::new(&args[1]))?;

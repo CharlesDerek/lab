@@ -566,8 +566,8 @@ jobs:
         run: cargo test --locked --no-fail-fast -p athernex-endpoint -p athernex-endpoint-protocol -p athernex-endpoint-native
       - name: Test native evidence sealing and verified backup recovery
         run: cargo test --locked -p athernex-siem --test storage_segments complete_backup_verifies_and_restores_history
-      - name: Test retained Mac process observations and independent rollout gates
-        run: cargo test --locked -p athernex-siem --test macos_process_events --test endpoint_rollouts --test engine_rollouts
+      - name: Test retained Mac process and authentication observations and independent rollout gates
+        run: cargo test --locked -p athernex-siem --test macos_process_events --test macos_authentication --test endpoint_rollouts --test engine_rollouts
       - name: Refuse disabled assertions in validation tools and isolated helpers
         run: python tools/test_verification_guards.py -v
       - name: Test artifact packaging with controlled signature results
@@ -588,7 +588,17 @@ jobs:
         run: cargo build --locked --release -p athernex-endpoint -p athernex-siem
       - name: Build development macOS authorization adapter
         if: runner.os == 'macOS'
-        run: cargo build --locked --release -p athernex-endpoint-native
+        run: |
+          cargo build --locked --release -p athernex-endpoint-native
+          # Authentication adds macOS13 payload types, not newer client functions.
+          # Preserve the existing process source's macOS12 import profile.
+          native_imports=$(nm -u target/release/athernex-endpoint-native)
+          case "$native_imports" in
+            *_es_unmute_all_target_paths*|*_es_invert_muting*|*_es_muting_inverted*)
+              echo 'Unexpected macOS13-only Endpoint Security function import.' >&2
+              exit 1
+              ;;
+          esac
       - uses: actions/upload-artifact@v4
         if: runner.os == 'macOS'
         with:

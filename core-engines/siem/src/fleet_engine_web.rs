@@ -498,6 +498,16 @@ async fn portal(
                 .iter()
                 .position(|id| id == &member.endpoint_id)
                 .and_then(|index| plan.gates.get(index))
+                .is_some_and(|gate| gate.macos_authentication)
+            {
+                html.push_str("<p>Required: healthy macOS Endpoint Security authentication report coverage with the reviewed source policy; Other authentication or process sources cannot replace it.</p>");
+            }
+            if plan
+                .request
+                .endpoint_ids
+                .iter()
+                .position(|id| id == &member.endpoint_id)
+                .and_then(|index| plan.gates.get(index))
                 .is_some_and(|gate| gate.windows_process_events)
             {
                 html.push_str("<p>Required: healthy Windows ETW process coverage; Linux process coverage cannot replace this source.</p>");
