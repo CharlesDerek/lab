@@ -38,6 +38,10 @@ mod acl;
 #[path = "windows/raw.rs"]
 mod raw;
 
+pub(crate) fn is_administrator() -> Result<bool> {
+    acl::is_administrator()
+}
+
 pub(crate) fn require_administrator() -> Result<()> {
     acl::require_administrator()
 }
@@ -239,6 +243,9 @@ impl Dir {
             ancestors,
         })
     }
+    pub(crate) fn user_private(&self) -> Result<()> {
+        acl::user_private(&self.file)
+    }
     pub fn private(&self) -> Result<()> {
         acl::private(&self.file)
     }
@@ -423,6 +430,71 @@ impl Dir {
             return Err(io::Error::last_os_error().into());
         }
         drop(file);
+        self.sync()
+    }
+    /// Finish only the exact durably recorded private receipt. A successful
+    /// rename with a lost journal save can be confirmed at its destination.
+    pub(crate) fn publish_recorded_receipt(
+        &self,
+        staged: &str,
+        destination: &str,
+        volume: u64,
+        id: [u8; 16],
+        expected: &athernex_endpoint_protocol::windows_filter_package::Member,
+    ) -> Result<()> {
+        if staged == destination
+            || expected.bytes == 0
+            || expected.bytes > 65536
+            || !athernex_endpoint_protocol::hex_id(&expected.sha256)
+        {
+            return Err("Invalid recorded receipt publication".into());
+        }
+        leaf_name(staged)?;
+        leaf_name(destination)?;
+        let (mut file, move_needed) = match self
+            .open_file(staged, FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
+        {
+            Ok(file) => {
+                if self.stat(destination)?.is_some() {
+                    return Err("Receipt destination already exists alongside staged object".into());
+                }
+                (file, true)
+            }
+            Err(e)
+                if e.downcast_ref::<io::Error>()
+                    .is_some_and(|e| e.kind() == io::ErrorKind::NotFound) =>
+            {
+                (
+                    self.open_file(destination, FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)?,
+                    false,
+                )
+            }
+            Err(e) => return Err(e),
+        };
+        regular(&file)?;
+        acl::private(&file)?;
+        let actual = identity(&file)?;
+        let standard: FILE_STANDARD_INFO = information(&file, FileStandardInfo)?;
+        if actual.device != volume
+            || actual.file_id != id
+            || standard.NumberOfLinks != 1
+            || actual.size != expected.bytes
+        {
+            return Err("Receipt object differs from durable publication intent".into());
+        }
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(expected.bytes + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != expected.bytes
+            || athernex_endpoint_protocol::hash(&bytes) != expected.sha256
+        {
+            return Err("Receipt bytes differ from durable publication intent".into());
+        }
+        if move_needed {
+            raw::rename(&file, &self.file, destination, false)?;
+        }
+        file.sync_all()?;
         self.sync()
     }
     pub fn move_new(&self, leaf: &str, to: &Dir, new: &str) -> Result<()> {

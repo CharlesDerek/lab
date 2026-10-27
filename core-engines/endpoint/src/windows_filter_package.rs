@@ -8,7 +8,7 @@ use std::path::Path;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub(crate) use windows::{prepare, require_prepared};
+pub(crate) use windows::{prepare, prepared_directory, require_prepared};
 #[cfg(windows)]
 pub fn verify_worker(path: &Path) -> Result<String> {
     windows::worker(path).map_err(|_| "Windows driver package verification refused".into())

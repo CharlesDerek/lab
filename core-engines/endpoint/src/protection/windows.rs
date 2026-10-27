@@ -235,6 +235,8 @@ fn stage_files(
 pub fn supervise_preview(path: &Path) -> Result<()> {
     athernex_endpoint_native::windows_state::require_local_system()?;
     let plan = checked_plan(path)?;
+    let _admission = crate::windows_driver::Admission::acquire(&plan.state)?;
+    crate::windows_driver::require_live(&plan.state)?;
     let endpoint = Directory::open(&plan.state)?;
     let protection = endpoint.directory("protection")?;
     let _protection_lease = protection.lock("supervisor.lock")?;
@@ -485,6 +487,25 @@ pub fn worker_main(parent: u32) -> Result<()> {
         request.scanner_created,
         &request.scanner_logon,
     )?;
+    // The private worker namespace is fixed by supervise_preview. Retain a
+    // separate shared holder so parent death cannot release machine admission
+    // before this process closes its driver connection.
+    if request.state.file_name().and_then(|v| v.to_str()) != Some("windows")
+        || request
+            .state
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|v| v.to_str())
+            != Some("protection")
+    {
+        return Err("Windows filter worker state is outside its fixed namespace".into());
+    }
+    let endpoint = request
+        .state
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or("Windows worker endpoint state missing")?;
+    let _admission = crate::windows_driver::Admission::acquire(endpoint)?;
     request.network.validate()?;
     if request.network.port != request.port {
         return Err("Windows scanner network policy uses a different port".into());

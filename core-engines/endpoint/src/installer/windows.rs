@@ -27,12 +27,31 @@ pub(crate) struct Lease {
     _file: File,
     _service_host: crate::windows_service::ServiceLease,
     directory: Directory,
+    _exclusive: Option<crate::windows_driver::Exclusive>,
+    _admission: Option<crate::windows_driver::Admission>,
 }
 impl Lease {
-    fn acquire(directory: Directory) -> Result<Self> {
+    pub(crate) fn acquire(directory: Directory) -> Result<Self> {
+        let admission = crate::windows_driver::Admission::acquire(directory.path())?;
+        Self::acquire_inner(directory, Some(admission), None)
+    }
+    pub(crate) fn acquire_owned(
+        directory: Directory,
+        exclusive: crate::windows_driver::Exclusive,
+    ) -> Result<Self> {
+        exclusive.check(&directory)?;
+        Self::acquire_inner(directory, None, Some(exclusive))
+    }
+    fn acquire_inner(
+        directory: Directory,
+        admission: Option<crate::windows_driver::Admission>,
+        exclusive: Option<crate::windows_driver::Exclusive>,
+    ) -> Result<Self> {
         let file = directory.maintenance_lock(LOCK)?;
         let service_host = crate::windows_service::lease(&directory)?;
         Ok(Self {
+            _admission: admission,
+            _exclusive: exclusive,
             _file: file,
             _service_host: service_host,
             directory,
@@ -67,11 +86,57 @@ fn record(directory: &Directory) -> Result<Option<Record>> {
     }
     Ok(Some(record))
 }
+/// Validate exact interrupted inputs while the coordinator retains global
+/// exclusion, before it publishes a new transaction or creates an epoch.
+pub(crate) fn deployment_preflight(
+    global: &Path,
+    bundle: &Path,
+    state: &Path,
+    agent: &Path,
+    artifact: &Artifact,
+    bootstrap: &protocol::Bootstrap,
+) -> Result<()> {
+    disjoint(&[global, bundle, agent, state])?;
+    let Some(directory) = optional(state)? else {
+        return Ok(());
+    };
+    let configuration = setup::configuration(bootstrap, state)?;
+    destinations(&configuration, agent)?;
+    if let Some(saved) = record(&directory)? {
+        saved.require_resume(
+            &artifact.sha256,
+            protocol::server_url(&bootstrap.server)?.as_str(),
+            local(agent)?,
+            artifact.filter()?.map(|d| d.sha256.as_str()),
+            artifact.filter()?.and_then(|d| d.deployment),
+        )?;
+    }
+    Ok(())
+}
+pub(crate) fn require_completed_driver(lease: &Lease, source: &str, package: &str) -> Result<()> {
+    let saved = record(&lease.directory)?.ok_or("Completed installer record missing")?;
+    if saved.phase != Phase::Complete
+        || saved.source_sha256 != source
+        || saved.windows_filter_sha256.as_deref() != Some(package)
+        || saved.windows_filter_deployment
+            != Some(protocol::windows_filter_package::Deployment::InstallAndObserveDisarmedV1)
+    {
+        return Err("Fresh load requires the existing completed endpoint selection".into());
+    }
+    Ok(())
+}
 pub fn require_complete(state: &Path) -> Result<()> {
+    crate::windows_driver::require_settled(state)?;
     if let Some(directory) = optional(state)? {
         let saved = record(&directory)?;
         if saved.as_ref().is_some_and(|r| r.phase != Phase::Complete) {
             return Err("Windows installation is incomplete; rerun its original installer bundle before starting services or maintenance".into());
+        }
+        if saved
+            .as_ref()
+            .is_some_and(|r| r.windows_filter_deployment.is_some())
+        {
+            crate::windows_driver::require_owned(state)?;
         }
         if let Some(hash) = saved
             .as_ref()
@@ -98,6 +163,7 @@ pub fn preflight(state: &Path, binary: &Path) -> Result<bool> {
             let artifact: Artifact =
                 serde_json::from_slice(&update::read_bounded(&release, 16384)?)?;
             saved.require_filter_selection(artifact.filter()?.map(|d| d.sha256.as_str()))?;
+            saved.require_deployment_selection(artifact.filter()?.and_then(|d| d.deployment))?;
         }
         if saved.phase != Phase::Complete && crate::file_hash(binary)? != saved.source_sha256 {
             return Err("Resume interrupted installation with its original executable".into());
@@ -245,6 +311,38 @@ fn register(state: &Directory, agent: &Directory) -> Result<()> {
 }
 
 pub fn install(bundle: &Path, agent: &Path, state: &Path) -> Result<()> {
+    let artifact: Artifact =
+        serde_json::from_slice(&update::read_bounded(&bundle.join("release.json"), 16384)?)?;
+    if artifact.filter()?.is_some_and(|d| d.deployment.is_some()) {
+        return crate::windows_driver::install(bundle, agent, state);
+    }
+    let _admission = crate::windows_driver::Admission::acquire(state)?;
+    install_inner(bundle, agent, state, None)
+}
+pub(crate) fn install_owned(
+    bundle: &Path,
+    agent: &Path,
+    state: &Path,
+    capability: &mut crate::windows_driver::Capability,
+) -> Result<()> {
+    install_inner(bundle, agent, state, Some(capability))
+}
+fn install_check(
+    state: &Path,
+    binary: &Path,
+    capability: Option<&crate::windows_driver::Capability>,
+) -> Result<()> {
+    match capability {
+        Some(capability) => update::installer_check_owned(state, binary, capability),
+        None => update::installer_check(state, binary, false),
+    }
+}
+fn install_inner(
+    bundle: &Path,
+    agent: &Path,
+    state: &Path,
+    mut capability: Option<&mut crate::windows_driver::Capability>,
+) -> Result<()> {
     windows_state::require_administrator()?;
     disjoint(&[bundle, agent, state])?;
     let bundle_pin = PinnedDirectory::open(bundle)?;
@@ -269,6 +367,7 @@ pub fn install(bundle: &Path, agent: &Path, state: &Path) -> Result<()> {
     crate::windows_filter_package::components(bundle, &artifact)?;
     artifact.network()?;
     let filter_hash = artifact.filter()?.map(|d| d.sha256.clone());
+    let deployment = artifact.filter()?.and_then(|d| d.deployment);
     if artifact.filter()?.is_some_and(|d| {
         (bytes.len() as u64)
             .checked_add(d.bytes)
@@ -281,24 +380,26 @@ pub fn install(bundle: &Path, agent: &Path, state: &Path) -> Result<()> {
     }
     let bootstrap = setup::read_bootstrap(&bundle.join("bootstrap.json"))?;
     let server = protocol::server_url(&bootstrap.server)?.to_string();
-    update::installer_check(state, &binary, false)?;
-    let lease = Lease::acquire(private_directory(state)?)?;
-    update::installer_check(state, &binary, false)?;
+    install_check(state, &binary, capability.as_deref())?;
+    let lease = if let Some(capability) = capability.as_deref() {
+        Lease::acquire_owned(private_directory(state)?, capability.exclusive()?)?
+    } else {
+        Lease::acquire(private_directory(state)?)?
+    };
+    install_check(state, &binary, capability.as_deref())?;
     let previous = record(&lease.directory)?;
     if let Some(saved) = &previous {
         saved.require_filter_selection(filter_hash.as_deref())?;
+        saved.require_deployment_selection(deployment)?;
     }
     let mut journal = if let Some(saved) = previous.filter(|r| r.phase != Phase::Complete) {
-        if saved.windows_filter_sha256 != filter_hash
-            || saved.source_sha256 != digest
-            || saved.server != server
-            || !evidence::prefix_equal(&saved.agent_directory, local(agent)?)
-        {
-            return Err(
-                "Interrupted installation must resume with the same source, server and destination"
-                    .into(),
-            );
-        }
+        saved.require_resume(
+            &digest,
+            &server,
+            local(agent)?,
+            filter_hash.as_deref(),
+            deployment,
+        )?;
         saved
     } else {
         let identity = lease.directory.identity()?;
@@ -312,6 +413,7 @@ pub fn install(bundle: &Path, agent: &Path, state: &Path) -> Result<()> {
             state_file_id: identity.file_id,
             phase: Phase::Preparing,
             windows_filter_sha256: filter_hash.clone(),
+            windows_filter_deployment: deployment,
         }
     };
     let configuration = setup::configuration(&bootstrap, state)?;
@@ -323,7 +425,7 @@ pub fn install(bundle: &Path, agent: &Path, state: &Path) -> Result<()> {
     }
     let guard = update::InstallerGuard::acquire(&lease)?;
     // Recheck ledgers after acquiring their leases; preflight was only a snapshot.
-    update::installer_check(state, &binary, false)?;
+    install_check(state, &binary, capability.as_deref())?;
     let configuration = setup::configuration(&bootstrap, state)?;
     destinations(&configuration, agent)?;
     let agent = private_directory(agent)?;
@@ -356,7 +458,25 @@ pub fn install(bundle: &Path, agent: &Path, state: &Path) -> Result<()> {
     if let Some(hash) = &journal.windows_filter_sha256 {
         crate::windows_filter_package::require_prepared(state, hash)?;
     }
+    if let Some(capability) = capability.as_deref_mut() {
+        capability.before_complete(&lease.directory)?;
+    } else {
+        crate::windows_driver::require_settled(state)?;
+    }
     journal.phase = Phase::Complete;
     lease.directory.write_maintenance_json(RECORD, &journal)?;
+    if let Some(capability) = capability {
+        capability.completed()?;
+    }
     Ok(())
+}
+
+/// Explicit owned driver retirement changes only the deployment requirement.
+/// It neither completes an interrupted endpoint installation nor removes the
+/// immutable prepared package or any endpoint configuration/history.
+pub(crate) fn mark_driver_retired(lease: &Lease, source: &str, package: &str) -> Result<()> {
+    let mut saved =
+        record(&lease.directory)?.ok_or("Installation receipt missing during driver retirement")?;
+    saved.driver_retired(source, package)?;
+    lease.directory.write_maintenance_json(RECORD, &saved)
 }

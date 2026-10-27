@@ -40,6 +40,8 @@ fn main() -> Result<()> {
         println!("athernex-endpoint release-publish SIGNED_MANIFEST BINARY PUBLIC_KEY CATALOG_DIR");
         #[cfg(windows)]
         println!("athernex-endpoint windows-service STATE_DIR CONTROLLER_BINARY AGENT_BINARY\nSCM-only LocalSystem host for the stable launcher. Service running state does not establish prevention readiness.");
+        #[cfg(windows)]
+        println!("athernex-endpoint windows-driver-status\nathernex-endpoint windows-driver-recover STATE_DIR\nathernex-endpoint windows-driver-retire STATE_DIR\nExplicit signed driver deployment runs through windows-install and requires stopped ordinary services. Recovery never adopts unknown effects or clears NeedReboot; retirement uses normal owned unload only. Disarmed load observation does not enable production protection.");
         println!("athernex-endpoint engine-sign KEY_PK8 CONTENT_DIRECTORY ROLES_JSON TARGET VERSION CHANNEL SEQUENCE EXPIRES_MS OUTPUT_JSON\nathernex-endpoint engine-publish SIGNED_MANIFEST CONTENT_DIRECTORY PUBLIC_KEY_FILE CATALOG_DIR\nathernex-endpoint engine-stage STATE_DIR SIGNED_MANIFEST CONTENT_DIRECTORY\nathernex-endpoint engine-apply|engine-recover|engine-discard|engine-prune|engine-status STATE_DIR\nathernex-endpoint engine-request STATE_DIR RELEASE_ID DEADLINE_MS\nathernex-endpoint engine-cancel STATE_DIR RELEASE_ID\nManual engine activation requires stopped services and a locally pinned engine key/root. Queued activation requires local engine automatic policy and a live controller.");
         #[cfg(target_os = "linux")]
         println!("athernex-endpoint configure-protection STATE_DIR\nathernex-endpoint protect STATE_DIR\nLinux native prevention requires root, clamd/clamonacc, signatures and configured scan roots. The installer creates its separate protection service.");
@@ -63,6 +65,25 @@ fn main() -> Result<()> {
                 std::path::Path::new(&args[2]),
                 std::path::Path::new(&args[3]),
             )?;
+        }
+        #[cfg(windows)]
+        "windows-driver-coordinator" if args.len() == 3 => {
+            athernex_endpoint::windows_driver::coordinate(&args[1], &args[2])?;
+        }
+        #[cfg(windows)]
+        "windows-driver-recover" if args.len() == 2 => {
+            athernex_endpoint::windows_driver::recover(std::path::Path::new(&args[1]))?;
+        }
+        #[cfg(windows)]
+        "windows-driver-retire" if args.len() == 2 => {
+            athernex_endpoint::windows_driver::retire(std::path::Path::new(&args[1]))?;
+        }
+        #[cfg(windows)]
+        "windows-driver-status" if args.len() == 1 => {
+            println!(
+                "{}",
+                serde_json::to_string(&athernex_endpoint::windows_driver::status()?)?
+            );
         }
         #[cfg(windows)]
         "windows-install" if args.len() == 4 => {
@@ -575,6 +596,10 @@ fn main() -> Result<()> {
         }
         "run" if args.len() == 2 || (args.len() == 3 && args[2] == "--once") => {
             let directory = PathBuf::from(&args[1]);
+            #[cfg(windows)]
+            let _admission = athernex_endpoint::windows_driver::Admission::acquire(&directory)?;
+            #[cfg(windows)]
+            athernex_endpoint::windows_driver::require_live(&directory)?;
             let config: Config = serde_json::from_slice(&fs::read(directory.join("config.json"))?)?;
             let poll_secs = if config.telemetry.enabled {
                 config.telemetry.interval_secs.min(

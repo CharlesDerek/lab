@@ -1,4 +1,33 @@
 use super::*;
+
+#[test]
+fn deployment_is_explicit_closed_and_does_not_relabel_package_bytes() {
+    let (mut descriptor, bytes) = fixture(PROFILE);
+    let old = serde_json::to_value(&descriptor).unwrap();
+    assert!(old.get("deployment").is_none());
+    assert!(serde_json::from_value::<Descriptor>(old.clone())
+        .unwrap()
+        .deployment
+        .is_none());
+    descriptor.deployment = Some(Deployment::InstallAndObserveDisarmedV1);
+    let requested = serde_json::to_value(&descriptor).unwrap();
+    assert_eq!(requested["deployment"], "install-and-observe-disarmed-v1");
+    assert_eq!(
+        descriptor.unpack(&bytes).unwrap()[1],
+        descriptor.inf_bytes()
+    );
+    assert_eq!(requested["sha256"], old["sha256"]);
+    for unsupported in [
+        serde_json::json!(true),
+        serde_json::json!("armed"),
+        serde_json::json!({"load":true}),
+    ] {
+        let mut altered = requested.clone();
+        altered["deployment"] = unsupported;
+        assert!(serde_json::from_value::<Descriptor>(altered).is_err());
+    }
+}
+
 fn fixture(profile: &str) -> (Descriptor, Vec<u8>) {
     let mut d = Descriptor {
         schema: 1,
@@ -8,6 +37,7 @@ fn fixture(profile: &str) -> (Descriptor, Vec<u8>) {
         trust_policy: TRUST.into(),
         source_revision: "b".repeat(40),
         expected_abi: 2,
+        deployment: None,
         driver_version: "1.2.3.4".into(),
         driver_date: "02/29/2024".into(),
         altitude: "325000.01".into(),

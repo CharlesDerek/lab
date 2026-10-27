@@ -263,10 +263,17 @@ fn config(state: &Path) -> Result<Config> {
     }
     Ok(config)
 }
-fn lock(state: &Path) -> Result<StateLock> {
+pub(crate) struct MaintenanceLock {
+    _state: StateLock,
+    #[cfg(windows)]
+    _admission: crate::windows_driver::Admission,
+}
+fn lock(state: &Path) -> Result<MaintenanceLock> {
     try_maintenance_lock(state)?.ok_or_else(|| "Another update transaction is running".into())
 }
-pub(crate) fn try_maintenance_lock(state: &Path) -> Result<Option<StateLock>> {
+pub(crate) fn try_maintenance_lock(state: &Path) -> Result<Option<MaintenanceLock>> {
+    #[cfg(windows)]
+    let admission = crate::windows_driver::Admission::acquire(state)?;
     #[cfg(target_os = "macos")]
     crate::macos_network_bundle::upgrade::require_settled()?;
     #[cfg(windows)]
@@ -282,7 +289,11 @@ pub(crate) fn try_maintenance_lock(state: &Path) -> Result<Option<StateLock>> {
     if lease.is_some() {
         crate::macos_network_bundle::upgrade::require_settled()?;
     }
-    Ok(lease)
+    Ok(lease.map(|state| MaintenanceLock {
+        _state: state,
+        #[cfg(windows)]
+        _admission: admission,
+    }))
 }
 fn try_maintenance_lock_raw(state: &Path) -> Result<Option<StateLock>> {
     let directory = state.join("updates");
@@ -309,7 +320,7 @@ fn try_maintenance_lock_raw(state: &Path) -> Result<Option<StateLock>> {
         Err(error) => Err(error.into()),
     }
 }
-pub(crate) fn maintenance_lock(state: &Path) -> Result<StateLock> {
+pub(crate) fn maintenance_lock(state: &Path) -> Result<MaintenanceLock> {
     lock(state)
 }
 pub(crate) fn require_component_transactions_settled(state: &Path) -> Result<()> {
@@ -670,7 +681,9 @@ impl<'a> InstallerGuard<'a> {
 pub(crate) struct OfflineMaintenance {
     _controller: Option<ControllerGuard>,
     quiet: Option<Quiescent>,
-    _update: StateLock,
+    _update: MaintenanceLock,
+    #[cfg(windows)]
+    _admission: crate::windows_driver::Admission,
 }
 impl OfflineMaintenance {
     pub(crate) fn release_services(&mut self) {
@@ -684,6 +697,8 @@ impl OfflineMaintenance {
     }
 }
 pub(crate) fn offline_maintenance(state: &Path, config: &Config) -> Result<OfflineMaintenance> {
+    #[cfg(windows)]
+    let admission = crate::windows_driver::Admission::acquire(state)?;
     #[cfg(target_os = "macos")]
     crate::macos_network_bundle::upgrade::require_settled()?;
     let controller = controller_quiescent(state, Component::Controller)?;
@@ -694,6 +709,8 @@ pub(crate) fn offline_maintenance(state: &Path, config: &Config) -> Result<Offli
         _controller: controller,
         quiet: Some(quiet),
         _update: update,
+        #[cfg(windows)]
+        _admission: admission,
     })
 }
 /// Only the holder of the verified global network-upgrade lease may bypass its
@@ -717,7 +734,7 @@ pub(crate) fn network_upgrade_maintenance(
     Ok(OfflineMaintenance {
         _controller: controller,
         quiet: Some(quiet),
-        _update: update,
+        _update: MaintenanceLock { _state: update },
     })
 }
 /// The live controller already owns its lock. Children must have stopped before
@@ -727,6 +744,8 @@ pub(crate) fn controller_maintenance(
     config: &Config,
     token: &str,
 ) -> Result<OfflineMaintenance> {
+    #[cfg(windows)]
+    let admission = crate::windows_driver::Admission::acquire(state)?;
     #[cfg(target_os = "macos")]
     crate::macos_network_bundle::upgrade::require_settled()?;
     if !crate::supervisor::controller_owned(state, token) {
@@ -748,6 +767,8 @@ pub(crate) fn controller_maintenance(
         _controller: None,
         quiet: Some(quiet),
         _update: update,
+        #[cfg(windows)]
+        _admission: admission,
     })
 }
 fn quiescent(state: &Path, config: &Config) -> Result<Quiescent> {
@@ -813,6 +834,26 @@ pub fn installer_native_hash(manifest: &Path) -> Result<Option<String>> {
 }
 
 pub fn installer_check(state: &Path, binary: &Path, stopped: bool) -> Result<()> {
+    #[cfg(windows)]
+    let _admission = crate::windows_driver::Admission::acquire(state)?;
+    #[cfg(windows)]
+    crate::windows_driver::require_settled(state)?;
+    installer_check_inner(state, binary, stopped)?;
+    #[cfg(windows)]
+    crate::windows_driver::require_settled(state)?;
+    Ok(())
+}
+#[cfg(windows)]
+pub(crate) fn installer_check_owned(
+    state: &Path,
+    binary: &Path,
+    capability: &crate::windows_driver::Capability,
+) -> Result<()> {
+    capability.check(state, binary)?;
+    installer_check_inner(state, binary, false)?;
+    capability.check(state, binary)
+}
+fn installer_check_inner(state: &Path, binary: &Path, stopped: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
     crate::macos_network_bundle::upgrade::require_settled()?;
     crate::macos_network_bundle::installer_components(binary)?;
@@ -987,6 +1028,8 @@ pub fn recover(state: &Path) -> Result<UpdateStatus> {
     recover_component(state, Component::Agent)
 }
 pub fn recover_component(state: &Path, component: Component) -> Result<UpdateStatus> {
+    #[cfg(windows)]
+    let _admission = crate::windows_driver::Admission::acquire(state)?;
     let config = component.config(state)?;
     if component == Component::Controller {
         let destination = config.updates.install_path.as_ref().unwrap();
@@ -1056,6 +1099,8 @@ pub(crate) fn begin_trial(state: &Path, nonce: &str) -> Result<UpdateStatus> {
     )
 }
 fn apply_inner(state: &Path, component: Component, trial: Option<Trial>) -> Result<UpdateStatus> {
+    #[cfg(windows)]
+    let _admission = crate::windows_driver::Admission::acquire(state)?;
     let config = component.config(state)?;
     let _controller = controller_quiescent(state, component)?;
     let _quiet = quiescent(state, &config)?;

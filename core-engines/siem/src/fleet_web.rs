@@ -1029,7 +1029,11 @@ pub fn installer_bundle(
     if let Some(bytes) = &filter {
         entry("windows-filter.axpkg", bytes)?;
         entry("windows-filter.required", b"1\n")?;
-        entry("windows-filter.txt",b"Private approved driver package. The Windows installer verifies and durably prepares exact SYS/INF/CAT snapshots using cache-only WHQL catalog policy. Prepared is not Driver Store installation, loading, altitude assignment, live ABI proof, or active protection. Existing production activation refusal and native acceptance requirements remain.\n")?;
+        if artifact.filter()?.is_some_and(|d| d.deployment.is_some()) {
+            entry("windows-filter.txt",b"Private approved driver deployment. Setup requires an owned LocalSystem coordinator to install the exact approved primitive package and observe its disarmed ABI before installer completion. The journal preserves uncertain native effects and may require explicit recovery or an authorized reboot. This does not attest exact loaded-image bytes, assign altitude, arm protection, or satisfy the native prevention gates.\n")?;
+        } else {
+            entry("windows-filter.txt",b"Private approved driver package. The Windows installer verifies and durably prepares exact SYS/INF/CAT snapshots using cache-only WHQL catalog policy. Prepared is not Driver Store installation, loading, altitude assignment, live ABI proof, or active protection. Existing production activation refusal and native acceptance requirements remain.\n")?;
+        }
     }
     entry("README.txt",b"Athernex endpoint installer\nEnrollment expires in 15 minutes and registers one device. Keep this bundle private.\nWindows: run install.ps1 as Administrator. Linux/macOS: sudo sh install.sh.\nLinux command cleanup requires permitted pidfd_open and close_range syscalls (mainline Linux 5.9 or later); installation checks these before stopping an existing service.\nIf selected in the portal, setup downloads and verifies ClamAV, installs it, and initializes signatures. Linux also configures a separate on-access prevention service for the local scan roots. Check protection health in the portal. Windows/macOS currently provide scheduled and on-demand scans. Existing AV is preserved.\nRead release.json for signing status; do not treat a development build as a signed production release.\n")?;
     if target.starts_with("windows") {

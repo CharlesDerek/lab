@@ -467,6 +467,7 @@ mod tests {
             trust_policy: TRUST.into(),
             source_revision: "b".repeat(40),
             expected_abi: 2,
+            deployment: None,
             driver_version: "1.2.3.4".into(),
             driver_date: "01/01/2025".into(),
             altitude: "325000.01".into(),

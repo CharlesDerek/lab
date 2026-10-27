@@ -141,6 +141,8 @@ fn observation(
 }
 
 fn work(context: &Context) -> Result<()> {
+    #[cfg(windows)]
+    let _admission = crate::windows_driver::Admission::acquire(&context.request.state)?;
     windows_state::require_local_system()?;
     let state = Directory::open(&context.request.state)?;
     let lease = lease(&state)?;
@@ -148,6 +150,7 @@ fn work(context: &Context) -> Result<()> {
     let mut child: Option<windows_job::Service> = None;
     let result = (|| -> Result<()> {
         installer::require_complete(state.path())?;
+        crate::windows_driver::require_live(state.path())?;
         let executable = std::env::current_exe()?;
         crate::update::check_destination(&executable)?;
         let mut command = Process::new(executable);

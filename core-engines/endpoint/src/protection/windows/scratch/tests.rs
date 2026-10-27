@@ -16,6 +16,33 @@ fn fixture_invocation(name: &str, temporary: &Path) -> crate::Process {
     command
 }
 
+// Only fixed operation names and optional native numbers enter the public
+// projection. The original error remains available to the existing assertion.
+fn scratch_io<T>(operation: &'static str, result: std::io::Result<T>) -> std::io::Result<T> {
+    if let Err(error) = &result {
+        scratch_io_error(operation, error);
+    }
+    result
+}
+
+fn scratch_io_error(operation: &'static str, error: &std::io::Error) {
+    match error.raw_os_error() {
+        Some(code) => eprintln!("\nATHERNEX_SCRATCH_ERROR={operation}:{code}"),
+        None => eprintln!("\nATHERNEX_SCRATCH_ERROR={operation}:none"),
+    }
+}
+
+fn own_scanner_diagnostics(output: &[u8]) {
+    // Called only for the own-logon invocation, including poll/timeout failure.
+    // Forward unknown/injected namespace lines too so the closed public parser
+    // refuses them instead of silently accepting otherwise complete proof.
+    for line in String::from_utf8_lossy(output).lines() {
+        if line.to_ascii_uppercase().contains("ATHERNEX_SCRATCH_") {
+            eprintln!("\n{line}");
+        }
+    }
+}
+
 #[test]
 #[ignore = "internal owned scratch worker fixture"]
 fn owned_worker_fixture() {
@@ -338,12 +365,19 @@ fn restricted_io_fixture() {
         return;
     };
     let path = PathBuf::from(path);
+    let denied = std::env::var_os("ATHERNEX_SCRATCH_TEST_DENIED").is_some();
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_CHILD_STAGE=entered");
+    }
     raw_device_access_is_denied();
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_CHILD_STAGE=raw_devices_denied");
+    }
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path.join("capacity-proof"));
-    if std::env::var_os("ATHERNEX_SCRATCH_TEST_DENIED").is_some() {
+    if denied {
         assert!(
             file.is_err(),
             "another logon could write to the scratch disk"
@@ -351,10 +385,12 @@ fn restricted_io_fixture() {
         println!("other-logon-denied");
         return;
     }
+    let file = scratch_io("capacity_create", file);
     if file.is_err() {
         scratch_access_probe(&path);
     }
     let mut file = file.unwrap();
+    eprintln!("\nATHERNEX_SCRATCH_CHILD_STAGE=capacity_created");
     let block = vec![0x4a; 4 * 1024 * 1024];
     let mut written = 0;
     let error = loop {
@@ -369,15 +405,19 @@ fn restricted_io_fixture() {
             Err(error) => break error,
         }
     };
+    scratch_io_error("capacity_write", &error);
     assert!(written >= 64 * 1024 * 1024);
     assert_eq!(
         error.raw_os_error(),
         Some(112),
         "failure must be native disk full, not an unrelated write error"
     );
+    eprintln!("\nATHERNEX_SCRATCH_CHILD_STAGE=capacity_limit_reached");
     drop(file);
     assert!(std::fs::rename(&path, path.with_file_name("changed")).is_err());
+    eprintln!("\nATHERNEX_SCRATCH_CHILD_STAGE=root_rename_denied");
     assert!(std::fs::read_dir(path.parent().unwrap()).is_err());
+    eprintln!("\nATHERNEX_SCRATCH_CHILD_STAGE=parent_listing_denied");
     // Opening the root itself for FILE_WRITE_DATA must fail: otherwise a
     // compromised scanner could submit FSCTL_SET_REPARSE_POINT on that handle.
     {
@@ -404,27 +444,60 @@ fn restricted_io_fixture() {
         assert_eq!(raw, INVALID_HANDLE_VALUE);
         assert!([5, 32].contains(&unsafe { GetLastError() }));
     }
-    std::fs::remove_file(path.join("capacity-proof")).unwrap();
+    eprintln!("\nATHERNEX_SCRATCH_CHILD_STAGE=root_write_denied");
+    scratch_io(
+        "capacity_cleanup",
+        std::fs::remove_file(path.join("capacity-proof")),
+    )
+    .unwrap();
+    eprintln!("\nATHERNEX_SCRATCH_CHILD_STAGE=capacity_removed");
+    eprintln!("\nATHERNEX_SCRATCH_CHILD_STAGE=passed");
     println!("native-scratch-disk-full-and-root-protection-proven");
 }
 
 fn run_scanner(state: &Directory, token: &Token, ready: &Health, denied: bool) {
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_STAGE=own_scanner_entered");
+    }
     let path = &ready.path;
     let nt_path = checked_nt_path(ready, token);
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_STAGE=own_path_checked");
+    }
     let devices = diagnostics::raw_devices(ready);
     // Positive controls use only the worker's identity-checked volume/disk.
     // Failure under the scanner must be access denied, never a missing device.
     for device in &devices {
-        File::open(device).unwrap();
+        let opened = File::open(device);
+        if denied {
+            opened.unwrap();
+        } else {
+            scratch_io("own_device_open", opened).unwrap();
+        }
         diagnostics::native_raw_control(device);
+    }
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_STAGE=own_devices_checked");
     }
     let staging = state
         .scanner_workspace(&format!("scanner-{}", secret().unwrap()), token)
         .unwrap();
-    let mut source = File::open(std::env::current_exe().unwrap()).unwrap();
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_STAGE=own_workspace_created");
+    }
+    let opened = File::open(std::env::current_exe().unwrap());
+    let mut source = if denied {
+        opened
+    } else {
+        scratch_io("own_fixture_open", opened)
+    }
+    .unwrap();
     staging
         .copy("fixture.exe", &mut source, &mut (192 * 1024 * 1024))
         .unwrap();
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_STAGE=own_fixture_staged");
+    }
     let mut command = command(&staging.path().join("fixture.exe"), path).unwrap();
     command
         .args([
@@ -443,12 +516,31 @@ fn run_scanner(state: &Directory, token: &Token, ready: &Health, denied: bool) {
     if denied {
         command.env("ATHERNEX_SCRATCH_TEST_DENIED", "yes");
     }
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_STAGE=own_command_ready");
+    }
     let mut scanner = Service::start_scanner(&command, token, 8192, |_, _| Ok(())).unwrap();
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_STAGE=own_scanner_started");
+    }
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        if let Some(code) = scanner.poll().unwrap() {
+        let polled = scanner.poll();
+        if !denied && (polled.is_err() || matches!(&polled, Ok(Some(_)))) {
+            own_scanner_diagnostics(scanner.output());
+        }
+        if let Some(code) = polled.unwrap() {
+            if !denied {
+                eprintln!("\nATHERNEX_SCRATCH_STAGE=own_scanner_exited");
+            }
             assert_eq!(code, 0, "{}", String::from_utf8_lossy(scanner.output()));
+            if !denied {
+                eprintln!("\nATHERNEX_SCRATCH_STAGE=own_scanner_succeeded");
+            }
             break;
+        }
+        if !denied && Instant::now() >= deadline {
+            own_scanner_diagnostics(scanner.output());
         }
         assert!(
             Instant::now() < deadline,
@@ -465,6 +557,9 @@ fn run_scanner(state: &Directory, token: &Token, ready: &Health, denied: bool) {
         }),
         "{output}"
     );
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_STAGE=own_output_verified");
+    }
     let identity = staging.identity().unwrap();
     let leaf = staging
         .path()
@@ -473,11 +568,17 @@ fn run_scanner(state: &Directory, token: &Token, ready: &Health, denied: bool) {
         .to_str()
         .unwrap()
         .to_owned();
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_STAGE=own_workspace_identified");
+    }
     drop(scanner);
     drop(staging);
     state
         .remove_scanner_workspace(&leaf, Some(&identity))
         .unwrap();
+    if !denied {
+        eprintln!("\nATHERNEX_SCRATCH_STAGE=own_workspace_removed");
+    }
 }
 
 #[test]
@@ -570,9 +671,15 @@ fn owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit() {
     eprintln!("\nATHERNEX_SCRATCH_STAGE=foreign_logon_denied");
     // Inherited access on an existing SYSTEM-created child is an independent
     // diagnostic of the scanner's create-file permissions on the directory.
-    std::fs::write(ready.path.join("existing-proof"), b"system fixture bytes").unwrap();
+    scratch_io(
+        "existing_proof_write",
+        std::fs::write(ready.path.join("existing-proof"), b"system fixture bytes"),
+    )
+    .unwrap();
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=existing_proof_written");
     run_scanner(&state, &token, &ready, false);
     health(&state, &id, token.logon_sid()).unwrap();
+    eprintln!("\nATHERNEX_SCRATCH_STAGE=own_health_verified");
     eprintln!("\nATHERNEX_SCRATCH_STAGE=scanner_bounds_verified");
     let network = state.directory("network").unwrap();
     network

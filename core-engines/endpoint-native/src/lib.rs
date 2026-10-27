@@ -31,6 +31,7 @@ pub mod receipt;
 pub mod service;
 #[cfg(any(windows, test))]
 mod windows_directory;
+pub mod windows_driver_lifecycle;
 pub mod windows_filter;
 #[cfg(windows)]
 pub mod windows_filter_package;

@@ -81,6 +81,17 @@ pub(crate) fn require_prepared(state: &Path, expected: &str) -> Result<()> {
     let _pins = pins(&directory, &r)?;
     Ok(())
 }
+/// Retain the exact prepared directory while the native deployment API uses its paths.
+pub(crate) fn prepared_directory(state: &Path, hash: &str) -> Result<Directory> {
+    let state = Directory::open(state)?;
+    let record = read_record(&state, hash)?.ok_or("Missing prepared driver receipt")?;
+    if !record.prepared {
+        return Err("Driver package is not prepared".into());
+    }
+    let result = directory(&state, &record)?;
+    let _pins = pins(&result, &record)?;
+    Ok(result)
+}
 /// Parent holds the installer/service/protection leases and original bundle pin.
 /// A failed or unknown trust result leaves an incomplete durable transaction.
 pub(crate) fn prepare(

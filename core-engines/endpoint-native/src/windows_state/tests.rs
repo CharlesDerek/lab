@@ -287,3 +287,82 @@ fn machine_installation_requires_effective_full_access_for_system_and_administra
         );
     }
 }
+
+#[test]
+fn ordinary_shared_admission_excludes_deployment_until_every_holder_releases() {
+    let temp = tempfile::tempdir().unwrap();
+    let root =
+        Directory::maintenance_under(&temp.path().canonicalize().unwrap(), "admission").unwrap();
+    let second = Directory::open(root.path()).unwrap();
+    let first = root.maintenance_shared_lock("global.lock").unwrap();
+    let other = second.maintenance_shared_lock("global.lock").unwrap();
+    assert!(root.maintenance_lock("global.lock").is_err());
+    first.unlock().unwrap();
+    drop(first);
+    assert!(root.maintenance_lock("global.lock").is_err());
+    other.unlock().unwrap();
+    drop(other);
+    let deployment = root.maintenance_lock("global.lock").unwrap();
+    assert!(second.maintenance_shared_lock("global.lock").is_err());
+    assert!(second.maintenance_lock("global.lock").is_err());
+    deployment.unlock().unwrap();
+    drop(deployment);
+    let ordinary = second.maintenance_shared_lock("global.lock").unwrap();
+    ordinary.unlock().unwrap();
+}
+
+#[test]
+fn recorded_receipt_move_recovers_only_the_owned_inode_and_preserves_foreign_names() {
+    use athernex_endpoint_protocol::{hash, windows_filter_package::Member};
+    use std::io::Read;
+    let temp = tempfile::tempdir().unwrap();
+    let root =
+        Directory::maintenance_under(&temp.path().canonicalize().unwrap(), "receipts").unwrap();
+    let expected = Member {
+        bytes: 4,
+        sha256: hash(b"safe"),
+    };
+    root.publish_maintenance("staged", b"safe").unwrap();
+    let f = root.read("staged").unwrap();
+    let (volume, id) = crate::windows_filter_package::identity(&f).unwrap();
+    drop(f);
+    assert!(root
+        .publish_recorded_receipt("staged", "final", volume, [0; 16], &expected)
+        .is_err());
+    root.publish_recorded_receipt("staged", "final", volume, id, &expected)
+        .unwrap();
+    assert!(!root.path().join("staged").exists());
+    // Lost final journal transition: confirm the exact final inode and sync again.
+    root.publish_recorded_receipt("staged", "final", volume, id, &expected)
+        .unwrap();
+    root.publish_maintenance("foreign", b"safe").unwrap();
+    assert!(root
+        .publish_recorded_receipt("missing", "foreign", volume, id, &expected)
+        .is_err());
+    root.publish_maintenance("another-staged", b"safe").unwrap();
+    let f = root.read("another-staged").unwrap();
+    let (v, other) = crate::windows_filter_package::identity(&f).unwrap();
+    drop(f);
+    assert!(root
+        .publish_recorded_receipt("another-staged", "foreign", v, other, &expected)
+        .is_err());
+    assert!(root.path().join("another-staged").exists());
+    let mut bytes = String::new();
+    root.read("foreign")
+        .unwrap()
+        .read_to_string(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, "safe");
+    assert!(root
+        .publish_recorded_receipt(
+            "another-staged",
+            "next",
+            v,
+            other,
+            &Member {
+                bytes: 4,
+                sha256: hash(b"evil")
+            }
+        )
+        .is_err());
+}

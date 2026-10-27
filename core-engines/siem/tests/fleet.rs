@@ -1223,6 +1223,7 @@ fn windows_filter_package_delivery_requires_exact_bytes_and_marker() {
         trust_policy: TRUST.into(),
         source_revision: "b".repeat(40),
         expected_abi: 2,
+        deployment: None,
         driver_version: "1.2.3.4".into(),
         driver_date: "01/01/2025".into(),
         altitude: "325000.01".into(),
@@ -1307,6 +1308,36 @@ fn windows_filter_package_delivery_requires_exact_bytes_and_marker() {
         .read_to_end(&mut marker)
         .unwrap();
     assert_eq!(marker, b"1\n");
+    artifact.windows_filter.as_mut().unwrap().deployment =
+        Some(p::windows_filter_package::Deployment::InstallAndObserveDisarmedV1);
+    std::fs::write(&manifest, serde_json::to_vec(&artifact).unwrap()).unwrap();
+    let delivered =
+        athernex_siem::fleet_web::installer_bundle(dir.path(), "windows-x86_64", &bootstrap)
+            .unwrap();
+    let mut deployed = zip::ZipArchive::new(std::io::Cursor::new(delivered)).unwrap();
+    let mut approval = Vec::new();
+    deployed
+        .by_name("release.json")
+        .unwrap()
+        .read_to_end(&mut approval)
+        .unwrap();
+    let approval: p::installer::Artifact = serde_json::from_slice(&approval).unwrap();
+    assert_eq!(
+        approval.filter().unwrap().unwrap().deployment,
+        artifact.windows_filter.as_ref().unwrap().deployment
+    );
+    assert_eq!(
+        approval.filter().unwrap().unwrap().sha256,
+        artifact.windows_filter.as_ref().unwrap().sha256
+    );
+    let mut instructions = String::new();
+    deployed
+        .by_name("windows-filter.txt")
+        .unwrap()
+        .read_to_string(&mut instructions)
+        .unwrap();
+    assert!(instructions.contains("owned LocalSystem coordinator"));
+    assert!(instructions.contains("does not attest exact loaded-image bytes"));
     package.push(0);
     std::fs::write(&component, &package).unwrap();
     assert!(

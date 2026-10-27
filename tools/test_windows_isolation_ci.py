@@ -20,9 +20,31 @@ SCRATCH_TEST = ('protection::windows::scratch::tests::'
 SCRATCH_STAGES = [
     'fixture_entered', 'state_ready', 'worker_started', 'worker_ready',
     'health_rejections_verified', 'live_recovery_refused', 'acl_probe_completed',
-    'device_probe_completed', 'foreign_logon_denied', 'scanner_bounds_verified',
+    'device_probe_completed', 'foreign_logon_denied', 'existing_proof_written',
+    'own_scanner_entered', 'own_path_checked', 'own_devices_checked', 'own_workspace_created',
+    'own_fixture_staged', 'own_command_ready', 'own_scanner_started', 'own_scanner_exited',
+    'own_scanner_succeeded', 'own_output_verified', 'own_workspace_identified',
+    'own_workspace_removed', 'own_health_verified', 'scanner_bounds_verified',
     'worker_stopped', 'retained_network_refused', 'recovery_completed', 'passed',
 ]
+SCRATCH_CHILD_STAGES = [
+    'entered', 'raw_devices_denied', 'capacity_created', 'capacity_limit_reached',
+    'root_rename_denied', 'parent_listing_denied', 'root_write_denied', 'capacity_removed', 'passed',
+]
+SCRATCH_EXPECTED_ERRORS = [{'operation': 'capacity_write', 'native_error': 112}]
+MOCK_SCRATCH_LINES = r'''
+function Get-MockScratchLines {
+    foreach ($stage in Get-ScratchStageNames) {
+        'ATHERNEX_SCRATCH_STAGE=' + $stage
+        if ($stage -ceq 'own_scanner_started') {
+            foreach ($child in Get-ScratchChildStageNames) {
+                'ATHERNEX_SCRATCH_CHILD_STAGE=' + $child
+                if ($child -ceq 'capacity_created') { 'ATHERNEX_SCRATCH_ERROR=capacity_write:112' }
+            }
+        }
+    }
+}
+'''
 PROCESS_FAILURES = [
     'schema_provenance', 'schema_identity', 'schema_bounds', 'schema_shape',
     'property_missing', 'property_type', 'property_scalar', 'property_size',
@@ -42,6 +64,8 @@ foreach ($name in $checks) { $report.checks | Add-Member -NotePropertyName $name
 if ($SelectedSuite -ceq 'Isolation') {
     $report | Add-Member -NotePropertyName scratch_stages -NotePropertyValue @(Get-ScratchStageNames)
     $report | Add-Member -NotePropertyName scratch_diagnostics -NotePropertyValue valid
+    $report | Add-Member -NotePropertyName scratch_child_stages -NotePropertyValue @(Get-ScratchChildStageNames)
+    $report | Add-Member -NotePropertyName scratch_errors -NotePropertyValue @(@{operation='capacity_write'; native_error=112})
 }
 if ($SelectedSuite -ceq 'ProcessSource') {
     $report | Add-Member -NotePropertyName proof_scope -NotePropertyValue source_only
@@ -95,6 +119,21 @@ try {
         'nested-singleton-scratch-stage' { $report.scratch_stages[0] = @($report.scratch_stages[0]) }
         'nonstring-scratch-stage' { $report.scratch_stages[0] = 1 }
         'nonscalar-scratch-diagnostics' { $report.scratch_diagnostics = @('valid') }
+        'missing-child' { $report.PSObject.Properties.Remove('scratch_child_stages') }
+        'nested-child' { $report.scratch_child_stages[0] = @('entered') }
+        'nonstring-child' { $report.scratch_child_stages[0] = 1 }
+        'unknown-child' { $report.scratch_child_stages[0] = 'private_fixture_payload' }
+        'missing-errors' { $report.PSObject.Properties.Remove('scratch_errors') }
+        'nested-errors' { $report.scratch_errors[0] = @($report.scratch_errors[0]) }
+        'extra-error-field' { $report.scratch_errors[0].payload = 'private_fixture_payload' }
+        'unknown-operation' { $report.scratch_errors[0].operation = 'private_fixture_payload' }
+        'nested-operation' { $report.scratch_errors[0].operation = @('capacity_write') }
+        'wrong-error' { $report.scratch_errors[0].native_error = 5 }
+        'null-error' { $report.scratch_errors[0].native_error = $null }
+        'string-error' { $report.scratch_errors[0].native_error = '112' }
+        'boolean-error' { $report.scratch_errors[0].native_error = $true }
+        'float-error' { $report.scratch_errors[0].native_error = 112.0 }
+        'nested-error' { $report.scratch_errors[0].native_error = @(112) }
     }
     Assert-IsolationReport $report ('a'*64) $SelectedSuite
     Invoke-IsolationCheck 'fixture.exe' $checks[0] (Join-Path $Root 'check.log')
@@ -143,7 +182,7 @@ function Invoke-IsolationCheck([string]$Executable, [string]$Name, [string]$Log)
     $global:executed += 1
     $global:executedNames += $Name
     if ($Name -ceq 'protection::windows::scratch::tests::owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit') {
-        Get-ScratchStageNames | ForEach-Object { 'ATHERNEX_SCRATCH_STAGE=' + $_ } | Set-Content -LiteralPath $Log
+        Get-MockScratchLines | Set-Content -LiteralPath $Log
     }
     if ($SelectedSuite -ceq 'Authentication' -and (Split-Path -Leaf $Executable) -cne 'endpoint.exe') {
         throw 'Authentication must execute the compiled endpoint test binary'
@@ -186,7 +225,7 @@ function Invoke-IsolationCheck([string]$Executable, [string]$Name, [string]$Log)
         return
     }
     $stages = @(Get-ScratchStageNames)
-    $lines = @($stages | ForEach-Object { 'ATHERNEX_SCRATCH_STAGE=' + $_ })
+    $lines = @(Get-MockScratchLines)
     switch ($Case) {
         'partial' { $lines = $lines[0..3] }
         'partial-success' { $lines = $lines[0..3] }
@@ -198,9 +237,42 @@ function Invoke-IsolationCheck([string]$Executable, [string]$Name, [string]$Log)
         'out-of-order' { $lines = @($lines[1], $lines[0]) + $lines[2..($lines.Count-1)] }
         'raw-output' { $lines += 'private_fixture_payload path and arbitrary native error' }
         'oversized' { $lines += ('x' * 1048577) }
+        'missing-child' { $lines = @($lines | Where-Object { -not $_.StartsWith('ATHERNEX_SCRATCH_CHILD_STAGE=') }) }
+        'unknown-child' { $lines += 'ATHERNEX_SCRATCH_CHILD_STAGE=private_fixture_payload' }
+        'child-suffix' { $lines += 'ATHERNEX_SCRATCH_CHILD_STAGE=passed private_fixture_payload' }
+        'child-prefix' { $lines += 'private_fixture_payload ATHERNEX_SCRATCH_CHILD_STAGE=passed' }
+        'child-wrong-case' { $lines += 'athernex_scratch_child_stage=passed' }
+        'child-before-own' { $lines = @('ATHERNEX_SCRATCH_CHILD_STAGE=entered') + $lines }
+        'child-after-exit' {
+            $child = @($lines | Where-Object { $_.StartsWith('ATHERNEX_SCRATCH_CHILD_STAGE=') -or $_.StartsWith('ATHERNEX_SCRATCH_ERROR=') })
+            $lines = @($lines | Where-Object { $_.StartsWith('ATHERNEX_SCRATCH_STAGE=') }) + $child
+        }
+        'child-error-late' {
+            $lines = @($lines | Where-Object { -not $_.StartsWith('ATHERNEX_SCRATCH_ERROR=') }) + @('ATHERNEX_SCRATCH_ERROR=capacity_write:112')
+        }
+        'child-only-passed' { $lines = @($lines | Where-Object { -not $_.StartsWith('ATHERNEX_SCRATCH_CHILD_STAGE=') -or $_.EndsWith('=passed') }) }
+        'unknown-error' { $lines += 'ATHERNEX_SCRATCH_ERROR=private_fixture_payload:5' }
+        'error-injection' { $lines += 'ATHERNEX_SCRATCH_ERROR=capacity_write:112 private_fixture_payload' }
+        'conflicting-error' { $lines += 'ATHERNEX_SCRATCH_ERROR=capacity_write:5' }
+        'missing-error' { $lines = @($lines | Where-Object { -not $_.StartsWith('ATHERNEX_SCRATCH_ERROR=') }) }
+        'child-contradiction' { $lines = @($lines | ForEach-Object { $_.Replace('capacity_write:112','capacity_write:5') }) }
+        'duplicate-child' { $lines = @($lines | ForEach-Object { $_; if ($_.StartsWith('ATHERNEX_SCRATCH_CHILD_STAGE=') -or $_.StartsWith('ATHERNEX_SCRATCH_ERROR=')) { $_ } }) }
+        'child-partial' {
+            $end = [Array]::IndexOf($lines, 'ATHERNEX_SCRATCH_CHILD_STAGE=raw_devices_denied')
+            $lines = $lines[0..$end] + @('ATHERNEX_SCRATCH_ERROR=capacity_create:5')
+        }
+        'child-complete-parent-failure' {
+            $end = [Array]::IndexOf($lines, 'ATHERNEX_SCRATCH_STAGE=own_workspace_removed')
+            $lines = $lines[0..$end]
+        }
+    }
+    if ($Case.StartsWith('error-value-')) {
+        $lines = @($stages[0..8] | ForEach-Object { 'ATHERNEX_SCRATCH_STAGE=' + $_ }) +
+            @('ATHERNEX_SCRATCH_ERROR=existing_proof_write:' + $Case.Substring('error-value-'.Length))
     }
     if ($Case -cne 'missing') { $lines | Set-Content -LiteralPath $Log }
-    if ($Case -cin @('partial','contradictory','missing')) { throw 'private_fixture_payload' }
+    if ($Case -cin @('partial','contradictory','missing','child-partial','child-complete-parent-failure') -or
+        $Case.StartsWith('error-value-')) { throw 'private_fixture_payload' }
 }
 $report = @{ checks=[ordered]@{}; failures=[ordered]@{}; error=$null }
 $failure = $null
@@ -209,7 +281,8 @@ catch { $failure = $_.Exception.Message }
 @{ failed=($null -ne $failure); error=$failure; checks=$report.checks;
     failures=$report.failures; worker_error=$report.error;
     has_scratch=$report.ContainsKey('scratch_stages'); stages=@($report.scratch_stages);
-    diagnostics=$report.scratch_diagnostics } |
+    diagnostics=$report.scratch_diagnostics; child_stages=@($report.scratch_child_stages);
+    native_errors=@($report.scratch_errors) } |
     ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Root 'result.json') -Encoding UTF8
 '''
 STAGES_WRAPPER = r'''
@@ -305,7 +378,7 @@ function Invoke-IsolationExecutable([string]$Executable, [string[]]$Arguments, [
         'ATHERNEX_AUTH_STAGE=cleanup_verified'
     ) | Set-Content -LiteralPath $Log
     if ($SelectedSuite -ceq 'Isolation' -and $Arguments[1] -ceq 'protection::windows::scratch::tests::owned_worker_formats_bounds_scanner_writes_and_recovers_only_after_exit') {
-        Get-ScratchStageNames | ForEach-Object { 'ATHERNEX_SCRATCH_STAGE=' + $_ } | Add-Content -LiteralPath $Log
+        Get-MockScratchLines | Add-Content -LiteralPath $Log
     }
     if ($Case -ceq 'diagnostic-flood') {
         0..63 | ForEach-Object { 'ATHERNEX_AUTH_DIAGNOSTIC=policy_query:' + $_ } |
@@ -539,7 +612,7 @@ class IsolationRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='athernex-isolation-ci-') as temporary:
             root = Path(temporary)
             wrapper = root/'wrapper.ps1'
-            wrapper.write_text(wrapper_source)
+            wrapper.write_text(wrapper_source.replace('. $Script', '. $Script\n' + MOCK_SCRATCH_LINES, 1))
             result = subprocess.run(
                 [self.powershell, '-NoLogo', '-NoProfile', '-NonInteractive', '-File',
                  str(wrapper), str(SCRIPT), case, str(root), suite],
@@ -607,6 +680,8 @@ class IsolationRunnerTests(unittest.TestCase):
                 self.assertFalse(value['failed'], value)
                 self.assertEqual(value['diagnostics'], 'valid')
                 self.assertEqual(value['stages'], SCRATCH_STAGES)
+                self.assertEqual(value['child_stages'], SCRATCH_CHILD_STAGES)
+                self.assertEqual(value['native_errors'], SCRATCH_EXPECTED_ERRORS)
                 self.assertEqual(len(value['checks']), 11)
                 self.assertEqual(set(value['checks'].values()), {'passed'})
                 self.assertNotIn('private_fixture_payload', json.dumps(value))
@@ -644,6 +719,74 @@ class IsolationRunnerTests(unittest.TestCase):
                 value = self.run_case(case)
                 self.assertTrue(value['failed'], value)
                 self.assertEqual(value['executed'], 0)
+
+    def test_own_child_progress_cannot_promote_a_failed_parent(self):
+        value = self.run_case('child-partial', SCRATCH_WRAPPER)
+        self.assertTrue(value['failed'], value)
+        self.assertEqual(value['checks'][SCRATCH_TEST], 'failed')
+        self.assertEqual(value['diagnostics'], 'valid')
+        self.assertEqual(value['child_stages'], SCRATCH_CHILD_STAGES[:2])
+        self.assertEqual(value['native_errors'], [{'operation': 'capacity_create', 'native_error': 5}])
+        self.assertEqual(value['stages'], SCRATCH_STAGES[:SCRATCH_STAGES.index('own_scanner_started') + 1])
+        value = self.run_case('child-complete-parent-failure', SCRATCH_WRAPPER)
+        self.assertTrue(value['failed'], value)
+        self.assertEqual(value['checks'][SCRATCH_TEST], 'failed')
+        self.assertEqual(value['diagnostics'], 'valid')
+        self.assertEqual(value['child_stages'], SCRATCH_CHILD_STAGES)
+        self.assertEqual(value['native_errors'], SCRATCH_EXPECTED_ERRORS)
+        self.assertEqual(value['stages'], SCRATCH_STAGES[:SCRATCH_STAGES.index('own_workspace_removed') + 1])
+        self.assertEqual(value['worker_error'], 'native_worker_failed')
+        self.assertNotIn('private_fixture_payload', json.dumps(value))
+        value = self.run_case('duplicate-child', SCRATCH_WRAPPER)
+        self.assertFalse(value['failed'], value)
+        self.assertEqual(value['child_stages'], SCRATCH_CHILD_STAGES)
+        self.assertEqual(value['native_errors'], SCRATCH_EXPECTED_ERRORS)
+
+    def test_child_namespace_and_native_error_contradictions_refuse_complete_success(self):
+        for case in ['missing-child', 'unknown-child', 'child-suffix', 'child-prefix',
+                     'child-wrong-case', 'child-before-own', 'child-after-exit', 'child-error-late', 'child-only-passed', 'unknown-error',
+                     'error-injection', 'conflicting-error', 'missing-error', 'child-contradiction']:
+            with self.subTest(case=case):
+                value = self.run_case(case, SCRATCH_WRAPPER)
+                self.assertTrue(value['failed'], value)
+                self.assertEqual(value['checks'][SCRATCH_TEST], 'failed')
+                self.assertEqual(value['diagnostics'], 'invalid')
+                self.assertEqual(value['stages'], [])
+                self.assertEqual(value['child_stages'], [])
+                self.assertEqual(value['native_errors'], [])
+                self.assertNotIn('private_fixture_payload', json.dumps(value))
+
+    def test_native_errors_are_canonical_signed_numbers_or_explicit_null(self):
+        for code, expected in [('none', None), ('0', 0), ('5', 5),
+                               ('-2147483648', -2147483648), ('2147483647', 2147483647)]:
+            with self.subTest(code=code):
+                value = self.run_case('error-value-' + code, SCRATCH_WRAPPER)
+                self.assertTrue(value['failed'], value)
+                self.assertEqual(value['diagnostics'], 'valid')
+                self.assertEqual(value['native_errors'], [{'operation': 'existing_proof_write', 'native_error': expected}])
+                self.assertEqual(value['stages'], SCRATCH_STAGES[:9])
+                self.assertEqual(value['child_stages'], [])
+        for code in ['2147483648', '-2147483649', '00', '-0', '+5', '5.0',
+                     'NONE', '5:private_fixture_payload', 'private_fixture_payload', '\u0661']:
+            with self.subTest(code=code):
+                value = self.run_case('error-value-' + code, SCRATCH_WRAPPER)
+                self.assertTrue(value['failed'], value)
+                self.assertEqual(value['diagnostics'], 'invalid')
+                self.assertEqual(value['stages'], [])
+                self.assertEqual(value['child_stages'], [])
+                self.assertEqual(value['native_errors'], [])
+                self.assertNotIn('private_fixture_payload', json.dumps(value))
+
+    def test_final_report_child_and_error_fields_refuse_type_coercion(self):
+        for case in ['missing-child', 'nested-child', 'nonstring-child', 'unknown-child',
+                     'missing-errors', 'nested-errors', 'extra-error-field', 'unknown-operation',
+                     'nested-operation', 'wrong-error', 'null-error', 'string-error', 'boolean-error',
+                     'float-error', 'nested-error']:
+            with self.subTest(case=case):
+                value = self.run_case(case)
+                self.assertTrue(value['failed'], value)
+                self.assertEqual(value['executed'], 0)
+                self.assertNotIn('private_fixture_payload', json.dumps(value))
 
     def test_native_and_io_failures_remain_private_in_both_suite_reports(self):
         for suite in ['Isolation', 'Authentication']:

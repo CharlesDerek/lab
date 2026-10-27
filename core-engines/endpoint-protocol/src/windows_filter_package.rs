@@ -11,6 +11,13 @@ pub const MAGIC: &[u8; 8] = b"AXFPKG1\0";
 pub const PROFILE: &str = "win11-24h2-amd64-antivirus-v1";
 pub const LEGACY_PROFILE: &str = "win10-2004-through-win11-23h2-amd64-antivirus-v1";
 pub const TRUST: &str = "whql-driver-policy-cache-only-v1";
+/// An explicit installation requirement, separate from package preparation.
+/// This reusable release policy contains no machine, account or state identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Deployment {
+    #[serde(rename = "install-and-observe-disarmed-v1")]
+    InstallAndObserveDisarmedV1,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Member {
@@ -28,6 +35,10 @@ pub struct Descriptor {
     /// Approved build provenance; offline inspection cannot prove the live ABI.
     pub source_revision: String,
     pub expected_abi: u32,
+    /// Absent preserves preparation-only behavior. Older closed descriptors
+    /// refuse this field instead of silently omitting native deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<Deployment>,
     pub driver_version: String,
     pub driver_date: String,
     /// Supplied release approval. Syntax/matching do not prove assignment.

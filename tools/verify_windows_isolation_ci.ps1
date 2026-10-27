@@ -59,6 +59,16 @@ function Assert-IsolationReport($Report, [string]$ManifestSha256,
                 throw 'Scratch milestone evidence is invalid'
             }
         }
+        $children = @(Get-ScratchChildStageNames)
+        if ($Report.scratch_child_stages -isnot [array] -or
+            $Report.scratch_child_stages.Count -ne $children.Count) { throw 'Scratch child evidence is incomplete' }
+        for ($i = 0; $i -lt $children.Count; $i++) {
+            if ($Report.scratch_child_stages[$i] -isnot [string] -or
+                -not [string]::Equals($Report.scratch_child_stages[$i], $children[$i], [StringComparison]::Ordinal)) {
+                throw 'Scratch child evidence is invalid'
+            }
+        }
+        if (-not (Test-ScratchExpectedError $Report.scratch_errors)) { throw 'Scratch native error evidence is invalid' }
     }
     if ($Suite -ceq 'ProcessSource') {
         if ($Report.proof_scope -cne 'source_only') { throw 'Process source report claims unsupported scope' }
@@ -74,14 +84,36 @@ function Get-ProcessSourceStageNames {
 function Get-ScratchStageNames {
     @('fixture_entered','state_ready','worker_started','worker_ready',
       'health_rejections_verified','live_recovery_refused','acl_probe_completed',
-      'device_probe_completed','foreign_logon_denied','scanner_bounds_verified',
+      'device_probe_completed','foreign_logon_denied','existing_proof_written',
+      'own_scanner_entered','own_path_checked','own_devices_checked','own_workspace_created',
+      'own_fixture_staged','own_command_ready','own_scanner_started','own_scanner_exited',
+      'own_scanner_succeeded','own_output_verified','own_workspace_identified',
+      'own_workspace_removed','own_health_verified','scanner_bounds_verified',
       'worker_stopped','retained_network_refused','recovery_completed','passed')
+}
+
+function Get-ScratchChildStageNames {
+    @('entered','raw_devices_denied','capacity_created','capacity_limit_reached',
+      'root_rename_denied','parent_listing_denied','root_write_denied','capacity_removed','passed')
+}
+
+function Test-ScratchExpectedError($Errors) {
+    if ($Errors -isnot [array] -or $Errors.Count -ne 1) { return $false }
+    $value = $Errors[0]
+    if ($null -eq $value -or $value -is [array]) { return $false }
+    $names = @($value.PSObject.Properties.Name)
+    if ($value -is [Collections.IDictionary]) { $names = @($value.Keys) }
+    if ($names.Count -ne 2 -or $names -cnotcontains 'operation' -or $names -cnotcontains 'native_error') { return $false }
+    return ($value.operation -is [string] -and
+        [string]::Equals($value.operation, 'capacity_write', [StringComparison]::Ordinal) -and
+        ($value.native_error -is [int] -or $value.native_error -is [long]) -and
+        $value.native_error -eq 112)
 }
 
 function Get-ScratchStages([string]$Log, [bool]$CheckPassed) {
     # Only this fixture's fixed milestone vocabulary may leave the private log.
     # A complete marker sequence cannot turn a failed executable into a pass.
-    $result = @{ status='unavailable'; stages=@() }
+    $result = @{ status='unavailable'; stages=@(); child_stages=@(); errors=@() }
     if (-not (Test-Path -LiteralPath $Log -PathType Leaf)) { return $result }
     try {
         if ((Get-Item -LiteralPath $Log -ErrorAction Stop).Length -gt 1048576) { throw 'Oversized private log' }
@@ -90,22 +122,72 @@ function Get-ScratchStages([string]$Log, [bool]$CheckPassed) {
     $allowed = @(Get-ScratchStageNames)
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $stages = [Collections.Generic.List[string]]::new()
+    $allowedChildren = @(Get-ScratchChildStageNames)
+    $seenChildren = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $children = [Collections.Generic.List[string]]::new()
+    $allowedErrors = @('existing_proof_write','own_device_open','own_fixture_open',
+        'capacity_create','capacity_write','capacity_cleanup')
+    $errors = [Collections.Generic.List[object]]::new()
+    $seenErrors = @{}
     $valid = $true
     foreach ($line in $lines) {
-        if (-not $line.Contains('ATHERNEX_SCRATCH_STAGE')) { continue }
-        $expected = 'ATHERNEX_SCRATCH_STAGE='
-        if (-not $line.StartsWith($expected, [StringComparison]::Ordinal)) { $valid = $false; break }
-        $stage = $line.Substring($expected.Length)
-        if ($allowed -cnotcontains $stage) { $valid = $false; break }
-        if ($seen.Contains($stage)) { continue }
-        if ($stages.Count -ge $allowed.Count -or $stage -cne $allowed[$stages.Count]) { $valid = $false; break }
-        $null = $seen.Add($stage)
-        $stages.Add($stage)
+        if ($line.IndexOf('ATHERNEX_SCRATCH_', [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+        if ($line.StartsWith('ATHERNEX_SCRATCH_STAGE=', [StringComparison]::Ordinal)) {
+            $stage = $line.Substring('ATHERNEX_SCRATCH_STAGE='.Length)
+            if ($allowed -cnotcontains $stage) { $valid = $false; break }
+            if ($seen.Contains($stage)) { continue }
+            if ($stages.Count -ge $allowed.Count -or $stage -cne $allowed[$stages.Count]) { $valid = $false; break }
+            $null = $seen.Add($stage)
+            $stages.Add($stage)
+        } elseif ($line.StartsWith('ATHERNEX_SCRATCH_CHILD_STAGE=', [StringComparison]::Ordinal)) {
+            $stage = $line.Substring('ATHERNEX_SCRATCH_CHILD_STAGE='.Length)
+            if (-not $seen.Contains('own_scanner_started') -or $allowedChildren -cnotcontains $stage) { $valid = $false; break }
+            if ($seenChildren.Contains($stage)) { continue }
+            if ($seen.Contains('own_scanner_exited') -or
+                ($stage -ceq 'capacity_limit_reached' -and
+                    (-not $seenErrors.ContainsKey('capacity_write') -or $seenErrors['capacity_write'] -cne '112'))) { $valid = $false; break }
+            if ($children.Count -ge $allowedChildren.Count -or $stage -cne $allowedChildren[$children.Count]) { $valid = $false; break }
+            $null = $seenChildren.Add($stage)
+            $children.Add($stage)
+        } elseif ($line.StartsWith('ATHERNEX_SCRATCH_ERROR=', [StringComparison]::Ordinal)) {
+            $raw = $line.Substring('ATHERNEX_SCRATCH_ERROR='.Length)
+            if ($raw -cnotmatch '^([a-z_]+):(none|0|[1-9][0-9]*|-[1-9][0-9]*)$') { $valid = $false; break }
+            $operation = $Matches[1]; $code = $Matches[2]
+            if ($allowedErrors -cnotcontains $operation -or
+                ($operation.StartsWith('capacity_', [StringComparison]::Ordinal) -and -not $seen.Contains('own_scanner_started'))) { $valid = $false; break }
+            $nativeError = $null
+            if ($code -cne 'none') {
+                $number = 0
+                if (-not [int]::TryParse($code, [Globalization.NumberStyles]::AllowLeadingSign,
+                        [Globalization.CultureInfo]::InvariantCulture, [ref]$number)) { $valid = $false; break }
+                $nativeError = $number
+            }
+            if ($seenErrors.ContainsKey($operation)) {
+                if ($seenErrors[$operation] -cne $code) { $valid = $false; break }
+                continue
+            }
+            # Each first error belongs to the still-uncompleted operation.
+            # Exact duplicates from a failed child's private panic may recur.
+            $position = switch ($operation) {
+                'existing_proof_write' { $seen.Contains('foreign_logon_denied') -and -not $seen.Contains('existing_proof_written') }
+                'own_device_open' { $seen.Contains('own_path_checked') -and -not $seen.Contains('own_devices_checked') }
+                'own_fixture_open' { $seen.Contains('own_workspace_created') -and -not $seen.Contains('own_fixture_staged') }
+                'capacity_create' { $seenChildren.Contains('raw_devices_denied') -and -not $seenChildren.Contains('capacity_created') }
+                'capacity_write' { $seenChildren.Contains('capacity_created') -and -not $seenChildren.Contains('capacity_limit_reached') }
+                'capacity_cleanup' { $seenChildren.Contains('root_write_denied') -and -not $seenChildren.Contains('capacity_removed') }
+            }
+            if (-not $position -or
+                ($operation.StartsWith('capacity_', [StringComparison]::Ordinal) -and $seen.Contains('own_scanner_exited'))) { $valid = $false; break }
+            $seenErrors[$operation] = $code
+            $errors.Add(@{ operation=$operation; native_error=$nativeError })
+        } else { $valid = $false; break }
     }
-    if (($CheckPassed -and $stages.Count -ne $allowed.Count) -or
+    if (($CheckPassed -and ($stages.Count -ne $allowed.Count -or
+            $children.Count -ne $allowedChildren.Count -or
+            -not (Test-ScratchExpectedError @($errors.ToArray())))) -or
         (-not $CheckPassed -and $seen.Contains('passed'))) { $valid = $false }
-    if (-not $valid) { return @{ status='invalid'; stages=@() } }
-    return @{ status='valid'; stages=@($stages.ToArray()) }
+    if (-not $valid) { return @{ status='invalid'; stages=@(); child_stages=@(); errors=@() } }
+    return @{ status='valid'; stages=@($stages.ToArray()); child_stages=@($children.ToArray()); errors=@($errors.ToArray()) }
 }
 
 function Get-ProcessSourceStages([string]$Log) {
@@ -446,6 +528,8 @@ function Invoke-IsolationChecks([string]$OutputDirectory, $Manifest, $Report,
                 $passed = $Report.checks[$check.test] -ceq 'passed'
                 $projection = Get-ScratchStages $log $passed
                 $Report.scratch_stages = @($projection.stages)
+                $Report.scratch_child_stages = @($projection.child_stages)
+                $Report.scratch_errors = @($projection.errors)
                 $Report.scratch_diagnostics = $projection.status
                 if ($passed -and $projection.status -cne 'valid') {
                     $Report.checks[$check.test] = 'failed'
@@ -519,6 +603,8 @@ function Invoke-IsolationWorker([string]$OutputDirectory, [bool]$DisposableHost,
         failures=[ordered]@{}; error=$null }
     if ($Suite -ceq 'Isolation') {
         $report.scratch_stages = @()
+        $report.scratch_child_stages = @()
+        $report.scratch_errors = @()
         $report.scratch_diagnostics = 'unavailable'
     }
     if ($Suite -ceq 'Authentication') {

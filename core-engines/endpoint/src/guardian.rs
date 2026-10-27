@@ -837,6 +837,10 @@ fn maintain(state: &Path, controller: &Path, agent: &Path) -> Result<Option<Cont
 }
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub fn launch(state: &Path, controller: &Path, agent: &Path) -> Result<()> {
+    #[cfg(windows)]
+    let _admission = crate::windows_driver::Admission::acquire(state)?;
+    #[cfg(windows)]
+    crate::windows_driver::require_live(state)?;
     #[cfg(target_os = "macos")]
     crate::macos_network_bundle::upgrade::require_settled()?;
     #[cfg(windows)]

@@ -1,17 +1,19 @@
 # Windows native prevention development
 
 The Windows minifilter and Rust scanner client are a development component. They
-compile against the real Microsoft WDK/SDK and Windows APIs. **The driver has not
-been loaded or tested on Windows, is unsigned, and is not installed by the
-portal. Windows protection policy still refuses activation.** This work does not
+compile against the real Microsoft WDK/SDK and Windows APIs. **The development
+driver remains unsigned and has no loaded-driver acceptance. The optional signed
+package lifecycle below has source and portable checks, not native deployment
+acceptance. Windows protection policy still refuses activation.** This work does not
 establish that Athernex can replace an existing Windows antivirus product.
 
 The endpoint already has Windows installer generation, scanning, automations,
 and journaled quarantine/restore. Their status and platform validation limits
 are documented in [endpoint-fleet.md](endpoint-fleet.md). This component supplies
 the kernel-to-scanner boundary and a development supervisor with durable
-detection delivery. Production lifecycle integration, scanner isolation and
-observed blocking health remain work to do.
+detection delivery. Scanner isolation, production arming and observed blocking
+health remain work to do. Package registration and disarmed loading are distinct
+from those prevention requirements.
 
 ## Implemented boundary
 
@@ -1364,8 +1366,8 @@ retain the same required package, but cannot drop or replace an existing selecti
 without a separate controlled transition. No-component installations remain
 supported. The private snapshots and receipts are retained, not public artifacts.
 
-`Prepared` is an immutable, policy-verified package snapshot only. This path does
-not invoke Driver Store installation, SetupAPI installation, SCM driver creation,
+`Prepared` is an immutable, policy-verified package snapshot only. When the
+optional deployment capability below is absent, this path does not invoke Driver Store installation, SetupAPI installation, SCM driver creation,
 driver service/instance registry writes, filter loading/unloading, or boot-policy changes. Management
 installation cannot complete if its required package fails preparation. This does
 not enable production prevention, satisfy the thirteen native gates, establish
@@ -1373,3 +1375,120 @@ loaded-image ABI/identity, or prove reboot/install rollback, full private scratc
 retained-view enforcement, or resistance to a hostile administrator. Actual signed
 package acceptance and loaded-driver enforcement still require the appropriate
 signed release and native host validation.
+
+### Explicit owned driver deployment
+
+A release may additionally require `deployment: "install-and-observe-disarmed-v1"`
+in its closed driver descriptor. Absence preserves preparation-only installation.
+The package bytes and supplied altitude do not change. Older installers reject
+the new field during the existing capability check before management stops; the
+private catalog and portal preserve the exact requirement. This capability does
+not authorize protection arming, signing-policy changes or automatic reboot.
+
+The installer snapshots its approved executable, release, bootstrap and driver
+container into protected machine-global state under ProgramData. A dedicated
+LocalSystem SCM coordinator runs the complete existing installer under the global
+transaction and per-state installer, service and maintenance leases. Its command
+binds an exact executable snapshot, transaction and nonce. The administrator
+parent holds no per-state lease while waiting for that worker. A persisted pending
+transaction excludes other endpoint state directories as well as normal startup
+and maintenance. Ordinary privileged service, launcher, controller, agent,
+preview and maintenance operations retain shared admission on the same protected
+lock file; deployment holds it exclusively. The global guard precedes per-state
+leases and outlives their effects. The LocalSystem coordinator receives an exact
+exclusive capability instead of reacquiring ordinary admission. It reports SCM
+running before waiting for the administrator's global handoff. All ordinary
+holders must stop before deployment, recovery or retirement can proceed. This is
+cooperative operation exclusion, not protection from a hostile administrator.
+Positively validated current-user-owned private state used by a nonadministrator
+is a separate per-user mode; ambiguous or service-owned state cannot use that
+exception. The ordinary management SCM host still requires installer completion
+and remains separate from this coordinator.
+
+The native API path uses the documented primitive-driver
+[DiInstallDriverW](https://learn.microsoft.com/en-us/windows/win32/api/newdev/nf-newdev-diinstalldriverw)
+and [DiUninstallDriverW](https://learn.microsoft.com/en-us/windows/win32/api/newdev/nf-newdev-diuninstalldriverw)
+with flags zero, noninteractive SetupAPI and explicit NeedReboot results. It never
+emulates the INF with generic registry/service scripts or removes Driver Store
+files directly. Bounded SetupAPI inventory, original/published/store INF mappings,
+approved member hashes and identities, and exact service/instance policy are
+checked before recording ownership. Existing, ambiguous or foreign driver state
+refuses a fresh deployment. Source/store ancestry remains pinned across operations
+that must preserve those files; native uninstallation is the separate authorized
+deletion boundary.
+
+An owned load calls normal
+[FilterLoad](https://learn.microsoft.com/en-us/windows/win32/api/fltuser/nf-fltuser-filterload)
+and records a fresh, disarmed ABI2 instance from the LocalSystem connection.
+`LoadObserved` is an operational observation, not cryptographic attestation of
+the bytes currently executing in the kernel. In particular, QueryServiceConfig
+may describe the next run's configuration. Installer Complete follows the durable
+load observation. LocalSystem management startup separately checks the current
+ABI instance against that receipt; durable transaction exclusion alone makes no
+current-instance claim. No configure, arm or disarm command is sent.
+
+Each non-idempotent native call has a durable intent before execution. Lost
+completion receipts cannot be replayed or adopted from an equal-looking package.
+The parent waits for a bounded interval but does not kill an in-flight native API
+or release its worker's ownership. Windows API/kernel completion is not given a
+hard wall-clock guarantee. `windows-driver-status` exposes bounded private
+operator observations; `windows-driver-recover STATE_DIR` resumes only phases
+whose prior native result was fully recorded. An ended helper at Claimed may
+also resume the same local installation before any native intent was entered;
+it is distinct from an unconfirmed install/load/unload call. NeedReboot and
+unknown results remain blocked rather than being treated as successful restart
+or rollback.
+
+The protected volatile HKLM epoch is a kernel-lifetime invalidation token, not a
+boot UUID. Its first creation requires a new key and a durable ownership receipt.
+An existing unrecorded key is not adopted. Microsoft documents that volatile HKLM
+keys disappear on full shutdown and that fast startup can preserve them. Missing
+or changed state invalidates earlier liveness observations; an unchanged token
+never proves that a worker survived, and token invalidation alone does not
+establish reboot completion or discharge NeedReboot.
+
+A previously completed demand-start registration can be explicitly recovered
+when a later restart or unload leaves the filter absent. Recovery first proves
+the exact persisted registration/package, stopped driver, and stopped/ended
+owned coordinator, and holds global plus per-state exclusion. It saves an
+immutable linked prior Complete receipt and a durable refresh intent. Only a
+confirmed owned epoch is reused or a new protected key is created; an unconfirmed
+key creation is preserved as a refusal. A separate Reload
+operation then performs a fresh disarmed load with a different ABI instance. It
+does not repeat Driver Store installation, enrollment, executable replacement or
+configuration changes. Missing epoch alone never authorizes this path, and
+unknown native effects or NeedReboot results cannot enter it. Historical receipts
+remain retained; successful reload is an operational observation, not native
+acceptance of the full prevention contract.
+
+`windows-driver-retire STATE_DIR` uses only the owned normal FilterUnload path.
+ABI2 pending zero does not prove that retained kernel views or rundown have been
+released. The actual unload callback remains authoritative; refusal, uncertain
+cleanup or a lost result has no force/SCM-stop fallback. Owned uninstall follows
+confirmed unload/absence. A returned failed load can enter cleanup only with its
+already recorded exact registration and actual absent filter/stopped service;
+an unconfirmed install or load effect cannot acquire that authority.
+
+Terminal retirement additionally confirms the original coordinator process ended,
+deletes only its recorded stopped helper, confirms native/helper absence, and
+archives the exact terminal receipt before releasing global ownership. It clears
+only a Complete local installation's deployment requirement under the installer
+leases. An incomplete installation retains its exact required selection so the
+same approved installer can later begin a new deployment after retirement. It
+never completes that interrupted installation, erases configuration/history, or
+removes the immutable prepared package. Both completed-load history and retired
+receipts use a durable staged-file identity/hash before a no-replace publication.
+Recovery accepts only that recorded object at the staged or final name and
+re-establishes file/parent durability. Random files created before a publication
+intent are preserved without occupying its deterministic final name; foreign
+objects are never adopted. Unconfirmed input-snapshot member creation remains a
+preserved refusal. Existing source/package changes still require a separate
+controlled transition; this is not a general driver-upgrade mechanism.
+
+Portable controls exercise the production transition code and failure boundaries;
+Windows cross compilation checks the real API types. Actual signed catalog
+acceptance, LocalSystem installation, load/unload, interrupted effects and reboot
+behavior still require a compatible signed package and an authorized native host.
+Private DACLs and owned cleanup do not establish hostile-administrator resistance.
+All thirteen prevention gates, private scratch and retained-memory requirements
+remain unchanged and incomplete.

@@ -19,6 +19,8 @@ pub struct SetupStore {
     _lease: std::fs::File,
     #[cfg(windows)]
     _directory: athernex_endpoint_native::windows_state::Directory,
+    #[cfg(windows)]
+    _admission: crate::windows_driver::Admission,
 }
 impl std::ops::Deref for SetupStore {
     type Target = Store;
@@ -30,13 +32,41 @@ pub fn open_store(state: &Path) -> Result<SetupStore> {
     #[cfg(windows)]
     {
         let state = std::path::absolute(state)?;
-        let directory = athernex_endpoint_native::windows_state::Directory::maintenance_under(
-            state.parent().ok_or("Endpoint state has no parent")?,
-            state
-                .file_name()
-                .and_then(|v| v.to_str())
-                .ok_or("Invalid endpoint state directory")?,
-        )?;
+        // A new service-compatible state requires machine admission before creation.
+        let user_directory = if !athernex_endpoint_native::windows_state::is_administrator()? {
+            Some(
+                match athernex_endpoint_native::windows_state::Directory::open(&state) {
+                    Ok(directory) => directory,
+                    Err(e)
+                        if e.downcast_ref::<std::io::Error>()
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                    {
+                        athernex_endpoint_native::windows_state::Directory::create_under(
+                            state.parent().ok_or("Endpoint state has no parent")?,
+                            state
+                                .file_name()
+                                .and_then(|v| v.to_str())
+                                .ok_or("Invalid endpoint state directory")?,
+                        )?
+                    }
+                    Err(e) => return Err(e),
+                },
+            )
+        } else {
+            None
+        };
+        let admission = crate::windows_driver::Admission::acquire(&state)?;
+        let directory = if let Some(directory) = user_directory {
+            directory
+        } else {
+            athernex_endpoint_native::windows_state::Directory::maintenance_under(
+                state.parent().ok_or("Endpoint state has no parent")?,
+                state
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .ok_or("Invalid endpoint state directory")?,
+            )?
+        };
         // Serialize standalone enrollment with an installer's very first
         // preparing record, before either operation creates an identity.
         let lease = directory.maintenance_lock(crate::installer::LOCK)?;
@@ -46,6 +76,7 @@ pub fn open_store(state: &Path) -> Result<SetupStore> {
             store,
             _lease: lease,
             _directory: directory,
+            _admission: admission,
         })
     }
     #[cfg(not(windows))]

@@ -126,6 +126,24 @@ class DriverPackageTests(unittest.TestCase):
         self.assertEqual(len(created),1)
         self.assertIsNotNone(created[0].poll())
 
+    def test_explicit_deployment_survives_snapshot_without_changing_package_bytes(self):
+        self.d['deployment']='install-and-observe-disarmed-v1'
+        self.approval.write_text(json.dumps(self.d))
+        blob, descriptor, contents=self.snapshot()
+        self.assertEqual(blob,self.blob)
+        self.assertEqual(contents,self.parts)
+        self.assertEqual(descriptor,self.d)
+        self.assertEqual(json.loads((self.root/'snapshot'/'descriptor.json').read_bytes())['deployment'],self.d['deployment'])
+
+    def test_unknown_or_implicit_deployment_never_becomes_preparation_only(self):
+        for value in (None,True,{},'armed','install'):
+            with self.subTest(value=value):
+                self.d['deployment']=value
+                self.approval.write_text(json.dumps(self.d))
+                with self.assertRaisesRegex(ValueError,'metadata fields'):
+                    self.snapshot()
+                self.assertFalse((self.root/'snapshot').exists())
+
     def test_approved_container_and_all_snapshot_bytes_match(self):
         blob, descriptor, contents = self.snapshot()
         self.assertEqual((blob, descriptor, contents), (self.blob, self.d, self.parts))

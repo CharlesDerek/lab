@@ -68,7 +68,8 @@ def _snapshot(directory, approval, output):
         descriptor = json.loads(read_regular(approval, 16384), object_pairs_hook=strict_object)
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise ValueError('Invalid driver package metadata encoding') from None
-    if not isinstance(descriptor, dict) or set(descriptor) != FIELDS:
+    if (not isinstance(descriptor, dict) or set(descriptor) not in (FIELDS, FIELDS | {'deployment'})
+            or ('deployment' in descriptor and descriptor['deployment'] != 'install-and-observe-disarmed-v1')):
         raise ValueError('Driver package metadata fields differ')
     if (type(descriptor['schema']) is not int or descriptor['schema'] != 1
             or type(descriptor['expected_abi']) is not int or descriptor['expected_abi'] != 2):

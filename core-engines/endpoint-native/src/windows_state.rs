@@ -19,6 +19,9 @@ pub use scanner::ScannerDirectory;
 
 pub struct Directory(Dir);
 pub struct PinnedDirectory(Dir);
+pub fn is_administrator() -> Result<bool> {
+    crate::mutation::fs::is_administrator()
+}
 pub fn require_administrator() -> Result<()> {
     crate::mutation::fs::require_administrator()
 }
@@ -120,6 +123,9 @@ impl Directory {
     }
     /// A machine-wide installation must remain usable by both LocalSystem and
     /// elevated maintenance accounts, independent of the current user's SID.
+    pub fn require_private_user(&self) -> Result<()> {
+        self.0.user_private()
+    }
     pub fn require_service_access(&self) -> Result<()> {
         self.0.service_private()
     }
@@ -145,6 +151,17 @@ impl Directory {
     /// User-private catalog publication; no administrator requirement or ACL relaxation.
     pub fn write_private_bytes(&self, leaf: &str, bytes: &[u8]) -> Result<()> {
         self.0.write_private_bytes(leaf, bytes)
+    }
+    pub fn publish_recorded_receipt(
+        &self,
+        staged: &str,
+        destination: &str,
+        volume: u64,
+        id: [u8; 16],
+        expected: &athernex_endpoint_protocol::windows_filter_package::Member,
+    ) -> Result<()> {
+        self.0
+            .publish_recorded_receipt(staged, destination, volume, id, expected)
     }
     pub fn read_json<T: DeserializeOwned>(&self, leaf: &str) -> Result<T> {
         self.0.snapshot_json(leaf)
@@ -194,6 +211,17 @@ impl Directory {
     }
     pub fn maintenance_lock(&self, leaf: &str) -> Result<File> {
         Self::lock_file(self.0.maintenance_file(leaf)?)
+    }
+    /// Retained shared admission for ordinary privileged operations. Native
+    /// deployment takes the same empty protected file exclusively.
+    pub fn maintenance_shared_lock(&self, leaf: &str) -> Result<File> {
+        let file = self.0.maintenance_file(leaf)?;
+        if file.metadata()?.len() != 0 {
+            return Err("Windows admission lock is not empty".into());
+        }
+        file.try_lock_shared()
+            .map_err(|_| "A native deployment owns machine admission")?;
+        Ok(file)
     }
     fn lock_file(file: File) -> Result<File> {
         if file.metadata()?.len() != 0 {

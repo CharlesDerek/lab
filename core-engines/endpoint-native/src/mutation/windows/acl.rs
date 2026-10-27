@@ -116,24 +116,59 @@ pub(super) fn maintenance_descriptor() -> Result<Allocation> {
         descriptor()
     }
 }
-pub(super) fn require_administrator() -> Result<()> {
+pub(super) fn is_administrator() -> Result<bool> {
     let token = user()?;
     let system = known_sid("S-1-5-18")?;
     if unsafe { EqualSid(sid(&token), system.0) } != 0 {
-        return Ok(());
+        return Ok(true);
     }
     let admins = known_sid("S-1-5-32-544")?;
     let mut member = 0;
     if unsafe { CheckTokenMembership(null_mut(), admins.0, &mut member) } == 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    if member == 0 {
+    Ok(member != 0)
+}
+pub(super) fn require_administrator() -> Result<()> {
+    if !is_administrator()? {
         return Err(
             "Windows installation requires an elevated administrator or LocalSystem".into(),
         );
     }
     Ok(())
 }
+/// A distinct private user namespace is not a machine-service deployment state.
+/// Do not infer this classification from a failed service ACL query.
+pub(super) fn user_private(file: &File) -> Result<()> {
+    if is_administrator()? {
+        return Err("Expected a non-administrative private-user owner".into());
+    }
+    private_for(file, false)?;
+    let token = user()?;
+    let mut owner = null_mut();
+    let mut raw = null_mut();
+    let code = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &mut raw,
+        )
+    };
+    let _raw = Allocation(raw);
+    if code != 0 {
+        return Err(std::io::Error::from_raw_os_error(code as i32).into());
+    }
+    if owner.is_null() || unsafe { EqualSid(owner, sid(&token)) } == 0 {
+        return Err("Private-user state must be owned by this exact account".into());
+    }
+    Ok(())
+}
+
 fn from_text(text: &str) -> Result<Allocation> {
     let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
     let mut raw: PSECURITY_DESCRIPTOR = null_mut();

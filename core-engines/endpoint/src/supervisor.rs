@@ -567,6 +567,10 @@ fn maintain(binary: &Path, state: &Path, config: &Config) -> Result<Option<Child
 }
 
 pub fn supervise(state: &Path, binary: &Path) -> Result<()> {
+    #[cfg(windows)]
+    let _admission = crate::windows_driver::Admission::acquire(state)?;
+    #[cfg(windows)]
+    crate::windows_driver::require_live(state)?;
     let state = state.canonicalize()?;
     crate::guardian::enter(&state)?;
     // Windows canonicalize adds an extended-path prefix. Retain the absolute
